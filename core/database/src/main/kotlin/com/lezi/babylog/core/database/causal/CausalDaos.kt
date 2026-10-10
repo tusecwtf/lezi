@@ -159,6 +159,7 @@ interface WakeObservationDao {
         expectedMutationId: String,
         expectedContentEpoch: Long,
         newBaseVersion: String,
+        matchesBoundContent: Boolean = true,
     ): CommitFirstSettlementEpoch? {
         val current = getByClientUuid(clientUuid) ?: return null
         val settled = com.lezi.babylog.core.database.causal.settleCommitFirstAcceptedOrMerged(
@@ -166,6 +167,7 @@ interface WakeObservationDao {
             expectedMutationId = expectedMutationId,
             expectedContentEpoch = expectedContentEpoch,
             newBaseVersion = newBaseVersion,
+            matchesBoundContent = matchesBoundContent,
         ) ?: return null
         val cols = settled.state.toAppliedColumns()
         update(
@@ -175,7 +177,7 @@ interface WakeObservationDao {
                 syncDirty = cols.syncDirty,
                 openConflictId = cols.openConflictId,
                 localBranchVersionId = cols.localBranchVersionId,
-                familyPublishedUpdatedAt = expectedContentEpoch,
+                familyPublishedUpdatedAt = if (matchesBoundContent) expectedContentEpoch else current.familyPublishedUpdatedAt,
             ),
         )
         return settled.epoch
@@ -190,6 +192,7 @@ interface WakeObservationDao {
         conflictId: String,
         branchVersionId: String,
         stableBaseVersion: String,
+        matchesBoundContent: Boolean = true,
     ): CommitFirstSettlementEpoch? {
         val current = getByClientUuid(clientUuid) ?: return null
         val settled = com.lezi.babylog.core.database.causal.settleCommitFirstBranched(
@@ -199,6 +202,7 @@ interface WakeObservationDao {
             conflictId = conflictId,
             branchVersionId = branchVersionId,
             stableBaseVersion = stableBaseVersion,
+            matchesBoundContent = matchesBoundContent,
         ) ?: return null
         val cols = settled.state.toAppliedColumns()
         update(
@@ -427,6 +431,14 @@ interface ConflictSnapshotCacheDao {
             "VALUES(:journalKey, :payloadJson, :contentEpoch)",
     )
     suspend fun putTransportJournal(journalKey: String, payloadJson: String, contentEpoch: Long)
+
+    @Query("SELECT * FROM causal_transport_journal WHERE journalKey >= 'restore-file-owner-v1:' " +
+        "AND journalKey < 'restore-file-owner-v1;' ORDER BY journalKey")
+    suspend fun listRestoreFileOwners(): List<CausalTransportJournalEntity>
+
+    @Query("SELECT * FROM causal_transport_journal WHERE journalKey >= 'restore-terminal-spool-cleanup-v1:' " +
+        "AND journalKey < 'restore-terminal-spool-cleanup-v1;' ORDER BY journalKey")
+    suspend fun listRestoreTerminalSpoolSeals(): List<CausalTransportJournalEntity>
 
     @Query("DELETE FROM causal_transport_journal WHERE journalKey = :journalKey")
     suspend fun deleteTransportJournal(journalKey: String)
@@ -769,6 +781,17 @@ fun sourceRelationAutoJournalKey(relationId: String): String =
 
 private const val SOURCE_RELATION_AUTO_MARKER_JSON = "{\"autoAligned\":true}"
 
+/** Shared correlated rule; window readers need not materialize every historical auto display. */
+internal const val AUTO_ALIGNED_RELATION_PREDICATE = """
+    EXISTS (
+        SELECT 1 FROM causal_transport_journal journal
+        WHERE journal.journalKey = '$SOURCE_RELATION_AUTO_JOURNAL_KEY_PREFIX' || relation.relationId
+    ) OR (
+        relation.reason != 'pull_summary'
+        AND relation.mutationId LIKE '$AUTO_NEAR_NEIGHBOR_MUTATION_PREFIX%'
+    )
+"""
+
 private const val AUTO_ALIGNED_DISPLAYS_QUERY = """
     SELECT DISTINCT relation.displayClientUuid
     FROM source_relations relation
@@ -776,17 +799,7 @@ private const val AUTO_ALIGNED_DISPLAYS_QUERY = """
       ON member.relationId = relation.relationId
       AND member.recordClientUuid = relation.displayClientUuid
       AND member.role = 'display'
-    WHERE relation.displayClientUuid != ''
-      AND (
-        EXISTS (
-          SELECT 1 FROM causal_transport_journal journal
-          WHERE journal.journalKey = '$SOURCE_RELATION_AUTO_JOURNAL_KEY_PREFIX' || relation.relationId
-        )
-        OR (
-          relation.reason != 'pull_summary'
-          AND relation.mutationId LIKE '$AUTO_NEAR_NEIGHBOR_MUTATION_PREFIX%'
-        )
-      )
+    WHERE relation.displayClientUuid != '' AND (""" + AUTO_ALIGNED_RELATION_PREDICATE + """)
     ORDER BY relation.displayClientUuid
 """
 
@@ -874,6 +887,69 @@ abstract class SourceRelationDao {
         recordClientUuid: String,
     ): List<SourceRelationMemberEntity>
 
+    /** Call with bounded chunks; the record membership index owns this lookup. */
+    @Query("SELECT * FROM source_relation_members WHERE recordClientUuid IN (:recordClientUuids)")
+    abstract suspend fun listMembersForRecords(recordClientUuids: List<String>): List<SourceRelationMemberEntity>
+
+    @Query("DELETE FROM source_relation_members WHERE recordClientUuid IN (:recordClientUuids)")
+    protected abstract suspend fun deleteMembershipsForRecords(recordClientUuids: List<String>)
+
+    /**
+     * Replace only a proven complete current scope. The caller owns the outer transaction that
+     * retires its command journal. Every prior local peer must be covered before any row changes.
+     * An authoritative absent record removes relation membership, never the Record or its media.
+     */
+    @Transaction
+    open suspend fun replaceCurrentProjection(
+        coveredRecordClientUuids: List<String>,
+        groups: List<CurrentSourceRelationProjection>,
+        observedAt: Long,
+    ) {
+        val covered = coveredRecordClientUuids.toSet()
+        require(covered.size == coveredRecordClientUuids.size && covered.size in 1..4096)
+        require(groups.size <= 64 && groups.map { it.relationId }.distinct().size == groups.size)
+        val projectedMembers = groups.flatMap { listOf(it.displayClientUuid) + it.sourceClientUuids }
+        require(projectedMembers.toSet().size == projectedMembers.size && projectedMembers.all { it in covered })
+        val oldMemberships = coveredRecordClientUuids.chunked(64).flatMap { listMembersForRecords(it) }
+        val oldRelations = oldMemberships.map { it.relationId }.distinct()
+        require(oldRelations.size <= 4096)
+        for (relationId in oldRelations) {
+            require(listMembers(relationId).all { it.recordClientUuid in covered }) {
+                "current source relation projection does not cover every prior local peer"
+            }
+        }
+        val retainedHeaders = groups.associate { group -> group.relationId to get(group.relationId) }
+        val priorAutoDisplays = listAutoAlignedDisplayClientUuids().toSet()
+        oldRelations.forEach { deleteAutoAlignedJournal(it) }
+        groups.forEach { deleteAutoAlignedJournal(it.relationId) }
+        coveredRecordClientUuids.chunked(64).forEach { deleteMembershipsForRecords(it) }
+        for (group in groups) {
+            val memberIds = listOf(group.displayClientUuid) + group.sourceClientUuids
+            require(memberIds.size in 2..64 && group.displayClientUuid !in group.sourceClientUuids)
+            val prior = retainedHeaders[group.relationId]?.takeIf {
+                it.displayClientUuid == group.displayClientUuid && it.mediaRetained &&
+                    (it.displayClientUuid in priorAutoDisplays) == group.autoAligned &&
+                    it.reason in setOf(SourceRelationReason.AUTHOR_DECLARE, SourceRelationReason.OWNER_GROUP_RESOLVE)
+            }
+            val relation = prior ?: group.acceptedProvenance ?: SourceRelationEntity(
+                relationId = group.relationId,
+                displayClientUuid = group.displayClientUuid,
+                mediaRetained = true,
+                reason = SourceRelationReason.PULL_SUMMARY,
+                mutationId = "pull-${group.relationId}:${sourceRelationMemberSetFingerprint(memberIds.toSet())}",
+                createdByMembershipId = "",
+                createdAt = observedAt,
+            )
+            require(relation.relationId == group.relationId && relation.displayClientUuid == group.displayClientUuid)
+            val members = memberIds.map { uuid -> SourceRelationMemberEntity(
+                group.relationId, uuid,
+                if (uuid == group.displayClientUuid) SourceRelationRole.DISPLAY else SourceRelationRole.SOURCE,
+            ) }
+            applyCanonicalTransition(relation, members)
+            if (group.autoAligned) putAutoAlignedJournal(group.relationId)
+        }
+    }
+
     @Query(
         """
         DELETE FROM source_relation_members
@@ -912,6 +988,10 @@ abstract class SourceRelationDao {
         """,
     )
     abstract suspend fun listPendingDeclarations(): List<SourceRelationDeclarationEntity>
+
+    /** Legacy failed rows may contain a lost accepted response; they are not proof of rejection. */
+    @Query("SELECT * FROM source_relation_declarations WHERE status IN ('pending', 'failed') ORDER BY createdAt ASC")
+    abstract suspend fun listUnsettledDeclarations(): List<SourceRelationDeclarationEntity>
 
     /**
      * Apply a source relation + members (+ optional declaration status) atomically.
@@ -1179,6 +1259,10 @@ abstract class SourceRelationDao {
 
 @Dao
 interface MediaReferenceDao {
+    /** Complete inventory, including path aliases carried by a different media UUID. */
+    @Query("SELECT * FROM media_references ORDER BY mediaUuid, holderKind, holderId")
+    suspend fun listAllHolders(): List<MediaReferenceEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(ref: MediaReferenceEntity)
 

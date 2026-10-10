@@ -20,6 +20,37 @@ import org.junit.Test
 
 class HttpSyncBackendKeepAliveTest {
     @Test
+    fun quietHeartbeatsRetireCompletedConnectionsWithoutADataRound() = runTest {
+        var elapsedMillis = 0L
+        val completed = mutableListOf<RecordingHttpsConnection>()
+        val backend = testBackend(
+            connectionFactory = SyncHttpConnectionFactory {
+                RecordingHttpsConnection(200, HANDSHAKE_JSON).also(completed::add)
+            },
+            familyHttpClock = SyncRetryClock { SyncRetryTime(0, elapsedMillis) },
+        )
+        repeat(1_000) {
+            backend.authenticatedHandshake(keepAliveSession())
+            elapsedMillis += 300_000L
+            assertThat(completed.count { it.disconnectCount.get() == 0 }).isAtMost(1)
+        }
+        backend.releaseForegroundKeepAlive()
+        assertThat(completed.all { it.disconnectCount.get() > 0 }).isTrue()
+    }
+
+    @Test
+    fun rapidCompletedRequestsKeepOnlyABoundedNumberOfReusableHandles() = runTest {
+        val completed = mutableListOf<RecordingHttpsConnection>()
+        val backend = testBackend(SyncHttpConnectionFactory {
+            RecordingHttpsConnection(200, HANDSHAKE_JSON).also(completed::add)
+        })
+        repeat(1_000) { backend.authenticatedHandshake(keepAliveSession()) }
+        assertThat(completed.count { it.disconnectCount.get() == 0 }).isAtMost(16)
+        backend.releaseForegroundKeepAlive()
+        assertThat(completed.all { it.disconnectCount.get() == 1 }).isTrue()
+    }
+
+    @Test
     fun handshakeThenPullOnTheSamePinDoesNotDisconnectAfterEach2xx() = runTest {
         val handshake = RecordingHttpsConnection(200, HANDSHAKE_JSON)
         val pull = RecordingHttpsConnection(200, EMPTY_PULL_JSON)
@@ -615,7 +646,7 @@ private class RecordingHttpsConnection(
 }
 
 private val HANDSHAKE_JSON =
-    """{"protocol_version":1,"server_version":"0.4.0","ready":true,"capabilities":["causal_sync_v2"],"principal":{"membership_id":"membership-self","device_id":"device","role":"owner"},"directory_generation":"${"a".repeat(64)}","limits":{"pull_page_max_entities":200,"pull_page_max_encoded_bytes":9437184,"pull_page_max_decoded_bytes":8388608,"pull_max_pages":500,"commit_batch_max_units":64,"media_max_bytes":10485760},"compression":{"pull_response":["gzip","identity"]},"retry_hints":{"retry_after":true}}"""
+    """{"protocol_version":1,"server_version":"0.5.5","ready":true,"capabilities":["causal_sync_v2","nursing_plan_intent_v1"],"principal":{"membership_id":"membership-self","device_id":"device","role":"owner"},"directory_generation":"${"a".repeat(64)}","limits":{"pull_page_max_entities":200,"pull_page_max_encoded_bytes":9437184,"pull_page_max_decoded_bytes":8388608,"pull_max_pages":500,"commit_batch_max_units":64,"media_max_bytes":10485760},"compression":{"pull_response":["gzip","identity"]},"retry_hints":{"retry_after":true}}"""
 
 private const val EMPTY_PULL_JSON =
     """{"entities":[],"cursor":0,"generation":"generation-a","page_index":0,"has_more":false,"family_name":null}"""

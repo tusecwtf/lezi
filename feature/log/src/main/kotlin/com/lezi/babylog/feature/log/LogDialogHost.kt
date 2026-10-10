@@ -51,6 +51,8 @@ internal sealed interface ListDeleteTarget {
 @Composable
 internal fun LogDialogHost(
     showCustomManage: Boolean,
+    customSaveCommand: com.lezi.babylog.core.ui.CustomItemSaveCommandState? = null,
+    onConsumeCustomSaveResult: () -> Unit = {},
     customItems: List<CustomRecordItem>,
     onDismissCustomManage: () -> Unit,
     onAddCustomItem: (String, Int, (String?) -> Unit) -> Unit,
@@ -84,6 +86,8 @@ internal fun LogDialogHost(
             items = customItems,
             onDismiss = onDismissCustomManage,
             onAdd = onAddCustomItem,
+            saveCommand = customSaveCommand,
+            onConsumeSaveResult = onConsumeCustomSaveResult,
             onUpdate = onUpdateCustomItem,
             onDelete = onDeleteCustomItem,
         )

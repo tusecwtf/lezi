@@ -12,6 +12,45 @@ import org.junit.Test
 
 class PhotoAttachmentReconcilerTest {
     @Test
+    fun namedDigestHookAndHistoricalTrailingUuidSupplierRemainDistinct() = runTest {
+        val media = FakeMediaAssetDao()
+        var digestCalls = 0
+        var uuidCalls = 0
+        val reconciler = PhotoAttachmentReconciler.withDigest(
+            media,
+            MediaLocalPathGate(),
+            digestFile = {
+                digestCalls++
+                KNOWN_BYTES_1234_SHA256
+            },
+        ) {
+            uuidCalls++
+            "stable-photo"
+        }
+        val digests = reconciler.digestReadablePaths(listOf("synthetic.jpg"))
+        reconciler.reconcile(
+            owner = PhotoAttachmentOwner.Record(7L),
+            photoLocalPaths = listOf("synthetic.jpg"),
+            at = 100L,
+            contentDigests = digests,
+        )
+        val stored = media.listActiveForRecord(7L).single()
+        assertThat(stored.clientUuid).isEqualTo("stable-photo")
+        assertThat(stored.sha256).isEqualTo(KNOWN_BYTES_1234_SHA256)
+        assertThat(digestCalls).isEqualTo(1)
+        assertThat(uuidCalls).isEqualTo(1)
+
+        val positional = PhotoAttachmentReconciler(media, MediaLocalPathGate(), { "positional-photo" })
+        positional.reconcile(
+            owner = PhotoAttachmentOwner.Record(8L),
+            photoLocalPaths = listOf("synthetic.jpg"),
+            at = 100L,
+            contentDigests = digests,
+        )
+        assertThat(media.listActiveForRecord(8L).single().clientUuid).isEqualTo("positional-photo")
+    }
+
+    @Test
     fun newImportPersistsSixtyFourLowercaseHexWithoutRehashingLater() = runTest {
         val media = FakeMediaAssetDao()
         val file = File.createTempFile("import-sha", ".jpg")
@@ -34,6 +73,7 @@ class PhotoAttachmentReconcilerTest {
             }
 
             val created = media.listActiveForRecord(7L).single()
+            assertThat(created.clientUuid).isEqualTo("media-imported")
             assertThat(created.sha256).isEqualTo(KNOWN_BYTES_1234_SHA256)
             assertThat(created.updatedAt).isEqualTo(100L)
             assertThat(created.syncDirty).isTrue()

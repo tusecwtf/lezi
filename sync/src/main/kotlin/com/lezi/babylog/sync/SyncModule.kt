@@ -90,6 +90,13 @@ abstract class SyncModule {
         )
 
         @Provides
+        @Named("restoreSnapshotsDir")
+        fun restoreSnapshotsDir(@ApplicationContext context: Context): File =
+            // Android may expose filesDir through /data/user/0. Resolve only that trusted
+            // platform base; the store still rejects symlinks in every owned descendant.
+            File(context.filesDir.canonicalFile, "restore-snapshots")
+
+        @Provides
         @Named("causalMediaSpoolCapacityBytes")
         fun causalMediaSpoolCapacityBytes(): Long = 512L * 1024L * 1024L
 

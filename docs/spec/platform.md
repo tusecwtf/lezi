@@ -1,6 +1,9 @@
 # 平台规格（platform）
 
-> 身份钉：current tree **0.5.4** / versionCode **34** / Room **29** / 本地数据契约 **6** /
+> 当前开发代：**0.5.5** / versionCode **35** / Room **29** / 本地数据契约 **7** /
+> server schema **13** / wire **0.5.0** / paired-software floor **35**；未部署，真实渠道与NAS仍为0.5.4。
+> 新代规范和发布阻塞见 [ADR0026](../adr/0026-durable-restore-authority-generation.md)。以下0.5.4身份记录为历史：
+> **0.5.4** / versionCode **34** / Room **29** / 本地数据契约 **6** /
 > server schema **13** / floor **21**；协议代 0.4.0（conflict-v2）。家庭 NAS 与
 > `deploy/app-update.json` 均已切 **0.5.4**（2026-09-30 协同维护窗：Cargo、渠道与
 > 0.5.4/34 APK 同抬，树内 lezi-sync 行为修复随之上线）。构建真值以
@@ -127,9 +130,13 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 }
 ```
 
-**当前 floor** 以 `config/android-release-compatibility.json` 的
-`minimum_sync_version_code` 与部署 `app-update.json` 的 `min_supported_version_code`
-为唯一真值（floor **21**；当前升级目标 **34** / 0.5.4）。发版与 CD 前必须重核 catalog、`app-update.json`、
+**当前真实渠道 floor21/code34** 由保留的已验证 `app-update.json` 表示。
+`config/android-release-compatibility.json` 的 minimum_sync_version_code35 与 upgrade_target35/0.5.5
+是新代发布目标，不证明APK已生成或生产floor已激活。二者当前有意不同；签名APK35与真实metadata、
+完整的既有 schema13／Room29 升级兼容验证和单独部署授权齐备前不得发布新渠道或替换NAS。
+本代保留 schema13，不要求或授权13→14转换；配套软件升级仍须满足亲喂计划新取值规则，
+不能仅因数据库 schema 未变就允许旧客户端混用，或承诺写入新取值后可降级旧服务端。
+发版与 CD 前必须重核 catalog、`app-update.json`、
 Cargo/Gradle 与签名 APK sha256 一致；不得沿用历史 16/0.3.9 或 16/0.3.12 示例当生产 floor。
 
 触发：① 已加入且前台对信任 endpoint 握手/同步时顺带检查——0.5 起带节流门控：用户真实触发
@@ -139,8 +146,9 @@ Cargo/Gradle 与签名 APK sha256 一致；不得沿用历史 16/0.3.9 或 16/0.
 仍执行 piggyback 的轮。
 可选更新：确认层 → 下载 → sha256 → **归档身份校验**（包名 / versionCode / 签名）→
 PackageInstaller；失败清理私有暂存且**不** commit 异包。账户区非阻塞横幅，同一 versionCode
-**进程会话内**「稍后」不再刷屏。强制更新：根全屏（含 onboarding 之上）消费系统返回键并遮罩主功能；有包时
-立即安装（同一装前身份门），元数据暂缺时仅「重试检查更新」；壳内可 reauth 与 8767 邀请安装引导。
+**进程会话内**「稍后」不再刷屏。强制更新：根全屏（含 onboarding 之上）消费系统返回键并遮罩主功能。
+在强制壳内展开会话恢复后，系统返回只收起恢复并回到强制壳，不结束持有未保存业务草稿的 Activity，也不挂回普通业务页面。
+有包时立即安装（同一装前身份门），元数据暂缺时仅「重试检查更新」；壳内可 reauth 与 8767 邀请安装引导。
 详细同步门槛与错误语义见
 [sync-trusted-endpoint.md](./contracts/sync-trusted-endpoint.md)；部署 runbook 见
 [`tools/lezi-sync/deploy/DEPLOY.md`](../../tools/lezi-sync/deploy/DEPLOY.md)。
@@ -154,8 +162,8 @@ PackageInstaller；失败清理私有暂存且**不** commit 异包。账户区�
 2. **先抬 floor：** 在 `app-update.json` 将 `min_supported_version_code` 提到**能解析新 shape 的最低官方 versionCode**；同时准备该 versionCode（或更高）的 **已签名 release APK**，`sha256` 与包一致。
 3. **先发布可安装通道：** CD 原子对发布（APK 再 metadata），确认 `load_verified` 成功；旧客户端随后在权威 sync / restore 写路径收到 `client_update_required` 并能装包。
 4. **再启用新写入：** 仅当通道已验证后，再让新客户端/服务端发布破坏性 shape。
-5. **支持范围内 wire 冻结：** 当前 floor 以 catalog `minimum_sync_version_code`（tree **21**）为准，到最新 versionCode 之间 wire/`schema_version`/allowlist 视为冻结；该范围内多机可混用。下一轮任何破坏性变更必须先执行 2–4，**禁止**指望旧机 skip-unknown。低于 floor 的已发布版本仍可取得 APK，但不能借此继续使用旧同步 wire。
-6. **0.4.0 因果切割已完成：** 新实体 `wake_observation`、因果字段 `base_version`/`mutation_id`/`version_id`、verdict 枚举与移除服务器近邻落选均属破坏性 wire。当前 floor=21、schema 13。权威 shape 见 [`causal-sync-wire.md`](./contracts/causal-sync-wire.md)。
+5. **支持范围内 wire 冻结：** 源码发布目标 floor 以 catalog `minimum_sync_version_code`（本代 **35**）为准，到最新 versionCode 之间 wire/`schema_version`/allowlist 视为冻结；该范围内多机可混用。下一轮任何破坏性变更必须先执行 2–4，**禁止**指望旧机 skip-unknown。低于 floor 的已发布版本仍可取得 APK，但不能借此继续使用旧同步 wire。
+6. **0.4.0 因果切割已完成：** 新实体 `wake_observation`、因果字段 `base_version`/`mutation_id`/`version_id`、verdict 枚举与移除服务器近邻落选均属破坏性 wire。该历史发布的 floor=21、schema 13；本代保留 schema13，但因亲喂计划取值域扩展采用 wire0.5.0／floor35，并在更新渠道缺失时仍强制校验版本与 `nursing_plan_intent_v1`。真实已发布渠道仍以 §4.2 的已验证元数据为准。权威 shape 见 [`causal-sync-wire.md`](./contracts/causal-sync-wire.md)。
 
 完整运维条目见 [`tools/lezi-sync/deploy/DEPLOY.md`](../../tools/lezi-sync/deploy/DEPLOY.md)「Wire-break checklist」。
 

@@ -95,6 +95,38 @@ import com.lezi.babylog.domain.toModel
 // Split from CareLogTest kitchen sink by contract cluster (ticket 06).
 class CareLogCustomItemTest {
     @Test
+    fun editingATombstonedCustomItemFailsWithoutRevivingOrAddingIt() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        care.createBaby(CreateBabyInput(nickname = "测试宝宝", birthdayEpochDay = 1))
+        val id = care.addCustomItem("草稿的原项目", 0)
+        val intendedEdit = care.observeCustomItems().first().single().copy(name = "未提交的新名称")
+        care.deleteCustomItem(id)
+        val before = fakes.customItems.listAllIncludingDeleted()
+
+        val failure = runCatching { care.updateCustomItem(intendedEdit) }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(IllegalStateException::class.java)
+        assertThat(failure).hasMessageThat().isEqualTo("自定义项目已删除，请重新打开")
+        assertThat(fakes.customItems.listAllIncludingDeleted()).containsExactlyElementsIn(before)
+        assertThat(care.observeCustomItems().first()).isEmpty()
+    }
+
+    @Test
+    fun editingAMissingCustomItemFailsWithoutTurningIntoAnAdd() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        care.createBaby(CreateBabyInput(nickname = "测试宝宝", birthdayEpochDay = 1))
+        val intendedEdit = CustomRecordItem(999, "未提交的新名称", 0, 0, clientUuid = "missing-custom")
+
+        val failure = runCatching { care.updateCustomItem(intendedEdit) }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(IllegalStateException::class.java)
+        assertThat(failure).hasMessageThat().isEqualTo("自定义项目已不存在，请重新打开")
+        assertThat(fakes.customItems.listAllIncludingDeleted()).isEmpty()
+    }
+
+    @Test
     fun updateAndMoveCustomItemsUseSharedDatabaseTransactions() = runTest {
         val fakes = Fakes()
         val care = fakes.careLog()

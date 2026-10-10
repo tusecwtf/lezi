@@ -2,15 +2,23 @@ package com.lezi.babylog.core.common
 
 import com.google.common.truth.Truth.assertThat
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertThrows
 import org.junit.Test
@@ -116,6 +124,65 @@ class DefaultLocalDataGateTest {
     }
 
     @Test
+    fun readyStateIsVisibleBeforeAnUndispatchedWaiterResumes() = runBlocking {
+        val verificationStarted = CompletableDeferred<Unit>()
+        val releaseVerification = CompletableDeferred<Unit>()
+        val gate = DefaultLocalDataGate(
+            currentContractVersion = 1,
+            minimumMigratableContractVersion = 1,
+            steps = emptySet(),
+            environment = object : LocalDataUpgradeEnvironment {
+                override suspend fun inspect() = LocalDataInspection(1)
+                override suspend fun prepareSnapshot(step: LocalDataUpgradeStep) = Unit
+                override suspend fun commitContract(contractVersion: Int) = Unit
+                override suspend fun cleanupSnapshots() = Unit
+                override suspend fun verifyCurrent() {
+                    verificationStarted.complete(Unit)
+                    releaseVerification.await()
+                }
+                override fun diagnosticContext(): String = "ready-publication"
+            },
+        )
+        // Unconfined resumes inline in deferred.complete(), exposing any gap
+        // between waking a caller and publishing the same StateFlow outcome.
+        val observation = async(Dispatchers.Unconfined) {
+            val result = gate.retry()
+            result to gate.state.value
+        }
+        verificationStarted.await()
+        assertThat(gate.state.value).isEqualTo(LocalDataUpgradeState.Checking)
+        releaseVerification.complete(Unit)
+
+        val (returned, observed) = observation.await()
+        assertThat(returned).isEqualTo(LocalDataUpgradeState.Ready(1))
+        assertThat(observed).isEqualTo(returned)
+    }
+
+    @Test
+    fun timeoutStateIsVisibleBeforeAnUndispatchedWaiterResumes() = runBlocking {
+        val gate = DefaultLocalDataGate(
+            currentContractVersion = 1,
+            minimumMigratableContractVersion = 1,
+            steps = emptySet(),
+            environment = HangingEnvironment(hangOn = HangPoint.Inspect),
+            maxElapsedMillis = 150L,
+        )
+        val observation = async(Dispatchers.Unconfined) {
+            val result = gate.retry()
+            result to gate.state.value
+        }
+
+        val (returned, observed) = observation.await()
+        assertThat(returned).isEqualTo(
+            LocalDataUpgradeState.Blocked(
+                LocalDataUpgradeBlockReason.TimedOut,
+                "本地数据安全检查超时",
+            ),
+        )
+        assertThat(observed).isEqualTo(returned)
+    }
+
+    @Test
     fun cancellationIsNeverConvertedIntoARecoveryBlock() {
         val gate = DefaultLocalDataGate(
             currentContractVersion = 1,
@@ -190,6 +257,165 @@ class DefaultLocalDataGateTest {
     }
 
     @Test
+    fun cancelledFirstWaiterDoesNotDisarmAttemptDeadlineForJoiner() = runBlocking {
+        val inspectStarted = CompletableDeferred<Unit>()
+        val releaseInspect = CompletableDeferred<Unit>()
+        val gate = DefaultLocalDataGate(
+            currentContractVersion = 1,
+            minimumMigratableContractVersion = 1,
+            steps = emptySet(),
+            environment = object : LocalDataUpgradeEnvironment {
+                override suspend fun inspect(): LocalDataInspection {
+                    inspectStarted.complete(Unit)
+                    withContext(NonCancellable) { releaseInspect.await() }
+                    return LocalDataInspection(1)
+                }
+                override suspend fun prepareSnapshot(step: LocalDataUpgradeStep) = Unit
+                override suspend fun commitContract(contractVersion: Int) = Unit
+                override suspend fun cleanupSnapshots() = Unit
+                override suspend fun verifyCurrent() = Unit
+                override fun diagnosticContext(): String = "cancelled-waiter"
+            },
+            maxElapsedMillis = 150L,
+        )
+        val previousThreads = Thread.getAllStackTraces().keys
+        try {
+            val first = async(start = CoroutineStart.UNDISPATCHED) { gate.retry() }
+            inspectStarted.await()
+            val deadlineThreads = Thread.getAllStackTraces().keys.filter {
+                it.name == "lezi-local-data-gate" && it !in previousThreads
+            }
+            assertThat(deadlineThreads).hasSize(1)
+            first.cancelAndJoin()
+
+            // This bound detects a lost product watchdog; it does not drive it.
+            val joined = withTimeoutOrNull(5_000L) { gate.retry() }
+            assertThat(joined).isEqualTo(
+                LocalDataUpgradeState.Blocked(
+                    LocalDataUpgradeBlockReason.TimedOut,
+                    "本地数据安全检查超时",
+                ),
+            )
+            assertThat(gate.state.value).isEqualTo(joined)
+            assertThat(releaseInspect.isCompleted).isFalse()
+            deadlineThreads.single().join(5_000L)
+            assertThat(deadlineThreads.single().isAlive).isFalse()
+        } finally {
+            releaseInspect.complete(Unit)
+        }
+    }
+
+    @Test
+    fun cancellingWaitersKeepsCommittedMigrationAndSuccessClosesDeadline() = runBlocking {
+        val events = mutableListOf<String>()
+        val migrationCommitted = CompletableDeferred<Unit>()
+        val releaseVerification = CompletableDeferred<Unit>()
+        val step = object : LocalDataUpgradeStep {
+            override val fromContractVersion = 1
+            override val toContractVersion = 2
+            override val affectedDomains = setOf(LocalDataDomain.Room)
+            override suspend fun migrate() {
+                events += "migrate-committed"
+                migrationCommitted.complete(Unit)
+            }
+            override suspend fun verify() {
+                releaseVerification.await()
+                events += "verify-step"
+            }
+        }
+        val gate = DefaultLocalDataGate(
+            currentContractVersion = 2,
+            minimumMigratableContractVersion = 1,
+            steps = setOf(step),
+            environment = RecordingEnvironment(events, sourceContractVersion = 1),
+        )
+        val previousThreads = Thread.getAllStackTraces().keys
+        try {
+            val first = async(start = CoroutineStart.UNDISPATCHED) { gate.retry() }
+            migrationCommitted.await()
+            val deadlineThreads = Thread.getAllStackTraces().keys.filter {
+                it.name == "lezi-local-data-gate" && it !in previousThreads
+            }
+            assertThat(deadlineThreads).hasSize(1)
+            first.cancelAndJoin()
+            val cancelledJoiner = async(start = CoroutineStart.UNDISPATCHED) { gate.retry() }
+            cancelledJoiner.cancelAndJoin()
+            val remainingJoiner = async(start = CoroutineStart.UNDISPATCHED) { gate.retry() }
+            assertThat(gate.state.value).isEqualTo(LocalDataUpgradeState.Migrating(1, 2))
+            releaseVerification.complete(Unit)
+
+            val result = withTimeout(5_000L) { remainingJoiner.await() }
+            assertThat(result).isEqualTo(LocalDataUpgradeState.Ready(2))
+            assertThat(gate.state.value).isEqualTo(result)
+            assertThat(events).containsExactly(
+                "inspect", "snapshot-1-2-Room", "migrate-committed", "verify-step",
+                "commit-2", "verify-current", "cleanup",
+            ).inOrder()
+            // The successful attempt has a 45s product deadline. Joining its
+            // timer thread verifies cleanup without sleeping until expiry.
+            deadlineThreads.single().join(5_000L)
+            assertThat(deadlineThreads.single().isAlive).isFalse()
+        } finally {
+            releaseVerification.complete(Unit)
+        }
+    }
+
+    @Test
+    fun timedOutInspectionCannotPublishLateProgressOverNewReadyGeneration() = runBlocking {
+        val inspectCalls = AtomicInteger()
+        val staleMutations = AtomicInteger()
+        val firstStarted = CompletableDeferred<Unit>()
+        val firstWorkerFinished = CompletableDeferred<Unit>()
+        val releaseFirstInspection = CountDownLatch(1)
+        val step = object : LocalDataUpgradeStep {
+            override val fromContractVersion = 1
+            override val toContractVersion = 2
+            override val affectedDomains = setOf(LocalDataDomain.Room)
+            override suspend fun migrate() { staleMutations.incrementAndGet() }
+            override suspend fun verify() = Unit
+        }
+        val gate = DefaultLocalDataGate(
+            currentContractVersion = 2,
+            minimumMigratableContractVersion = 1,
+            steps = setOf(step),
+            environment = object : LocalDataUpgradeEnvironment {
+                override suspend fun inspect(): LocalDataInspection {
+                    if (inspectCalls.incrementAndGet() == 1) {
+                        currentCoroutineContext().job.invokeOnCompletion { firstWorkerFinished.complete(Unit) }
+                        firstStarted.complete(Unit)
+                        // Model a blocking storage call that ignores coroutine cancellation.
+                        check(releaseFirstInspection.await(5, TimeUnit.SECONDS)) { "inspection not released" }
+                        return LocalDataInspection(1)
+                    }
+                    return LocalDataInspection(2)
+                }
+                override suspend fun prepareSnapshot(step: LocalDataUpgradeStep) { staleMutations.incrementAndGet() }
+                override suspend fun commitContract(contractVersion: Int) { staleMutations.incrementAndGet() }
+                override suspend fun cleanupSnapshots() = Unit
+                override suspend fun verifyCurrent() = Unit
+                override fun diagnosticContext(): String = "late-inspection"
+            },
+            maxElapsedMillis = 150L,
+        )
+        try {
+            val first = async(start = CoroutineStart.UNDISPATCHED) { gate.retry() }
+            firstStarted.await()
+            assertThat(withTimeout(5_000L) { first.await() }).isEqualTo(
+                LocalDataUpgradeState.Blocked(LocalDataUpgradeBlockReason.TimedOut, "本地数据安全检查超时"),
+            )
+            assertThat(gate.retry()).isEqualTo(LocalDataUpgradeState.Ready(2))
+            releaseFirstInspection.countDown()
+            withTimeout(5_000L) { firstWorkerFinished.await() }
+
+            assertThat(gate.state.value).isEqualTo(LocalDataUpgradeState.Ready(2))
+            assertThat(inspectCalls.get()).isEqualTo(2)
+            assertThat(staleMutations.get()).isEqualTo(0)
+        } finally {
+            releaseFirstInspection.countDown()
+        }
+    }
+
+    @Test
     fun uncancelableInspectDoesNotBlockTheNextRetryGeneration() = runBlocking {
         val inspectStarts = AtomicInteger()
         val firstInspectStarted = CompletableDeferred<Unit>()
@@ -217,25 +443,17 @@ class DefaultLocalDataGateTest {
 
         assertThat(gate.ensureReady()).isFalse()
         firstInspectStarted.await()
-        // The timeout watchdog completes `published` before publishing state, so the
-        // flow can lag retry()/ensureReady()'s return by a scheduling quantum:
-        // await the value instead of racing it.
-        withTimeout(5_000) {
-            gate.state.first { it is LocalDataUpgradeState.Blocked }
-        }
+        assertThat(gate.state.value).isEqualTo(
+            LocalDataUpgradeState.Blocked(
+                LocalDataUpgradeBlockReason.TimedOut,
+                "本地数据安全检查超时",
+            ),
+        )
 
         val second = gate.retry()
         assertThat(inspectStarts.get()).isEqualTo(2)
         assertThat(second).isInstanceOf(LocalDataUpgradeState.Blocked::class.java)
-        val settledState = withTimeoutOrNull(5_000) {
-            gate.state.first {
-                it == LocalDataUpgradeState.Blocked(
-                    LocalDataUpgradeBlockReason.TimedOut,
-                    "本地数据安全检查超时",
-                )
-            }
-        }
-        assertThat(settledState).isNotNull()
+        assertThat(gate.state.value).isEqualTo(second)
     }
 
     @Test

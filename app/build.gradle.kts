@@ -64,10 +64,17 @@ android {
         applicationId = "com.lezi.babylog"
         minSdk = 26
         targetSdk = 35
-        versionCode = 34
-        versionName = "0.5.4"
+        versionCode = 35
+        versionName = "0.5.5"
 
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // Select the dedicated startup test APK without changing ordinary instrumentation.
+        testInstrumentationRunner = if (
+            providers.gradleProperty("leziStartupReadinessAcceptance").orNull == "true"
+        ) {
+            "com.lezi.babylog.validation.ProductionStartupTestRunner"
+        } else {
+            "androidx.test.runner.AndroidJUnitRunner"
+        }
         manifestPlaceholders["localDataContractVersion"] = currentLocalDataContract
         // Chinese-only product surface: ship only zh + en library locale
         // tables (default config is always kept) instead of every locale.
@@ -358,11 +365,17 @@ val validateAndroidAppUpdateMetadataCompatibility = tasks.register(
         check(appUpdateMetadata["package_name"] == androidReleaseCompatibility["application_id"]) {
             "App-update metadata package_name must match the Android applicationId"
         }
-        check(
-            appUpdateMetadata["min_supported_version_code"] ==
-                androidReleaseCompatibility["minimum_sync_version_code"],
-        ) {
-            "The compatibility catalog and app-update metadata must share one sync floor"
+        // A source build can lead the real signed channel. Validate that channel's exact
+        // recorded historical floor; never fabricate new release metadata to compile sources.
+        // Packaging retains its current-generation APK/contract/floor checks independently.
+        val channelRelease = cataloguedAndroidVersions.singleOrNull {
+            it["version_code"] == appUpdateMetadata["version_code"] &&
+                it["version_name"] == appUpdateMetadata["version_name"]
+        }
+        val channelFloor = channelRelease?.get("minimum_sync_version_code")
+            ?: androidReleaseCompatibility["minimum_sync_version_code"]
+        check(appUpdateMetadata["min_supported_version_code"] == channelFloor) {
+            "App-update metadata must match its exact release's recorded sync floor"
         }
         val allowedMetadataIdentities = listOf(
             releasedAndroidVersions.last(),
@@ -380,7 +393,7 @@ val validateAndroidAppUpdateMetadataCompatibility = tasks.register(
 }
 
 tasks.matching { it.name in setOf("preDebugBuild", "preReleaseBuild") }.configureEach {
-    dependsOn(validateLocalDataContractLedger, validateAndroidReleaseCompatibilityCatalog)
+    dependsOn(validateLocalDataContractLedger, validateAndroidReleaseCompatibilityCatalog, validateAndroidAppUpdateMetadataCompatibility)
 }
 
 dependencies {

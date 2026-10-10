@@ -6,6 +6,8 @@ import android.graphics.Matrix
 import androidx.exifinterface.media.ExifInterface
 import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.model.RecordPhotoResourcePolicy
+import com.lezi.babylog.core.common.MediaContentDigest
+import java.security.MessageDigest
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.io.FilterOutputStream
@@ -29,6 +31,23 @@ data class LocalMediaInfo(
     val height: Int?,
 )
 
+/** Published bytes are reused verbatim; normalization is only for a new identity. */
+data class PublishedMediaIdentity(
+    // Older downloaded rows can lack a cached digest. They still keep exact bytes;
+    // the frozen manifest hashes that snapshot and server immutable identity validates it.
+    val sha256: String?,
+    val byteSize: Long,
+    val mime: String?,
+    val width: Int?,
+    val height: Int?,
+) {
+    init {
+        sha256?.let(MediaContentDigest::requireValid)
+        require(byteSize in 1L..RecordPhotoResourcePolicy.maxUploadBytes)
+        requireCanonicalMediaMime(mime)
+    }
+}
+
 interface SyncMediaUploadSource {
     /** HTTP body length (`Content-Length`). Zero for a family-blob bind PUT. */
     val contentLength: Long
@@ -44,7 +63,7 @@ interface SyncMediaUploadSource {
 
 class PreparedMedia(
     val file: File,
-    override val mime: String,
+    override val mime: String?,
     val width: Int? = null,
     val height: Int? = null,
 ) : SyncMediaUploadSource, AutoCloseable {
@@ -78,6 +97,9 @@ interface SyncMediaFileStore {
         return file.takeIf { it.isFile && it.canRead() }
     }
 
+    /** Restore capture must retain descendant paths so its no-symlink check sees the actual source. */
+    fun restoreSourceFile(localUri: String): File? = readableFile(localUri)
+
     /**
      * Cheap length-only probe for repair pre-filters: one stat, no decode.
      * Null when the file is absent or unreadable. Default rides [readableFile].
@@ -85,13 +107,58 @@ interface SyncMediaFileStore {
     fun statLength(localUri: String): Long? = readableFile(localUri)?.length()
 
     suspend fun inspect(localUri: String): LocalMediaInfo?
+    /** Normalize a source which has not yet been assigned a published byte identity. */
     suspend fun prepareUpload(localUri: String): PreparedMedia
+
+    /** Snapshot and verify existing bytes without any image decode, orientation or recompression. */
+    suspend fun preparePublishedUpload(
+        localUri: String,
+        identity: PublishedMediaIdentity,
+    ): PreparedMedia = withContext(Dispatchers.IO) {
+        val source = requireNotNull(readableFile(localUri)) { "已发布媒体的本地文件不可读" }
+        require(source.length() == identity.byteSize) { "已发布媒体长度发生变化" }
+        val temporary = File.createTempFile("published-media-", ".tmp")
+        var handedOff = false
+        try {
+            val digest = MessageDigest.getInstance("SHA-256")
+            var copied = 0L
+            source.inputStream().buffered(RecordPhotoResourcePolicy.streamBufferBytes).use { input ->
+                temporary.outputStream().buffered(RecordPhotoResourcePolicy.streamBufferBytes).use { output ->
+                    val buffer = ByteArray(RecordPhotoResourcePolicy.streamBufferBytes)
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        if (count == 0) continue
+                        copied += count
+                        require(copied <= identity.byteSize) { "已发布媒体长度发生变化" }
+                        digest.update(buffer, 0, count)
+                        output.write(buffer, 0, count)
+                    }
+                }
+            }
+            require(copied == identity.byteSize &&
+                (identity.sha256 == null ||
+                    digest.digest().joinToString("") { "%02x".format(it) } == identity.sha256)
+            ) { "已发布媒体内容身份发生变化" }
+            PreparedMedia(temporary, identity.mime, identity.width, identity.height).also {
+                handedOff = true
+            }
+        } finally {
+            if (!handedOff) temporary.delete()
+        }
+    }
     suspend fun saveDownloaded(
         clientUuid: String,
         kind: String,
         bytes: ByteArray,
         mime: String?,
     ): String
+
+    /** Reserve the exact destination durably before creating downloaded bytes. */
+    suspend fun saveDownloadedOwned(clientUuid: String, kind: String, bytes: ByteArray,
+        mime: String?, reserve: suspend (String) -> Unit): String =
+        throw UnsupportedOperationException("durable download ownership is unavailable")
 
     /**
      * Deletes a local media file when present (missing = success).
@@ -123,6 +190,24 @@ class AndroidSyncMediaFileStore @Inject constructor(
 ) : SyncMediaFileStore {
     override fun readableFile(localUri: String): File? =
         resolve(localUri)?.takeIf { it.isFile && it.canRead() }
+
+    override fun restoreSourceFile(localUri: String): File? {
+        if (localUri.isBlank()) return null
+        val suppliedBase = context.filesDir.absoluteFile.toPath().normalize()
+        val canonicalBase = context.filesDir.canonicalFile.toPath()
+        val raw = File(localUri).toPath()
+        val candidate = if (!raw.isAbsolute) canonicalBase.resolve(raw).normalize() else {
+            val absolute = raw.normalize()
+            when {
+                absolute.startsWith(suppliedBase) -> canonicalBase.resolve(suppliedBase.relativize(absolute))
+                absolute.startsWith(canonicalBase) -> absolute
+                else -> return null
+            }
+        }
+        if (candidate == canonicalBase || !candidate.startsWith(canonicalBase)) return null
+        // Do not canonicalize the candidate: the snapshot owner must reject any leaf/ancestor symlink.
+        return candidate.toFile().takeIf { it.isFile && it.canRead() }
+    }
 
     override suspend fun inspect(localUri: String): LocalMediaInfo? = withContext(Dispatchers.IO) {
         val file = readableFile(localUri) ?: return@withContext null
@@ -243,7 +328,14 @@ class AndroidSyncMediaFileStore @Inject constructor(
         kind: String,
         bytes: ByteArray,
         mime: String?,
-    ): String = withContext(Dispatchers.IO) {
+    ): String = saveDownloadedFile(clientUuid, kind, bytes, mime) {}
+
+    override suspend fun saveDownloadedOwned(clientUuid: String, kind: String, bytes: ByteArray,
+        mime: String?, reserve: suspend (String) -> Unit): String =
+        saveDownloadedFile(clientUuid, kind, bytes, mime, reserve)
+
+    private suspend fun saveDownloadedFile(clientUuid: String, kind: String, bytes: ByteArray,
+        mime: String?, reserve: suspend (String) -> Unit): String = withContext(Dispatchers.IO) {
         require(bytes.isNotEmpty()) { "家庭服务器返回了空媒体" }
         val safeUuid = runCatching { UUID.fromString(clientUuid).toString() }
             .getOrElse { throw IllegalArgumentException("媒体同步标识无效") }
@@ -253,17 +345,21 @@ class AndroidSyncMediaFileStore @Inject constructor(
         }
         val extension = extensionForMime(mime)
         val target = File(directory, "sync_$safeUuid.$extension")
+        val localUri = if (kind == "avatar") target.relativeTo(context.filesDir).path else target.absolutePath
+        reserve(localUri)
         val temporary = File.createTempFile(".sync_", ".tmp", directory)
         try {
-            temporary.outputStream().buffered().use { it.write(bytes) }
+            temporary.outputStream().use { output -> output.write(bytes); output.fd.sync() }
             if (!temporary.renameTo(target)) {
                 temporary.copyTo(target, overwrite = true)
                 check(temporary.delete()) { "无法清理媒体临时文件" }
             }
+            java.nio.channels.FileChannel.open(target.toPath(), java.nio.file.StandardOpenOption.WRITE).use { it.force(true) }
+            java.nio.channels.FileChannel.open(directory.toPath(), java.nio.file.StandardOpenOption.READ).use { it.force(true) }
         } finally {
             temporary.delete()
         }
-        if (kind == "avatar") target.relativeTo(context.filesDir).path else target.absolutePath
+        localUri
     }
 
     override suspend fun delete(localUri: String) = withContext(Dispatchers.IO) {

@@ -1,4 +1,7 @@
 package com.lezi.babylog.feature.log
+
+import com.lezi.babylog.domain.carelog.CareWakeId
+import com.lezi.babylog.domain.carelog.CorrectCareWake
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -13,7 +16,6 @@ import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RootPublicationState
 import com.lezi.babylog.core.model.SettingsLocal
-import com.lezi.babylog.core.model.isWakeShortcutTarget
 import com.lezi.babylog.designsystem.TimelineLaneSegment
 import com.lezi.babylog.designsystem.TimelinePanGesture
 import com.lezi.babylog.domain.CareLog
@@ -214,59 +216,23 @@ class LogViewModel @Inject constructor(
                     railStartMillis = rail.startMillis,
                     railEndMillis = rail.endMillis,
                 ),
-            ).combine(careLog.observeSourceRoleClientUuids()) { snapshot, sourceRoles ->
-                snapshot to sourceRoles
-            }.combine(careLog.observeAutoAlignedDisplayClientUuids()) { pair, autoAligned ->
-                Triple(pair.first, pair.second, autoAligned)
-            }.combine(syncPort.session()) { triple, session ->
-                triple to session.lastSuccessAt
-            }.combine(screenTimeFlow) { (triple, lastSuccessAt), screenTime ->
-                Triple(triple, lastSuccessAt, screenTime)
-            }.mapLatest { (triple, lastSuccessAt, screenTime) ->
-                val (snapshot, sourceRoles, autoAligned) = triple
-                val rawRecords = snapshot.recordRows.map(TimelineRecordRow::record)
-                val rawRail = snapshot.railRecordRows.map(TimelineRecordRow::record)
-                val records = careLog.projectOrdinaryRecords(rawRecords, sourceRoles)
-                val railRecords = careLog.projectOrdinaryRecords(rawRail, sourceRoles)
-                val duplicateProjection = careLog.suspectedDuplicateProjection(
-                    records = rawRail,
-                    startDate = day,
-                    dayCount = 1,
-                    zone = zone,
-                    now = screenTime.epochMillis,
-                    sourceRoleClientUuids = sourceRoles,
-                )
-                val openGroups = duplicateProjection.openGroups
-                val bounds = duplicateProjection.bounds.days.single()
-                val duplicateMemberUuids = openGroups
-                    .flatMapTo(linkedSetOf()) { it.memberClientUuids }
-                val duplicatePresentationRecords = (rawRecords + rawRail.filter {
-                    it.clientUuid in duplicateMemberUuids
-                }).distinctBy { it.clientUuid }
-                val duplicateRows = careLog.timelineDuplicateRows(
-                    duplicatePresentationRecords,
-                    sourceRoleClientUuids = sourceRoles,
-                    projection = duplicateProjection,
-                )
-                val nowMs = screenTime.epochMillis
-                val plans = snapshot.planRows.map(TimelineCarePlanRow::carePlan).sortedWith(
-                    compareBy<CarePlan> {
-                        if (it.effectiveStatus(nowMs) == CarePlanStatus.MISSED) 0 else 1
-                    }.thenBy { it.scheduledAt },
-                )
+                nowMillis = screenTimeFlow.map { it.epochMillis },
+            ).mapLatest { snapshot ->
+                val records = snapshot.recordRows.map(TimelineRecordRow::record)
+                val railRecords = snapshot.railRecordRows.map(TimelineRecordRow::record)
+                val bounds = snapshot.summaryBounds
+                val plans = snapshot.planRows.map(TimelineCarePlanRow::carePlan)
                 val summary = bounds.toDailySummaryPreferMax()
                 val lanes = buildTimelineLanes(
                     records = railRecords,
                     clipStartMs = snapshot.request.railStartMillis,
                     clipEndExclusiveMs = snapshot.request.railEndMillis,
                     zoneId = zone,
-                    nowMs = screenTime.epochMillis,
+                    nowMs = snapshot.evaluatedAtMillis,
                     familyJoined = snapshot.audience.isFamilyJoined,
-                    lastSuccessAtMs = lastSuccessAt,
+                    lastSuccessAtMs = snapshot.lastSuccessAtMillis,
                 )
-                val recordMetadata = snapshot.recordRows
-                    .filter { it.record.clientUuid !in sourceRoles }
-                    .associateBy { it.record.id }
+                val recordMetadata = snapshot.recordRows.associateBy { it.record.id }
                 val planMetadata = snapshot.planRows.associateBy { it.carePlan.id }
                 LogUiState(
                     loading = false,
@@ -276,27 +242,15 @@ class LogViewModel @Inject constructor(
                     records = records,
                     summary = summary,
                     summaryBounds = bounds.takeIf { it.hasUncertainty },
-                    openDuplicateGroups = openGroups,
-                    timelineDuplicateRows = duplicateRows,
+                    openDuplicateGroups = snapshot.openDuplicateGroups,
+                    timelineDuplicateRows = snapshot.duplicateRows,
                     sleepLanes = lanes.sleep,
                     feedLanes = lanes.feed,
                     careLanes = lanes.care,
                     settings = settings,
-                    openSleep = snapshot.openSleep
-                        ?.takeUnless { it.clientUuid in sourceRoles }
-                        ?: snapshot.railRecordRows.asSequence()
-                            .filter { it.record.clientUuid !in sourceRoles }
-                            .mapNotNull { row ->
-                                row.sleepInterval
-                                    ?.takeIf(::isWakeShortcutTarget)
-                                    ?.let { row.record }
-                            }
-                            .maxWithOrNull(
-                                compareBy<Record> { it.timestamp }.thenBy { it.clientUuid },
-                            ),
+                    openSleep = snapshot.openSleep,
                     uploaderLabels = snapshot.recordRows.mapNotNull { row ->
-                        if (row.record.clientUuid in sourceRoles) null
-                        else row.uploaderLabel?.let { row.record.id to it }
+                        row.uploaderLabel?.let { row.record.id to it }
                     }.toMap(),
                     customItems = customItems,
                     pendingPlans = plans,
@@ -306,12 +260,9 @@ class LogViewModel @Inject constructor(
                     currentMembershipId = snapshot.audience.membershipId,
                     familyOwner = snapshot.audience.role ==
                         com.lezi.babylog.sync.session.FamilyRole.Owner,
-                    autoAlignedDisplayClientUuids = autoAligned,
-                    nearbySubtypeHints = com.lezi.babylog.domain.carelog.NearbySubtypeHint.hints(
-                        records = rawRecords,
-                        hiddenClientUuids = sourceRoles,
-                    ),
-                    sourceRecordsByDisplay = careLog.sourceRecordsByDisplay(rawRecords + rawRail),
+                    autoAlignedDisplayClientUuids = snapshot.autoAlignedDisplayClientUuids,
+                    nearbySubtypeHints = snapshot.nearbySubtypeHints,
+                    sourceRecordsByDisplay = snapshot.sourceRecordsByDisplay,
                 )
             }
         }
@@ -433,17 +384,34 @@ class LogViewModel @Inject constructor(
         }
     }
 
+    private val _wakeEditCommand = MutableStateFlow(WakeEditCommandState())
+    internal val wakeEditCommand = _wakeEditCommand.asStateFlow()
+
+    internal fun consumeWakeEditResult() {
+        if (!_wakeEditCommand.value.saving) _wakeEditCommand.value = WakeEditCommandState()
+    }
+
     fun updateWakeObservation(
         clientUuid: String,
         wakeTimestamp: Long,
         note: String?,
         onDone: (String?) -> Unit = {},
     ) {
+        if (_wakeEditCommand.value.saving) return
+        _wakeEditCommand.value = WakeEditCommandState(clientUuid = clientUuid, saving = true)
         viewModelScope.launch {
-            val result = runCatching {
-                careLog.updateWakeObservation(clientUuid, wakeTimestamp, note)
+            try {
+                careLog.correctWake(CorrectCareWake(CareWakeId(clientUuid), wakeTimestamp, note))
+                _wakeEditCommand.value = WakeEditCommandState(clientUuid = clientUuid, saved = true)
+                onDone(null)
+            } catch (cancelled: CancellationException) {
+                _wakeEditCommand.value = WakeEditCommandState(clientUuid = clientUuid)
+                throw cancelled
+            } catch (error: Throwable) {
+                val message = productUiError(error, LocalOpFailureCopy.EDIT_WAKE)
+                _wakeEditCommand.value = WakeEditCommandState(clientUuid = clientUuid, error = message)
+                onDone(message)
             }
-            onDone(result.exceptionOrNull()?.let { productUiError(it, LocalOpFailureCopy.EDIT_WAKE) })
         }
     }
 
@@ -624,21 +592,39 @@ class LogViewModel @Inject constructor(
         layoutUndoSessions.setExitAfterLayoutRetry(exitAfter)
     }
 
+    private val customSaveCommands = com.lezi.babylog.core.ui.CustomItemSaveCommand()
+    internal val customSaveCommand = customSaveCommands.state
+    internal fun consumeCustomSaveResult() = customSaveCommands.consume()
+
     fun addCustomItem(name: String, iconSlot: Int, onDone: (String?) -> Unit) {
-        viewModelScope.launch {
-            val result = runCatching { careLog.addCustomItem(name, iconSlot) }
-            onDone(result.exceptionOrNull()?.let { productUiError(it, LocalOpFailureCopy.ADD) })
+        saveCustomItem(com.lezi.babylog.core.ui.CustomItemSaveDraft(null, name, iconSlot), onDone) {
+            careLog.addCustomItem(name, iconSlot)
         }
     }
 
     fun updateCustomItem(item: CustomRecordItem, onDone: (String?) -> Unit) {
+        saveCustomItem(com.lezi.babylog.core.ui.CustomItemSaveDraft(item.id, item.name, item.iconSlot), onDone) {
+            careLog.updateCustomItem(item)
+        }
+    }
+
+    private fun saveCustomItem(
+        draft: com.lezi.babylog.core.ui.CustomItemSaveDraft,
+        onDone: (String?) -> Unit,
+        write: suspend () -> Unit,
+    ) {
         viewModelScope.launch {
-            val result = runCatching { careLog.updateCustomItem(item) }
-            onDone(
-                result.exceptionOrNull()?.let {
-                    productUiError(it, "没有保存成功，原有项目未变，可重试")
-                },
-            )
+            val accepted = customSaveCommands.save(draft) {
+                try {
+                    write()
+                    null
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    productUiError(error, "没有保存成功，原有项目未变，可重试")
+                }
+            }
+            onDone(if (accepted) customSaveCommand.value.error else "正在保存，请稍候")
         }
     }
 

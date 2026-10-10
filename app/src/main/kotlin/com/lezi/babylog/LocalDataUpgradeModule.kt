@@ -53,6 +53,12 @@ internal abstract class LocalDataUpgradeModule {
         implementation: MediaSha256ColumnUpgradeStep,
     ): LocalDataUpgradeStep
 
+    @Binds
+    @IntoSet
+    abstract fun restoreAuthorityContractUpgradeStep(
+        implementation: RestoreAuthorityContractUpgradeStep,
+    ): LocalDataUpgradeStep
+
     companion object {
         @Provides
         @Singleton

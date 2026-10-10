@@ -1,4 +1,5 @@
 package com.lezi.babylog.domain.family
+import com.lezi.babylog.sync.session.toPresentation
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
@@ -65,7 +66,7 @@ class MemberLoginQrDialogProjectionTest {
         val completed = FamilyWizardState.Completed(
             snapshot = snapshot,
             outcome = FamilyWizardOutcome.MemberLoginQrClaimed(
-                memberSession(),
+                memberSession().toPresentation(),
                 InitialFamilyDataRecovery.RetryRequired(),
             ),
         )

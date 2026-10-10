@@ -46,6 +46,7 @@ fixed_files=(
   remote-deploy.sh
   schema-cutover.sh
   schema-cutover-steps.sh
+  schema-update-pair.sh
   tls-certificate-sha256.sh
   tls-spki.sh
   validate-nas-package.sh

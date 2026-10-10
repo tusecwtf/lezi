@@ -32,6 +32,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -124,8 +125,26 @@ import com.lezi.babylog.sync.backend.testPreparedMedia
 // Split from RealSyncPortTest kitchen sink by contract cluster (ticket 05).
 class RealSyncPortFamilyWireTest {
     @Test
+    fun renamePreservesCredentialsRotatedWhileTheServerRequestWasInFlight() = runTest {
+        val original = joinedSession("family-a").copy(role = FamilyRole.Owner)
+        val rig = SyncRig(original)
+        rig.awaitInitialReplicaBarrier()
+        rig.backend.onRenameFamily = {
+            rig.preferences.saveRefreshedSession(original.copy(
+                accessToken = "new-access", refreshToken = "new-refresh",
+                accessExpiresAtEpochSeconds = 9_999_999_999,
+            ))
+        }
+        assertThat(rig.port.renameFamily("New family").isSuccess).isTrue()
+        assertThat(rig.preferences.current().familyName).isEqualTo("New family")
+        assertThat(rig.preferences.current().accessToken).isEqualTo("new-access")
+        assertThat(rig.preferences.current().refreshToken).isEqualTo("new-refresh")
+    }
+
+    @Test
     fun retainedFamilyEndpointChangeDoesNotRequeueLocalFacts() = runTest {
         val rig = SyncRig(session = joinedSession("family-old"))
+        rig.awaitInitialReplicaBarrier()
         val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
         val customItemId = rig.customItems.seed(
             CustomItemEntity(
@@ -375,8 +394,81 @@ class RealSyncPortFamilyWireTest {
     }
 
     @Test
+    fun syncUpgradesUntaggedSameGenerationDirectoryOnceAndReusesTheOwnedCache() = runTest {
+        val file = java.io.File.createTempFile("lezi-read-directory-", ".preferences_pb").also { it.delete() }
+        val store = androidx.datastore.preferences.core.PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
+        val prefs = com.lezi.babylog.sync.session.DataStoreSyncPreferences(
+            store, com.lezi.babylog.sync.session.InMemorySecureRefreshTokenStore(),
+        )
+        val session = joinedSession("family-a")
+        prefs.saveSession(session)
+        prefs.rememberEndpoint(com.lezi.babylog.sync.session.TrustedEndpointProfile.systemPki(session.baseUrl))
+        prefs.saveFamilyMemberDirectorySnapshot("directory-test", listOf(
+            FamilyMember("旧缓存", session.role, true, session.membershipId),
+        ))
+        val rig = SyncRig(session, ownedPreferences = prefs)
+        assertThat(prefs.familyReadSnapshot.first().hasCurrentDirectory).isFalse()
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).exceptionOrNull()).isNull()
+        val snapshot = prefs.familyReadSnapshot.first()
+        assertThat(snapshot.hasCurrentDirectory).isTrue()
+        assertThat(snapshot.members.single().displayName).isEqualTo("管理员")
+        assertThat(rig.backend.memberCalls).isEqualTo(1)
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).exceptionOrNull()).isNull()
+        assertThat(rig.backend.memberCalls).isEqualTo(1)
+        file.delete()
+    }
+
+    @Test
+    fun bothDirectoryFetchEntrypointsRejectLateFamilyAToBToAResponses() = runTest {
+        for (viaSync in listOf(false, true)) {
+            val file = java.io.File.createTempFile("lezi-directory-aba-", ".preferences_pb").also { it.delete() }
+            val store = androidx.datastore.preferences.core.PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
+            val prefs = com.lezi.babylog.sync.session.DataStoreSyncPreferences(
+                store, com.lezi.babylog.sync.session.InMemorySecureRefreshTokenStore(),
+            )
+            val a = joinedSession("family-a")
+            prefs.saveSession(a)
+            prefs.rememberEndpoint(com.lezi.babylog.sync.session.TrustedEndpointProfile.systemPki(a.baseUrl))
+            val rig = SyncRig(a, ownedPreferences = prefs)
+            val entered = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            rig.backend.beforeMemberDirectoryReturn = { entered.complete(Unit); release.await() }
+            // This owner uses real DataStore/Keystore-dispatch I/O. Keep its barrier timeout
+            // on the real dispatcher so virtual time cannot expire it while startup I/O runs.
+            val response = async(Dispatchers.Default) {
+                if (viaSync) rig.port.sync(SyncTrigger.PullToRefresh).exceptionOrNull()
+                else rig.port.listFamilyMembers().exceptionOrNull()
+            }
+            try {
+                // An early failure must diagnose the unmet gate instead of waiting forever.
+                select<Unit> {
+                    entered.onAwait { }
+                    response.onAwait { failure ->
+                        error("Directory request completed before controlled response gate (viaSync=$viaSync): $failure")
+                    }
+                }
+                prefs.saveSession(a.copy(familyId = "family-b", membershipId = "member-b", deviceId = "device-b"))
+                prefs.saveSession(a)
+                val epoch = prefs.familyReadSnapshot.first().identityEpoch!!
+                assertThat(prefs.saveFamilyMemberDirectoryIfCurrent(epoch, "directory-test", listOf(
+                    FamilyMember("新目录", a.role, true, a.membershipId),
+                ))).isTrue()
+            } finally {
+                release.complete(Unit)
+            }
+            val failure = response.await()
+            assertThat(failure?.message).contains(
+                if (viaSync) "member directory identity changed" else "家庭身份已变化",
+            )
+            assertThat(prefs.familyReadSnapshot.first().members.single().displayName).isEqualTo("新目录")
+            file.delete()
+        }
+    }
+
+    @Test
     fun familyMemberListUsesTrustedEndpointWithoutTransportIdentity() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
+        rig.awaitInitialReplicaBarrier()
         rig.backend.nextMembers = listOf(
             FamilyMember(
                 displayName = "妈妈",
@@ -474,6 +566,7 @@ class RealSyncPortFamilyWireTest {
             pullGeneration = ownerJoin.generation,
         )
         val ownerRig = SyncRig(ownerSession, syncBackend = sharedBackend)
+        ownerRig.awaitInitialReplicaBarrier()
         val memberRig = SyncRig(memberSession, syncBackend = sharedBackend)
 
         assertThat(ownerRig.port.renameFamily("  新家庭名  ").isSuccess).isTrue()

@@ -28,9 +28,10 @@ use crate::store::{CreateFamilyInput, CreateMemberLoginRequestInput, StoreError}
 use crate::{
     authenticate, json_body, require_bootstrap_secret, require_owner, require_owner_root_password,
     run_blocking, secure_session_token, sync_directory, ApiError, AppState,
-    CAPABILITY_ATOMIC_BUNDLE, CAPABILITY_CAUSAL_SYNC_V2, CAPABILITY_DEVICE_SESSIONS,
-    CAPABILITY_DISASTER_RESTORE, CAPABILITY_MEMBERSHIP_DEVICES,
-    CAPABILITY_RECORD_MEMBERSHIP_AUTHOR, CAPABILITY_SYNC_HEARTBEAT_V1,
+    CAPABILITY_ATOMIC_BUNDLE, CAPABILITY_CAUSAL_MEDIA_IDENTITY_V1, CAPABILITY_CAUSAL_SYNC_V2,
+    CAPABILITY_DEVICE_SESSIONS, CAPABILITY_DISASTER_RESTORE, CAPABILITY_MEMBERSHIP_DEVICES,
+    CAPABILITY_NURSING_PLAN_INTENT_V1, CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+    CAPABILITY_RESTORE_AUTHORITY_V1, CAPABILITY_SYNC_HEARTBEAT_V1,
     CAPABILITY_TRUSTED_HTTPS_ENDPOINT, CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT,
     MEMBER_LOGIN_GRANT_TTL_SECONDS, SETUP_PROTOCOL_VERSION,
 };
@@ -65,6 +66,9 @@ pub(crate) async fn setup_status(State(state): State<Arc<AppState>>) -> Result<R
             // Incremental broadcast only (wire §1): newer generations may append
             // here; the handshake capability key set stays byte-exact.
             CAPABILITY_SYNC_HEARTBEAT_V1,
+            CAPABILITY_CAUSAL_MEDIA_IDENTITY_V1,
+            CAPABILITY_NURSING_PLAN_INTENT_V1,
+            CAPABILITY_RESTORE_AUTHORITY_V1,
         ],
         "family_state": family_state,
     }))
@@ -327,10 +331,9 @@ pub(crate) async fn list_member_login_requests(
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value == OPEN_MEMBER_REQUEST_VIEW);
     let store = state.store.clone();
-    let family_id = principal.family_id;
     let now = state.now();
     let mut requests =
-        run_blocking(move || Ok(store.pending_member_login_requests(&family_id, now)?)).await?;
+        run_blocking(move || Ok(store.pending_member_login_requests(&principal, now)?)).await?;
     if !include_approved {
         requests.retain(|request| request.status == "pending");
     }
@@ -346,12 +349,11 @@ pub(crate) async fn approve_new_member_login_request(
     let principal = require_owner(&state, &headers).await?;
     let _ = json_body(body)?;
     let store = state.store.clone();
-    let family_id = principal.family_id;
     let request_id = request_id.to_string();
     let now = state.now();
     run_blocking(move || {
         store
-            .approve_new_member_login_request(&family_id, &request_id, now)
+            .approve_new_member_login_request(&principal, &request_id, now)
             .map_err(map_member_request_error)
     })
     .await?;
@@ -368,12 +370,11 @@ pub(crate) async fn bind_existing_member_login_request(
     let request = json_body(body)?;
     let membership_id = request.validate()?;
     let store = state.store.clone();
-    let family_id = principal.family_id;
     let request_id = request_id.to_string();
     let now = state.now();
     run_blocking(move || {
         store
-            .bind_existing_member_login_request(&family_id, &request_id, &membership_id, now)
+            .bind_existing_member_login_request(&principal, &request_id, &membership_id, now)
             .map_err(map_member_request_error)
     })
     .await?;
@@ -389,12 +390,11 @@ pub(crate) async fn reject_member_login_request(
     let principal = require_owner(&state, &headers).await?;
     let _ = json_body(body)?;
     let store = state.store.clone();
-    let family_id = principal.family_id;
     let request_id = request_id.to_string();
     let now = state.now();
     run_blocking(move || {
         store
-            .reject_member_login_request(&family_id, &request_id, now)
+            .reject_member_login_request(&principal, &request_id, now)
             .map_err(map_member_request_error)
     })
     .await?;
@@ -442,13 +442,12 @@ pub(crate) async fn create_member_login_grant(
     let membership_id = request.validate()?;
     let grant = secure_session_token();
     let store = state.store.clone();
-    let family_id = principal.family_id;
     let blocking_grant = grant.clone();
     let now = state.now();
     let created = run_blocking(move || {
         store
             .create_member_login_grant(
-                &family_id,
+                &principal,
                 &membership_id,
                 &blocking_grant,
                 now,
@@ -653,9 +652,8 @@ pub(crate) async fn rename_family(
     let request = json_body(body)?;
     let family_name = request.validate()?;
     let store = state.store.clone();
-    let family_id = principal.family_id;
     let blocking_family_name = family_name.clone();
-    run_blocking(move || Ok(store.rename_family(&family_id, &blocking_family_name)?)).await?;
+    run_blocking(move || Ok(store.rename_family(&principal, &blocking_family_name)?)).await?;
     Ok(Json(json!({
         "ok": true,
         "family_name": family_name,
@@ -675,10 +673,9 @@ pub(crate) async fn leave(
         ));
     }
     let store = state.store.clone();
-    let family_id = principal.family_id;
-    let membership_id = principal.membership_id;
+    let membership_id = principal.membership_id.clone();
     let now = state.now();
-    run_blocking(move || Ok(store.hard_delete_membership(&family_id, &membership_id, now)?))
+    run_blocking(move || Ok(store.hard_delete_membership(&principal, &membership_id, now)?))
         .await?;
     Ok(Json(json!({"ok": true})))
 }
@@ -691,10 +688,9 @@ pub(crate) async fn logout_current_device(
     let principal = authenticate(&state, &headers).await?;
     let _ = json_body(body)?;
     let store = state.store.clone();
-    let family_id = principal.family_id;
-    let device_id = principal.device_id;
+    let device_id = principal.device_id.clone();
     let now = state.now();
-    run_blocking(move || Ok(store.revoke_family_device(&family_id, &device_id, now)?)).await?;
+    run_blocking(move || Ok(store.revoke_family_device(&principal, &device_id, now)?)).await?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -707,14 +703,17 @@ pub(crate) async fn delete_family(
     let principal = require_owner(&state, &headers).await?;
     require_owner_root_password(&state, &headers, source)?;
     let confirmed_family_name = json_body(body)?.validate()?;
+    let provisioning = state.family_lock(crate::PROVISIONING_LOCK_KEY).await;
+    let _provisioning_guard = provisioning.lock().await;
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
+    let principal = require_owner(&state, &headers).await?;
     let blocking_state = state.clone();
     run_blocking(move || {
         let family_media = blocking_state.media_root.join(&principal.family_id);
         match blocking_state
             .store
-            .delete_family(&principal.family_id, &confirmed_family_name)
+            .delete_family(&principal, &confirmed_family_name)
         {
             Ok(()) => {}
             Err(StoreError::FamilyNameMismatch) => {
@@ -724,27 +723,10 @@ pub(crate) async fn delete_family(
             }
             Err(error) => return Err(error.into()),
         }
+        super::disaster_restore::retire_family(&blocking_state.data_root, &principal.family_id)?;
         if family_media.exists() {
-            match fs::remove_dir_all(&family_media) {
-                Ok(()) => {
-                    if let Err(error) = sync_directory(&blocking_state.media_root) {
-                        tracing::error!(
-                            family_id = %principal.family_id,
-                            path = %blocking_state.media_root.display(),
-                            %error,
-                            "family metadata was deleted; media-root sync will be retried by startup cleanup"
-                        );
-                    }
-                }
-                Err(error) => {
-                    tracing::error!(
-                        family_id = %principal.family_id,
-                        path = %family_media.display(),
-                        %error,
-                        "family metadata was deleted; orphan media cleanup will retry on startup"
-                    );
-                }
-            }
+            fs::remove_dir_all(&family_media)?;
+            sync_directory(&blocking_state.media_root)?;
         }
         Ok(())
     })

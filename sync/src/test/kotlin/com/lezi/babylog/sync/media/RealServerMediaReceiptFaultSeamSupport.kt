@@ -34,7 +34,6 @@ import com.lezi.babylog.sync.session.SyncSession
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
-import org.junit.Assume.assumeTrue
 
 internal class RealServerMediaReceiptFaultFixture private constructor(
     val server: IsolatedLeziSyncServer,
@@ -235,7 +234,7 @@ internal class RealServerMediaReceiptFaultFixture private constructor(
                         url.openConnection() as HttpURLConnection
                     },
                     trustedEndpointResolver = TrustedEndpointResolver { endpoint },
-                    clientVersionCode = 21,
+                    clientVersionCode = 35,
                 )
                 val created = backend.create(
                     baseUrl = proxy.origin,
@@ -292,18 +291,9 @@ internal class RealServerMediaReceiptFaultFixture private constructor(
         }
 
         private fun assumeToolsPresent() {
-            assumeTrue(
-                "openssl required for isolated TLS fixture",
-                ProcessBuilder("openssl", "version").start().waitFor() == 0,
-            )
-            assumeTrue(
-                "curl required for isolated TLS readiness probe",
-                ProcessBuilder("curl", "--version").start().waitFor() == 0,
-            )
-            assumeTrue(
-                "sqlite3 required to inspect isolated data-root receipts",
-                runCatching { resolveSqlite3() }.isSuccess,
-            )
+            check(ProcessBuilder("openssl", "version").start().waitFor() == 0) { "openssl required" }
+            check(ProcessBuilder("curl", "--version").start().waitFor() == 0) { "curl required" }
+            resolveSqlite3()
         }
 
         private fun resolveSqlite3(): String {

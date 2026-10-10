@@ -178,6 +178,60 @@ struct StoredSnapshotReceipt {
     integrity_tag: String,
 }
 
+/// Revoke identity-bearing snapshot credentials without losing the signed
+/// terminal evidence required by existing metadata retention. No old token or
+/// choice is rebound to redacted nursing content.
+pub(super) fn invalidate_identity_snapshot_receipts(
+    tx: &Transaction<'_>,
+    receipt_key: &[u8],
+    family_id: &str,
+    entity_type: &str,
+    client_uuid: &str,
+) -> Result<(), StoreError> {
+    let rows = {
+        let mut statement = tx.prepare(
+            "SELECT rowid, receipt_json FROM mutation_receipts
+             WHERE family_id = ?1 AND membership_id = ?2
+               AND entity_type = ?3 AND client_uuid = ?4",
+        )?;
+        let rows = statement
+            .query_map(
+                params![
+                    family_id,
+                    SYSTEM_RECEIPT_PRINCIPAL,
+                    entity_type,
+                    client_uuid
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    for (rowid, json) in rows {
+        let mut receipts: Vec<StoredSnapshotReceipt> = serde_json::from_str(&json)?;
+        if serde_json::to_string(&receipts)? != json
+            || receipts.iter().any(|receipt| {
+                !crate::constant_time_eq(
+                    receipt.expected_integrity_tag(receipt_key).as_bytes(),
+                    receipt.integrity_tag.as_bytes(),
+                )
+            })
+        {
+            return Err(StoreError::InvalidStoredPayload);
+        }
+        for receipt in &mut receipts {
+            receipt.expires_at_seconds = 0;
+            receipt.choice_ids.clear();
+            receipt.integrity_tag = receipt.expected_integrity_tag(receipt_key);
+        }
+        tx.execute(
+            "UPDATE mutation_receipts SET receipt_json = ?1 WHERE rowid = ?2",
+            params![serde_json::to_string(&receipts)?, rowid],
+        )?;
+    }
+    Ok(())
+}
+
 pub(super) fn validate_snapshot_receipts_for_retention(
     receipt_json: &str,
     receipt_key: &[u8],

@@ -363,9 +363,9 @@ fn copy_media_file(
             MigrateReport::default(),
         ));
     }
-    fs::create_dir_all(&to_dir)?;
+    super::private_output::private_directories(&to_dir)?;
     if !to.exists() {
-        fs::copy(&from, &to)?;
+        super::private_output::copy_private(&from, &to)?;
     }
     Ok(())
 }

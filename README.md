@@ -1,5 +1,7 @@
 # 乐记（lezi）
 
+隐私说明：本文的 LAN 地址、SSH 账号和个人宿主路径均为虚构示例，不是生产默认值或操作授权。历史验证结果不代表这些示例地址；实际目标和维护窗口须由 owner 单独确认。
+
 家庭育儿日志 · Android · Kotlin + Jetpack Compose
 包名：`com.lezi.babylog` · minSdk 26 · targetSdk 35 · 显示名「乐记」 · version 以 `app/build.gradle.kts` + `config/android-release-compatibility.json` 为准
 
@@ -76,17 +78,23 @@ git 历史，不作为执行指引。现网家庭仍在 NAS。以下 NAS 回滚�
 
 **权威步骤与脚本**：[`tools/lezi-sync/deploy/DEPLOY.md`](tools/lezi-sync/deploy/DEPLOY.md)
 
-NAS 脚本家族的真实目标保存在未跟踪的 `tools/lezi-sync/deploy/env.local`（`NAS_SSH` 等，
-合成示例 `nas-operator@192.168.77.10:10000`），只作回滚和只读
-copy-out。不能靠改 `NAS_SSH` 把同一套脚本切到 VPS。
+NAS 脚本家族只作已授权目标的回滚和只读 copy-out，不再内置私人部署默认值。
+SSH 命令须显式提供 `NAS_SSH` / `NAS_SSH_PORT`，数据相关命令须显式提供
+`LEZI_DATA_HOST_PATH`，打包 / 部署与 LAN 探测分别显式提供 `LEZI_TLS_HOST` /
+`LEZI_LAN_HOST`。配置值须来自 owner 单独确认的目标；示例不授权改换主机，
+也不能靠改 `NAS_SSH` 把同一套脚本切到 VPS。
+
+普通 Android/Gradle 与 Cargo 构建不需要这些 NAS 参数。隔离测试 fixture 和
+app-update check-only 打包检查可显式使用虚构参数，不接触真实 NAS；实际 NAS 打包 /
+部署使用已明确确认的目标配置，容器替换仍须另行确认维护窗口。
 
 | 项 | 选择 |
 |---|---|
 | 构建位置 | 开发机（`linux/amd64` 镜像），**不在 NAS 上 cargo/docker build** |
-| 编排引擎 | 极空间 **zdocker** 自带 Compose v2（`/zspace/.../zdocker/bin/docker-compose`）；不要求系统安装 `docker compose` |
+| 编排引擎 | 可用 `ZDOCKER_COMPOSE` 显式指定已核验的厂商 Compose v2 路径；未设置或不可用时沿用 `docker run` 回退，不要求系统安装 `docker compose` |
 | 发布触发 | 本机一键：`package` → `scp` → SSH `remote-deploy` |
 | Bootstrap | 普通 CD 以现网容器为权威，并与 NAS 持久 `config/lezi-sync.env` 逐字节核对；secret **不进 git** |
-| 数据卷 | 宿主 bind（默认路径见下），stop/rm 容器不删数据 |
+| 数据卷 | 显式指定的宿主 bind（无默认路径），stop/rm 容器不删数据 |
 | TLS 身份 | 普通 CD/回滚/重启必须复用数据卷内原证书与私钥；仅经确认的全新空数据根可首次生成 |
 | 凭据灾备 | 替换前将根密码 + TLS pair 直接流式写入开发机仓库外的 `age` 密文；失败则普通 CD 不停容器 |
 | 并发/包完整性 | 单一、按数据 bind 固定的 NAS lease 覆盖全新 700 staging→备份→替换→稳定路径提升；包必须证明 linux/amd64、完整 image id、乐记 APK 公共签名证书、精确 inventory/SHA |
@@ -106,16 +114,20 @@ cargo clippy --all-targets --all-features -- -D warnings
 ./build-image.sh
 # → lezi-sync:<version>
 
-# 3) 打包 + 推 NAS + 替换现网容器
+# 3) owner 确认目标和维护窗口后，显式配置以下环境变量再打包 / 替换
+: "${NAS_SSH:?须显式设置已授权的 NAS SSH 目标}"
+: "${NAS_SSH_PORT:?须显式设置已授权的 NAS SSH 端口}"
+: "${LEZI_DATA_HOST_PATH:?须显式设置已授权的 NAS 数据路径}"
+: "${LEZI_TLS_HOST:?须显式设置已授权的 NAS TLS 主机}"
 ./deploy/push-and-deploy.sh
 # 产出：dist/lezi-sync-<version>-nas/（gitignored）
 # 远端成功后稳定路径：/tmp/lezi-sync-releases/lezi-sync-<version>-nas
 # 传输先进入全新的 .incoming-<nonce> 目录，校验/部署成功后才提升
-# （Zspace SSH 用户 HOME 常为 /home/ 不可写，故不用 ~）
+# （暂存路径不依赖 SSH 用户的 HOME 是否可写）
 
 # 4) 验收（本机或 NAS）
-curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.77.10:8765/health
-curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.77.10:8765/ready
+curl --cacert /path/to/data/tls/server.crt -fsS "https://${LEZI_TLS_HOST}:8765/health"
+curl --cacert /path/to/data/tls/server.crt -fsS "https://${LEZI_TLS_HOST}:8765/ready"
 ```
 
 **现网证书是发布硬边界：**普通 CD 不承担证书轮换，不得覆盖、删除、改名或重新生成已有
@@ -132,17 +144,19 @@ curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.77.10:8765/ready
 
 常用环境变量：
 
-| 变量 | 默认 / 含义 |
+| 变量 | 配置要求 / 默认 / 含义 |
 |---|---|
-| `NAS_SSH` | `nas-operator@192.168.77.10` |
-| `NAS_SSH_PORT` | `10000` |
+| `NAS_SSH` | 必须显式提供，无默认值；虚构示例 `nas-operator@192.168.77.10` |
+| `NAS_SSH_PORT` | 必须显式提供，无默认值；示例 `10000` |
 | `NAS_REMOTE_DIR` | `/tmp/lezi-sync-releases/lezi-sync-<ver>-nas` |
-| `LEZI_DATA_HOST_PATH` | `/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data`；须为规范化 portable 绝对路径，拒绝 `/` 及 `/etc`、`/usr`、`/var`、`/home`、`/root`、`/tmp`、`/opt`、`/srv` 这些精确广域根路径，须使用产品专属子目录 |
+| `LEZI_DATA_HOST_PATH` | 必须显式提供，无默认值；虚构示例 `/srv/lezi-example/data`。须为规范化 portable 绝对路径，拒绝 `/` 及 `/etc`、`/usr`、`/var`、`/home`、`/root`、`/tmp`、`/opt`、`/srv` 这些精确广域根路径，须使用产品专属子目录 |
 | `LEZI_SECRET_FILE` | NAS 持久根密码文件；默认数据 bind 同级 `config/lezi-sync.env`（目录 700、文件 600） |
 | `LEZI_ALLOW_SECRET_RECOVERY=1` | live 容器缺失时，显式授权从持久文件恢复；普通 CD 不设置 |
 | `LEZI_ALLOW_SECRET_RESEED=1` | live 缺失的维护窗内显式替换冲突值；须同时转发新 secret，普通 CD 不设置 |
 | `LEZI_ALLOW_TLS_BOOTSTRAP=1` | 仅已确认全新数据根首次建证书；须显式转发 secret 且远端无 live 容器 |
-| `LEZI_TLS_HOST` | `192.168.77.10`；首次证书 SAN 使用的 NAS IPv4 或解析到 IPv4 的 DNS 名 |
+| `LEZI_TLS_HOST` | 打包 / 部署须显式提供，无默认值；首次证书 SAN 使用的 NAS IPv4 或解析到 IPv4 的 DNS 名，虚构示例 `192.168.77.10` |
+| `LEZI_LAN_HOST` | LAN 探测须显式提供，无默认值；使用已确认的实际 LAN 主机 |
+| `ZDOCKER_COMPOSE` | 可选、显式提供的厂商 Compose 可执行文件路径；未设置时用 `docker run` |
 | `LEZI_SKIP_PACKAGE=1` | 显式复用本地包；默认每次 push 都从当前可检查镜像重新打包。复用仍要求对应本地镜像 config digest/OS/架构一致，并重验 data/TLS/origin、inventory/helpers/hashes，以及 APK 签名者、application/version、本地数据合同和 metadata |
 | `LEZI_BOOTSTRAP_SECRET` | 仅无现网容器可继承时手动提供 |
 | `LEZI_FORWARD_BOOTSTRAP_SECRET=1` | 仅首次/切割时通过 SSH stdin 转发上述 secret；普通 CD 不设置 |
@@ -155,8 +169,8 @@ curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.77.10:8765/ready
 | `LEZI_APK_SIGNER` | 可选本机 `apksigner` 路径；默认从 Android SDK build-tools 发现 |
 | `LEZI_LAN_APK_DOWNLOAD_ORIGIN` | 邀请首装页的 LAN HTTP origin；NAS 默认 `http://<LEZI_TLS_HOST>:8767`，本版仅支持 IPv4/DNS，禁止公网发布 |
 
-家庭 NAS 首次使用加固 CD 前，须由管理员一次性创建数据 bind 同级
-`/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/config`，交给 SSH 用户并设为 mode `700`；
+家庭 NAS 首次使用加固 CD 前，须由管理员一次性创建实际数据 bind 同级的 `config/`
+（虚构示例 `/srv/lezi-example/config`），交给 SSH 用户并设为 mode `700`；
 `/tmp/lezi-sync-releases` 也必须由 SSH 用户所有且为 mode `700`。不得递归修改数据 bind 或
 `tls/` 权限。精确命令、遗留含 `.env` 发布目录的保留式迁移方式见
 [`tools/lezi-sync/deploy/DEPLOY.md`](tools/lezi-sync/deploy/DEPLOY.md) § One-time NAS filesystem preflight。

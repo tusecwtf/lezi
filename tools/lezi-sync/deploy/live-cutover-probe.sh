@@ -9,9 +9,9 @@
 # Does **not** print LEZI_BOOTSTRAP_SECRET / docker inspect env.
 # Does **not** claim APK smoke success (record that separately in apk-smoke.md).
 #
-# Env (defaults match AGENTS.md / cutover.rs):
+# Env (explicit operator inputs; examples in cutover.rs are synthetic):
 #   NAS_SSH / NAS_SSH_PORT
-#   LEZI_LAN_HOST                 default 192.168.77.4
+#   LEZI_LAN_HOST                 required explicit approved LAN host
 #   LEZI_CONTAINER_NAME           default lezi-sync
 #   LEZI_TLS_CACERT               optional path to data-bind tls/server.crt
 #   LEZI_EVIDENCE_DIR             default <repo>/.scratch/nas-v3-offline-migrate/evidence/07
@@ -33,9 +33,9 @@ if [[ -z "${DEFAULT_EXPECTED_VERSION}" ]]; then
   echo "error: could not determine lezi-sync version from Cargo.toml" >&2
   exit 1
 fi
-NAS_SSH="${NAS_SSH:-nas-account@192.168.77.4}"
-NAS_SSH_PORT="${NAS_SSH_PORT:-10000}"
-LEZI_LAN_HOST="${LEZI_LAN_HOST:-192.168.77.4}"
+NAS_SSH="${NAS_SSH:?Set NAS_SSH to the explicitly approved user@NAS host}"
+NAS_SSH_PORT="${NAS_SSH_PORT:?Set NAS_SSH_PORT to the explicitly approved NAS port}"
+LEZI_LAN_HOST="${LEZI_LAN_HOST:?Set LEZI_LAN_HOST to the explicitly approved LAN host}"
 LEZI_CONTAINER_NAME="${LEZI_CONTAINER_NAME:-lezi-sync}"
 LEZI_EVIDENCE_DIR="${LEZI_EVIDENCE_DIR:-${ROOT}/.scratch/nas-v3-offline-migrate/evidence/07}"
 LEZI_PROBE_WRITE_EVIDENCE="${LEZI_PROBE_WRITE_EVIDENCE:-1}"

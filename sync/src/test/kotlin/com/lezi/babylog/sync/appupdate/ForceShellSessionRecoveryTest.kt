@@ -1,5 +1,7 @@
 package com.lezi.babylog.sync.appupdate
 
+// 192.168.77.10 is a synthetic RFC1918 LAN test endpoint, never a deployment default.
+
 import com.google.common.truth.Truth.assertThat
 import org.junit.Test
 

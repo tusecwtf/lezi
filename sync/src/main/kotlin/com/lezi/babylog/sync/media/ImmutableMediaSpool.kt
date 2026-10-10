@@ -39,6 +39,16 @@ data class ImmutableMediaSpoolSource(
     val mediaUuid: String,
     val role: CausalMediaRole,
     val localUri: String,
+    val publishedIdentity: PublishedMediaIdentity? = null,
+    /** Byte-only donor; never carries the previous authority's receipt or mutation envelope. */
+    val retainedSource: RetainedMediaSpoolSource? = null,
+)
+
+data class RetainedMediaSpoolSource(
+    val mutationId: String,
+    val item: ImmutableMediaSpoolItem,
+    /** A new local fact can keep exact bytes while explicitly changing metadata in NEW ownership. */
+    val rebaseMetadata: Boolean = false,
 )
 
 data class ImmutableMediaSpoolItem(
@@ -47,7 +57,7 @@ data class ImmutableMediaSpoolItem(
     val role: CausalMediaRole,
     val sha256: String,
     val byteSize: Long,
-    val mime: String,
+    val mime: String?,
     val width: Long?,
     val height: Long?,
 )
@@ -94,7 +104,7 @@ private data class SlotIntent(
     val slot: Int,
     val role: CausalMediaRole,
     val byteSize: Long,
-    val mime: String,
+    val mime: String?,
     val width: Long?,
     val height: Long?,
 )
@@ -171,7 +181,7 @@ internal class FileImmutableMediaSpool(
     @Named("causalMediaSpoolCapacityBytes") private val capacityBytes: Long,
     @Named("causalMediaSpoolSlotReservationBytes") private val slotReservationBytes: Long,
     private val faultInjector: ImmutableMediaSpoolFaultInjector = ImmutableMediaSpoolFaultInjector {},
-) : ImmutableMediaSpool {
+) : ImmutableMediaSpool, TerminalRetirementSpool {
     private val mutex = Mutex()
     private val rootPath = root.toPath().toAbsolutePath().normalize()
 
@@ -197,7 +207,11 @@ internal class FileImmutableMediaSpool(
             when (step) {
                 is FreezeStep.Complete -> return step.group
                 is FreezeStep.NeedsPrepare -> {
-                    val prepared = mediaFiles.prepareUpload(step.source.localUri)
+                    val prepared = step.source.retainedSource?.let { donor ->
+                        prepareRetainedSource(step.source, donor)
+                    } ?: step.source.publishedIdentity?.let { identity ->
+                        mediaFiles.preparePublishedUpload(step.source.localUri, identity)
+                    } ?: mediaFiles.prepareUpload(step.source.localUri)
                     try {
                         mutex.withLock {
                             withContext(Dispatchers.IO) {
@@ -215,6 +229,31 @@ internal class FileImmutableMediaSpool(
                     }
                 }
             }
+        }
+    }
+
+    private suspend fun prepareRetainedSource(
+        source: ImmutableMediaSpoolSource,
+        donor: RetainedMediaSpoolSource,
+    ): PreparedMedia = mutex.withLock {
+        withContext(Dispatchers.IO) {
+            requireCanonicalUuid(donor.mutationId, "retained media mutation")
+            val expected = requireNotNull(source.publishedIdentity) { "retained media requires exact identity" }
+            val item = donor.item
+            require(source.mediaUuid == item.mediaUuid && source.role == item.role &&
+                expected.sha256 == item.sha256 && expected.byteSize == item.byteSize &&
+                (donor.rebaseMetadata || (expected.mime == item.mime && expected.width?.toLong() == item.width &&
+                    expected.height?.toLong() == item.height))) { "retained media identity or metadata mismatch" }
+            // Recovery verifies sidecar and actual bytes/hash. Keep the donor lock through the
+            // verified copy so concurrent discard cannot unlink the only source mid-adoption.
+            val group = recoverGroupLocked(donor.mutationId)?.group
+            require(group?.items?.singleOrNull { it.mediaUuid == item.mediaUuid } == item) {
+                "retained media does not match durable donor sidecar"
+            }
+            val directory = mutationDirectory(donor.mutationId)
+            val path = mediaPath(directory, item.slot)
+            requireRegularFile(path, directory)
+            mediaFiles.preparePublishedUpload(path.toString(), expected)
         }
     }
 
@@ -239,6 +278,7 @@ internal class FileImmutableMediaSpool(
                 require(existingItem.slot == slot && existingItem.role == source.role) {
                     "media spool sidecar slot metadata drift"
                 }
+                requireCapturedIdentity(existingItem, source)
                 continue
             }
             val usedBytes = calculateUsedBytes()
@@ -267,12 +307,23 @@ internal class FileImmutableMediaSpool(
             require(existingItem.slot == slot && existingItem.role == source.role) {
                 "media spool sidecar slot metadata drift"
             }
+            requireCapturedIdentity(existingItem, source)
             require(ordered.getOrNull(slot)?.mediaUuid == source.mediaUuid) {
                 "media spool group identity drift"
             }
             return
         }
         promoteSource(directory, mutationId, slot, source, prepared)
+    }
+
+    private fun requireCapturedIdentity(item: ImmutableMediaSpoolItem, source: ImmutableMediaSpoolSource) {
+        source.publishedIdentity?.let { identity ->
+            require((identity.sha256 == null || identity.sha256 == item.sha256) &&
+                identity.byteSize == item.byteSize && identity.mime == item.mime &&
+                identity.width?.toLong() == item.width && identity.height?.toLong() == item.height) {
+                "media spool existing ownership has different canonical identity"
+            }
+        }
     }
 
     private fun prepareFreezeIntentLocked(
@@ -311,6 +362,9 @@ internal class FileImmutableMediaSpool(
             complete.group.items.map { it.mediaUuid to it.role } ==
                 ordered.map { it.mediaUuid to it.role },
         ) { "media spool group identity drift" }
+        complete.group.items.forEach { item ->
+            requireCapturedIdentity(item, ordered.single { it.mediaUuid == item.mediaUuid })
+        }
         return complete.group
     }
 
@@ -342,6 +396,68 @@ internal class FileImmutableMediaSpool(
         }
     }
 
+    override fun ownedGroupPaths(group: ImmutableMediaSpoolGroup): TerminalSpoolPaths {
+        validateCanonicalGroup(group)
+        val directory = mutationDirectory(group.mutationId)
+        return TerminalSpoolPaths(rootPath.toFile(), directory.toFile(),
+            group.items.map { mediaPath(directory, it.slot).toFile() })
+    }
+
+    override suspend fun <T> withRetirementGroup(
+        group: ImmutableMediaSpoolGroup,
+        deleting: Boolean,
+        block: suspend (TerminalSpoolLease) -> T,
+    ): T = mutex.withLock {
+        val paths = ownedGroupPaths(group)
+        withContext(Dispatchers.IO) {
+            ensureRoot()
+            if (!deleting) {
+                require((recoverGroupLocked(group.mutationId) as? ImmutableMediaSpoolRecovery.Complete)?.group == group) {
+                    "terminal retirement lost original immutable spool evidence"
+                }
+            } else validateDeletingGroup(group)
+        }
+        // Caller already holds owner/path gates. Room callbacks are short; unlink is outside Room.
+        block(TerminalSpoolLease(paths) {
+            withContext(Dispatchers.IO) {
+                validateDeletingGroup(group)
+                val directory = mutationDirectory(group.mutationId)
+                if (existsNoFollow(directory)) deleteOwnedTree(directory, rootPath)
+            }
+        })
+    }
+
+    /** A durable deleting seal owns the exact remaining subset after an interrupted unlink. */
+    private fun validateDeletingGroup(group: ImmutableMediaSpoolGroup) {
+        val directory = mutationDirectory(group.mutationId)
+        if (!existsNoFollow(directory)) return
+        requireOwnedDirectory(directory, rootPath)
+        val expectedIntent = GroupIntent(group.mutationId, group.items.map {
+            GroupIntentItem(it.mediaUuid, it.slot, it.role)
+        })
+        val expectedNames = group.items.flatMap { listOf("${it.slot}$MEDIA_SUFFIX", "${it.slot}$SIDECAR_SUFFIX") }.toSet()
+        listChildren(directory).forEach { path ->
+            requireRegularFile(path, directory)
+            val name = path.fileName.toString()
+            if (name == GROUP_INTENT_FILE) {
+                require(decodeGroupIntent(readOwnedText(path, directory)) == expectedIntent)
+            } else {
+                require(name in expectedNames) { "deleting spool contains foreign artifacts" }
+                if (name.endsWith(SIDECAR_SUFFIX)) {
+                    val slot = parseSlotFileName(path, SIDECAR_SUFFIX)
+                    val decoded = decodeSidecar(readOwnedText(path, directory), slot)
+                    require(decoded.first == group.mutationId && decoded.second == group.items.single { it.slot == slot })
+                } else {
+                    val slot = parseSlotFileName(path, MEDIA_SUFFIX)
+                    val item = group.items.single { it.slot == slot }
+                    require(Files.size(path) == item.byteSize && sha256(path, directory) == item.sha256) {
+                        "deleting spool bytes changed after terminal intent"
+                    }
+                }
+            }
+        }
+    }
+
     override suspend fun discardGroup(mutationId: String): Unit = mutex.withLock {
         withContext(Dispatchers.IO) {
             requireCanonicalUuid(mutationId, "media spool mutation id")
@@ -355,8 +471,16 @@ internal class FileImmutableMediaSpool(
 
     override suspend fun recoverAndSweep(
         retainedMutationIds: Set<String>,
+    ): Map<String, ImmutableMediaSpoolRecovery> = recoverAndSweepRetainingOpaque(retainedMutationIds, emptyList())
+
+    override suspend fun recoverAndSweepRetainingOpaque(
+        retainedMutationIds: Set<String>,
+        opaqueGroups: List<ImmutableMediaSpoolGroup>,
     ): Map<String, ImmutableMediaSpoolRecovery> = mutex.withLock {
         withContext(Dispatchers.IO) {
+            require(opaqueGroups.all { it.mutationId in retainedMutationIds })
+            val opaque = opaqueGroups.associateBy { it.mutationId }
+            opaqueGroups.forEach(::validateDeletingGroup)
             retainedMutationIds.forEach { requireCanonicalUuid(it, "retained spool mutation id") }
             ensureRoot()
             val recovered = linkedMapOf<String, ImmutableMediaSpoolRecovery>()
@@ -370,7 +494,7 @@ internal class FileImmutableMediaSpool(
                     deleteOwnedTree(child, rootPath)
                 } else {
                     requireOwnedDirectory(child, rootPath)
-                    recoverGroupLocked(mutationId)?.let { state -> recovered[mutationId] = state }
+                    if (mutationId !in opaque) recoverGroupLocked(mutationId)?.let { state -> recovered[mutationId] = state }
                 }
             }
             recovered
@@ -702,7 +826,7 @@ private class SpoolUploadSource(
     private val item: ImmutableMediaSpoolItem,
 ) : SyncMediaUploadSource {
     override val contentLength: Long = item.byteSize
-    override val mime: String = item.mime
+    override val mime: String? = item.mime
 
     override fun openStream(): InputStream {
         require(Files.isRegularFile(path, NOFOLLOW_LINKS)) { "media spool bytes are not regular" }
@@ -756,7 +880,7 @@ private fun encodeSlotIntent(intent: SlotIntent): String = buildJsonObject {
     put("slot", intent.slot)
     put("role", intent.role.wireName)
     put("byte_size", intent.byteSize)
-    put("mime", intent.mime)
+    put("mime", intent.mime?.let(::JsonPrimitive) ?: JsonNull)
     if (intent.width == null) put("width", JsonNull) else put("width", intent.width)
     if (intent.height == null) put("height", JsonNull) else put("height", intent.height)
 }.toString()
@@ -789,7 +913,7 @@ private fun encodeSidecar(mutationId: String, item: ImmutableMediaSpoolItem): St
         put("sha256", item.sha256)
         put("byte_size", item.byteSize)
         put("role", item.role.wireName)
-        put("mime", item.mime)
+        put("mime", item.mime?.let(::JsonPrimitive) ?: JsonNull)
         if (item.width == null) put("width", JsonNull) else put("width", item.width)
         if (item.height == null) put("height", JsonNull) else put("height", item.height)
     }.toString()
@@ -877,14 +1001,10 @@ private fun JsonObject.requiredString(key: String): String =
     get(key)?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank)
         ?: error("media spool $key is invalid")
 
-private fun JsonObject.requiredMime(key: String): String =
-    requireCanonicalMime(requiredString(key))
+private fun JsonObject.requiredMime(key: String): String? =
+    parseCanonicalMediaMime(get(key))
 
-private fun requireCanonicalMime(raw: String): String = raw.also {
-    require(it.toByteArray(Charsets.UTF_8).size in 1..CausalMediaPolicy.maxMimeBytes) {
-        "media spool mime is invalid"
-    }
-}
+private fun requireCanonicalMime(raw: String?): String? = requireCanonicalMediaMime(raw)
 
 private fun JsonObject.requiredUuid(key: String): String =
     requiredString(key).also { requireCanonicalUuid(it, "media spool $key") }

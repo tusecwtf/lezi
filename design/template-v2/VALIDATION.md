@@ -5,7 +5,12 @@ PRD and checked-in Open Design prototype. A 2026-07-26 rerun no longer passes
 the 30-type static/runtime gate because `pump_express` is missing; the dated
 results below are historical evidence, not a current all-green claim.
 
-## Equivalence contract
+2026-10-07: the missing historical `pump_express` catalog entry is restored;
+static checks pass locally. This is a prototype-only repair, not Android runtime
+or browser interaction evidence. Current product authority is `docs/spec/` and
+accepted ADRs; the following dated equivalence claims are historical.
+
+## Historical equivalence contract
 
 - `warm` remains the default; `journal` is selected under 菜单 → 显示 → 界面模板.
 - The selection is persisted in `SettingsLocal.visualStyle` / DataStore.

@@ -1,5 +1,7 @@
 package com.lezi.babylog.core.common
 
+import com.lezi.babylog.core.common.validation.StartupBoundaryObservation
+
 import com.lezi.babylog.core.common.deadline.RealtimeDeadline
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -161,6 +163,9 @@ class DefaultLocalDataGate(
     )
     private val mutex = Mutex()
     private val startMutex = Mutex()
+    // The realtime watchdog cannot wait for the persistence mutex. This narrow
+    // lock only arbitrates state publication; no persistence work runs under it.
+    private val publicationLock = Any()
     private val attemptGeneration = AtomicInteger()
     private val inspectScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var inFlightPublished: CompletableDeferred<LocalDataUpgradeState>? = null
@@ -203,26 +208,24 @@ class DefaultLocalDataGate(
     ): LocalDataUpgradeState {
         val work = inspectScope.launch {
             try {
-                published.complete(retryGeneration(generation, published))
+                publishTerminal(generation, published, retryGeneration(generation, published))
             } catch (cancelled: CancellationException) {
-                published.completeExceptionally(cancelled)
+                synchronized(publicationLock) { published.completeExceptionally(cancelled) }
                 throw cancelled
             }
         }
-        return RealtimeDeadline(maxElapsedMillis, "lezi-local-data-gate") {
-            if (attemptGeneration.get() != generation) return@RealtimeDeadline
-            if (state.value is LocalDataUpgradeState.Ready) return@RealtimeDeadline
+        val deadline = RealtimeDeadline(maxElapsedMillis, "lezi-local-data-gate") {
             val timedOut = LocalDataUpgradeState.Blocked(
                 reason = LocalDataUpgradeBlockReason.TimedOut,
                 detail = "本地数据安全检查超时",
             )
-            if (!published.complete(timedOut)) return@RealtimeDeadline
-            if (state.value is LocalDataUpgradeState.Ready) return@RealtimeDeadline
-            mutableState.value = timedOut
-            work.cancel()
-        }.use {
-            published.await()
+            if (publishTerminal(generation, published, timedOut)) work.cancel()
         }
+        // The inspection is shared and outlives any individual waiter. Close its
+        // watchdog when the shared outcome settles, including a timeout whose
+        // underlying blocking I/O may never return, not when a caller cancels.
+        published.invokeOnCompletion { deadline.close() }
+        return published.await()
     }
 
     private suspend fun retryGeneration(
@@ -234,15 +237,13 @@ class DefaultLocalDataGate(
             if (attemptGeneration.get() != generation) return state.value
             if (state.value is LocalDataUpgradeState.Ready) return state.value
             if (published.isCompleted) return published.getCompleted()
-            mutableState.value = LocalDataUpgradeState.Checking
+            if (!publishProgress(generation, published, LocalDataUpgradeState.Checking)) return state.value
         }
         val inspection = try {
             environment.inspect()
         } catch (failure: Throwable) {
             if (failure is CancellationException) throw failure
-            return publishBlock(
-                generation = generation,
-                published = published,
+            return block(
                 reason = failure.localDataReason(LocalDataUpgradeBlockReason.InconsistentData),
                 detail = failure.message.orEmpty().ifBlank { "无法读取本地数据状态" },
             )
@@ -298,10 +299,11 @@ class DefaultLocalDataGate(
 
             is LocalDataUpgradePlan.Upgrade -> {
                 for (step in plan.steps) {
-                    mutableState.value = LocalDataUpgradeState.Snapshotting(
-                        step.fromContractVersion,
-                        step.toContractVersion,
-                    )
+                    if (!publishProgress(
+                            generation, published,
+                            LocalDataUpgradeState.Snapshotting(step.fromContractVersion, step.toContractVersion),
+                        )
+                    ) return@withLock state.value
                     val snapshotFailure = runCatching {
                         environment.prepareSnapshot(step)
                     }.failureOrRethrowCancellation()
@@ -315,10 +317,11 @@ class DefaultLocalDataGate(
                         )
                     }
 
-                    mutableState.value = LocalDataUpgradeState.Migrating(
-                        step.fromContractVersion,
-                        step.toContractVersion,
-                    )
+                    if (!publishProgress(
+                            generation, published,
+                            LocalDataUpgradeState.Migrating(step.fromContractVersion, step.toContractVersion),
+                        )
+                    ) return@withLock state.value
                     val migrationFailure = runCatching {
                         step.migrate()
                     }.failureOrRethrowCancellation()
@@ -374,10 +377,7 @@ class DefaultLocalDataGate(
             ?.takeIf { it.reason == LocalDataUpgradeBlockReason.TimedOut }
         if (timedOut != null) return@withLock timedOut
         if (published.isCompleted) return@withLock published.getCompleted()
-        val ready = LocalDataUpgradeState.Ready(currentContractVersion)
-        if (!published.complete(ready)) return@withLock published.getCompleted()
-        mutableState.value = ready
-        ready
+        LocalDataUpgradeState.Ready(currentContractVersion)
     }
 
     fun diagnosticReport(): String = buildString {
@@ -396,20 +396,34 @@ class DefaultLocalDataGate(
     ): LocalDataUpgradeState.Blocked = LocalDataUpgradeState.Blocked(
         reason = reason,
         detail = detail,
-    ).also { mutableState.value = it }
+    )
 
-    private suspend fun publishBlock(
+    private fun publishProgress(
         generation: Int,
         published: CompletableDeferred<LocalDataUpgradeState>,
-        reason: LocalDataUpgradeBlockReason,
-        detail: String,
-    ): LocalDataUpgradeState = mutex.withLock {
-        if (attemptGeneration.get() != generation) return@withLock state.value
-        if (state.value is LocalDataUpgradeState.Ready) return@withLock state.value
-        if (published.isCompleted) return@withLock published.getCompleted()
-        val blocked = block(reason, detail)
-        published.complete(blocked)
-        blocked
+        progress: LocalDataUpgradeState,
+    ): Boolean = synchronized(publicationLock) {
+        if (attemptGeneration.get() != generation || published.isCompleted) return@synchronized false
+        mutableState.value = progress
+        true
+    }
+
+    private fun publishTerminal(
+        generation: Int,
+        published: CompletableDeferred<LocalDataUpgradeState>,
+        terminal: LocalDataUpgradeState,
+    ): Boolean = synchronized(publicationLock) {
+        if (attemptGeneration.get() != generation || published.isCompleted) {
+            StartupBoundaryObservation.record("gate:stale-terminal-rejected")
+            return@synchronized false
+        }
+        // Publish the observable outcome before resuming callers, including
+        // undispatched waiters that run synchronously inside complete(). The
+        // watchdog and worker share this arbitration so neither can overwrite
+        // the other's terminal outcome or a newer generation's state.
+        mutableState.value = terminal
+        published.complete(terminal)
+        true
     }
 }
 

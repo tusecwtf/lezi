@@ -31,6 +31,9 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import com.lezi.babylog.domain.BabyMergePreview
 import com.lezi.babylog.domain.BabyProfilePermissionException
+import com.lezi.babylog.domain.BabyCreationCommittedException
+import com.lezi.babylog.domain.BabyCreationCommittedCancellationException
+import kotlinx.coroutines.CancellationException
 import com.lezi.babylog.domain.CreateBabyInput
 import com.lezi.babylog.domain.DuplicateBabyNicknameException
 import com.lezi.babylog.domain.LocalFamilyIdentity
@@ -83,17 +86,17 @@ internal class BabyFamilyProfileCoordinator(
     private val requestLocalSync: () -> Unit,
 ) {
     fun observeHasBaby(): Flow<Boolean> =
-        combine(babyDao.observeAll(), syncPort.session()) { babies, session ->
+        combine(babyDao.observeAll(), syncPort.sessionPresentation()) { babies, session ->
             visibleBabyEntities(babies, session.role).isNotEmpty()
         }
 
     fun observeBabies(): Flow<List<Baby>> =
-        combine(babyDao.observeAll(), syncPort.session()) { babies, session ->
+        combine(babyDao.observeAll(), syncPort.sessionPresentation()) { babies, session ->
             visibleBabyEntities(babies, session.role).map { it.toModel() }
         }
 
     fun observeMemberLocalBabyOrphans(): Flow<List<Baby>> =
-        combine(babyDao.observeAll(), syncPort.session()) { babies, session ->
+        combine(babyDao.observeAll(), syncPort.sessionPresentation()) { babies, session ->
             if (session.role == com.lezi.babylog.sync.session.FamilyRole.Member) {
                 babies.filterNot(BabyEntity::familyAuthority).map { it.toModel() }
             } else {
@@ -102,7 +105,7 @@ internal class BabyFamilyProfileCoordinator(
         }
 
     fun observeCurrentBaby(): Flow<Baby?> =
-        combine(babyDao.observeAll(), settings.currentBabyId, syncPort.session()) {
+        combine(babyDao.observeAll(), settings.currentBabyId, syncPort.sessionPresentation()) {
                 babies,
                 storedId,
                 session,
@@ -126,7 +129,8 @@ internal class BabyFamilyProfileCoordinator(
         }
     }
 
-    suspend fun addBaby(input: CreateBabyInput): Long {
+    suspend fun addBaby(input: CreateBabyInput, clientUuid: String = newClientUuid()): Long {
+        require(clientUuid.isNotBlank()) { "宝宝创建标识不能为空" }
         requireCanManageBabyProfiles()
         val now = System.currentTimeMillis()
         val userId = ensureLocalUser(now)
@@ -136,6 +140,11 @@ internal class BabyFamilyProfileCoordinator(
         // Nickname uniqueness check and insert share one DB transaction so
         // concurrent addBaby(同名) cannot both pass the pre-check.
         val id = transactionRunner.run {
+            babyDao.getByClientUuid(clientUuid)?.let { existing ->
+                check(existing.deletedAt == null) { "这次创建的宝宝已删除，请重新填写" }
+                require(existing.familyId == familyId) { "宝宝创建标识与既有档案冲突" }
+                return@run existing.id
+            }
             ensureNicknameAvailable(nickname)
             babyDao.upsert(
                 BabyEntity(
@@ -146,13 +155,19 @@ internal class BabyFamilyProfileCoordinator(
                     birthWeightGrams = weight,
                     avatarPath = input.avatarPath,
                     themeColorArgb = input.themeColorArgb,
-                    clientUuid = newClientUuid(),
+                    clientUuid = clientUuid,
                     updatedAt = now,
                 ),
             )
         }
-        settings.setCurrentBabyId(id)
-        requestLocalSync()
+        try {
+            settings.setCurrentBabyId(id)
+            requestLocalSync()
+        } catch (cancelled: CancellationException) {
+            throw BabyCreationCommittedCancellationException(id, cancelled)
+        } catch (failure: Exception) {
+            throw BabyCreationCommittedException(id, failure)
+        }
         return id
     }
 
@@ -288,7 +303,7 @@ internal class BabyFamilyProfileCoordinator(
      * callers that mutate membership (delete/merge/set) must reassign explicitly.
      */
     suspend fun getCurrentBaby(): Baby? {
-        val role = syncPort.session().first().role
+        val role = syncPort.sessionPresentation().first().role
         val babies = visibleBabyEntities(babyDao.listAll(), role)
         val stored = settings.currentBabyId.first()
         val entity = pickCurrent(babies, stored) ?: return null
@@ -296,7 +311,7 @@ internal class BabyFamilyProfileCoordinator(
     }
 
     suspend fun listBabies(): List<Baby> {
-        val role = syncPort.session().first().role
+        val role = syncPort.sessionPresentation().first().role
         return visibleBabyEntities(babyDao.listAll(), role).map { it.toModel() }
     }
 
@@ -331,7 +346,7 @@ internal class BabyFamilyProfileCoordinator(
     suspend fun setCurrentBaby(babyId: Long) {
         val baby = babyDao.get(babyId) ?: return
         if (
-            syncPort.session().first().role == com.lezi.babylog.sync.session.FamilyRole.Member &&
+            syncPort.sessionPresentation().first().role == com.lezi.babylog.sync.session.FamilyRole.Member &&
             !baby.familyAuthority
         ) {
             throw BabyProfilePermissionException()
@@ -343,7 +358,7 @@ internal class BabyFamilyProfileCoordinator(
     suspend fun updateBabyLocalTheme(babyId: Long, themeColorArgb: Int) {
         val baby = babyDao.get(babyId) ?: return
         if (
-            syncPort.session().first().role == com.lezi.babylog.sync.session.FamilyRole.Member &&
+            syncPort.sessionPresentation().first().role == com.lezi.babylog.sync.session.FamilyRole.Member &&
             !baby.familyAuthority
         ) {
             throw BabyProfilePermissionException()
@@ -353,7 +368,7 @@ internal class BabyFamilyProfileCoordinator(
 
     suspend fun moveBabyLocal(babyId: Long, delta: Int): BabyLocalMoveResult =
         transactionRunner.run {
-            val role = syncPort.session().first().role
+            val role = syncPort.sessionPresentation().first().role
             val visible = visibleBabyEntities(babyDao.listAll(), role)
             if (visible.isEmpty()) {
                 BabyLocalMoveResult.Empty
@@ -621,7 +636,7 @@ internal class BabyFamilyProfileCoordinator(
     private suspend fun reconcileMemberLocalBabies(forceMemberRules: Boolean): Int {
         if (
             !forceMemberRules &&
-            syncPort.session().first().role != com.lezi.babylog.sync.session.FamilyRole.Member
+            syncPort.sessionPresentation().first().role != com.lezi.babylog.sync.session.FamilyRole.Member
         ) return 0
         val active = babyDao.listAll()
         val authorities = active.filter(BabyEntity::familyAuthority)
@@ -652,7 +667,7 @@ internal class BabyFamilyProfileCoordinator(
     internal suspend fun requireActiveBaby(babyId: Long): BabyEntity =
         requireNotNull(babyDao.get(babyId)) { "宝宝档案不存在，请返回后重试" }.also { baby ->
             if (
-                syncPort.session().first().role == com.lezi.babylog.sync.session.FamilyRole.Member &&
+                syncPort.sessionPresentation().first().role == com.lezi.babylog.sync.session.FamilyRole.Member &&
                 !baby.familyAuthority
             ) {
                 throw BabyProfilePermissionException()
@@ -660,7 +675,7 @@ internal class BabyFamilyProfileCoordinator(
         }
 
     private suspend fun requireCanManageBabyProfiles() {
-        if (syncPort.session().first().role == com.lezi.babylog.sync.session.FamilyRole.Member) {
+        if (syncPort.sessionPresentation().first().role == com.lezi.babylog.sync.session.FamilyRole.Member) {
             throw BabyProfilePermissionException()
         }
     }
@@ -672,7 +687,7 @@ internal class BabyFamilyProfileCoordinator(
         forceMemberRules: Boolean = false,
     ): Boolean {
         val member = forceMemberRules ||
-            syncPort.session().first().role == com.lezi.babylog.sync.session.FamilyRole.Member
+            syncPort.sessionPresentation().first().role == com.lezi.babylog.sync.session.FamilyRole.Member
         if (member && (source.familyAuthority || !target.familyAuthority)) {
             throw BabyProfilePermissionException()
         }

@@ -5,6 +5,8 @@ import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.model.SyncStatus
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 import com.lezi.babylog.sync.backend.DisplayNameUpdateResult
 import com.lezi.babylog.sync.backend.MemberLoginStatus
 import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
@@ -19,6 +21,8 @@ import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.SetupProbeResult
 import com.lezi.babylog.sync.session.ShallowSyncLine
 import com.lezi.babylog.sync.session.SyncSession
+import com.lezi.babylog.sync.session.SyncSessionPresentation
+import com.lezi.babylog.sync.session.toPresentation
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 import com.lezi.babylog.sync.session.UnacceptedFactPresentation
 import com.lezi.babylog.sync.session.BadGroupPresentation
@@ -103,11 +107,15 @@ class NoOpLocalClearRecoveryGate : LocalClearRecoveryGate {
 }
 
 fun interface RemovedDeviceLocalClearGate {
-    suspend fun clearAllLocalFamilyData()
+    suspend fun localClearWorkflow(): LocalClearWorkflow
 }
 
 class NoOpRemovedDeviceLocalClearGate : RemovedDeviceLocalClearGate {
-    override suspend fun clearAllLocalFamilyData() = Unit
+    override suspend fun localClearWorkflow(): LocalClearWorkflow = object : LocalClearWorkflow {
+        override suspend fun <T> withLocalExclusion(block: suspend () -> T): T = block()
+        override suspend fun clearRoom() = Unit
+        override suspend fun finishCommitted() = Unit
+    }
 }
 
 class SyncNotEnabledException : Exception("请先配置家庭服务器并加入家庭")
@@ -117,6 +125,33 @@ class MemberLoginQrUnavailableException : Exception("这个二维码已失效，
 class MemberLoginQrTrustChangedException : Exception("家庭服务器安全信息不一致，登录已停止")
 class DifferentFamilyServerException :
     Exception("候选服务器属于另一个已配置家庭，不能合并或替换当前家庭")
+
+/** What is known about the pending source command, independent of logout. */
+enum class SourceCommandLogoutState {
+    Unknown,
+    ConfirmedRefreshRequired,
+}
+
+/**
+ * An ephemeral preview of the exact source work a user may abandon on logout.
+ *
+ * Only sync can mint this object. Callers must return the same instance after
+ * showing its context; it is never saved across dialog reopen or process death.
+ * [exactEvidence] is an immutable, credential-free sync-owned snapshot, not a
+ * caller-supplied permission flag. Logout rechecks it before contacting a server.
+ * A null [serverOrigin] means the historical target could not be proven.
+ */
+class SourceCommandLogoutConsent internal constructor(
+    requestIds: List<String>,
+    val serverOrigin: String?,
+    val state: SourceCommandLogoutState,
+    internal val exactEvidence: Any,
+) {
+    val requestIds: List<String> = java.util.Collections.unmodifiableList(requestIds.toList())
+}
+
+class SourceCommandLogoutConsentChangedException :
+    IllegalStateException("待确认的来源操作已变化，请重新打开退出确认")
 
 /**
  * Outcome of [SyncPort.createFamily]: owner session plus whether the NAS reclaimed.
@@ -136,15 +171,23 @@ sealed interface InitialFamilyDataRecovery {
 }
 
 data class CreateFamilyResult(
+    @Deprecated("Use sessionPresentation outside sync internals")
     val session: SyncSession,
     val reclaimed: Boolean,
     val dataRecovery: InitialFamilyDataRecovery = InitialFamilyDataRecovery.Complete,
-)
+) {
+    /** Read-only result for ordinary callers; credentials remain owned by sync internals. */
+    val sessionPresentation: SyncSessionPresentation get() = session.toPresentation()
+}
 
 data class OwnerLoginResult(
+    @Deprecated("Use sessionPresentation outside sync internals")
     val session: SyncSession,
     val dataRecovery: InitialFamilyDataRecovery,
-)
+) {
+    /** Read-only result for ordinary callers; credentials remain owned by sync internals. */
+    val sessionPresentation: SyncSessionPresentation get() = session.toPresentation()
+}
 
 data class DisasterRecoverySummary(
     val babies: Int,
@@ -159,31 +202,59 @@ data class DisasterRecoverySummary(
         get() = babies + records + carePlans + fulfillmentRelations + customItems + photos
 }
 
+data class DisasterRecoveryStartPreview(val origin: String, val ownerDisplayName: String, val deviceName: String)
+class NoPendingDisasterRecoveryException : IllegalStateException("没有可继续的家庭恢复批次")
+
 data class DisasterRecoveryProgress(
     val summary: DisasterRecoverySummary?,
     val status: String,
     val expiresAtEpochSeconds: Long,
+    /** Derived from exact local target and durable credentials, never from server status alone. */
+    val localActivationReady: Boolean = false,
+    val retainedStart: DisasterRecoveryStartPreview? = null,
 )
 
 data class MemberLoginQrResult(
+    @Deprecated("Use sessionPresentation outside sync internals")
     val session: SyncSession,
     val dataRecovery: InitialFamilyDataRecovery,
-)
+) {
+    /** Read-only result for ordinary callers; credentials remain owned by sync internals. */
+    val sessionPresentation: SyncSessionPresentation get() = session.toPresentation()
+}
 
 data class PendingMemberLogin(
     val requestId: String,
     val displayName: String,
     val deviceName: String,
     val expiresAtEpochSeconds: Long,
+    /** Local operation identity; never transmitted as a server idempotency key. */
+    val operationId: String = requestId,
+    val endpointOrigin: String = "",
+    val remoteOutcomeUnknown: Boolean = false,
+)
+
+class MemberLoginAttemptRetiredException : IllegalStateException("原加入申请已放弃或身份已变化，未恢复旧会话")
+
+class MemberLoginOutcomeUnknownException(val attempt: PendingMemberLogin) : IllegalStateException(
+    "加入申请的远端结果待确认，暂不重复发送。请让管理员检查旧申请，并确认已拒绝或过期后，在这台设备放弃等待再申请；本机放弃不代表服务器已取消。",
 )
 
 sealed interface MemberLoginCheckResult {
-    data class Waiting(val request: PendingMemberLogin) : MemberLoginCheckResult
-    data class Terminal(val status: MemberLoginStatus) : MemberLoginCheckResult
+    /** Present on production checks; legacy callers may omit it. Never a credential. */
+    val operationId: String? get() = null
+    data class Waiting(val request: PendingMemberLogin) : MemberLoginCheckResult {
+        override val operationId: String get() = request.operationId
+    }
+    data class Terminal(val status: MemberLoginStatus, override val operationId: String? = null) : MemberLoginCheckResult
     data class Joined(
+        @Deprecated("Use sessionPresentation outside sync internals")
         val session: SyncSession,
         val dataRecovery: InitialFamilyDataRecovery,
-    ) : MemberLoginCheckResult
+        override val operationId: String? = null,
+    ) : MemberLoginCheckResult {
+        val sessionPresentation: SyncSessionPresentation get() = session.toPresentation()
+    }
 }
 
 /**
@@ -378,6 +449,12 @@ interface SyncPort {
     suspend fun probeServerAvailability(
         reason: AvailabilityProbeReason,
     ): Result<FamilyServerAvailability> = Result.success(FamilyServerAvailability.Disabled)
+    /** Credential-free, owner-coherent state for feature/domain/app consumers. */
+    fun sessionPresentation(): Flow<SyncSessionPresentation> =
+        session().map(SyncSession::toPresentation).distinctUntilChanged()
+
+    /** Legacy credential-bearing adapter for sync internals and transitioning tests only. */
+    @Deprecated("Use sessionPresentation() outside sync internals")
     fun session(): Flow<SyncSession>
     /**
      * Last classified family-session failure. Account tap opens the 0.4.4 explanation.
@@ -418,6 +495,11 @@ interface SyncPort {
     suspend fun consumeDeviceRemovedReceipt() = Unit
     /** Independent deferred generation recovery; not an atomic publish unit. */
     fun pendingGenerationResync(): Flow<Boolean> = kotlinx.coroutines.flow.flowOf(false)
+    /** One producer-owned identity/directory revision; never waits for the network. */
+    fun familyReadSnapshot(): Flow<com.lezi.babylog.sync.session.FamilyReadSnapshot> =
+        sessionPresentation().map {
+            com.lezi.babylog.sync.session.FamilyReadSnapshot(it, identityEpoch = null)
+        }
     /** Device-local minimal roster; never waits for the family server. */
     fun familyMemberDirectory(): Flow<List<FamilyMember>> =
         kotlinx.coroutines.flow.flowOf(emptyList())
@@ -456,7 +538,8 @@ interface SyncPort {
     ): SetupProbeResult = SetupProbeResult.Failed.Unreachable
     suspend fun rememberEndpoint(endpoint: TrustedEndpointProfile): Result<Unit> =
         Result.failure(SyncNotEnabledException())
-    suspend fun forgetEndpoint(): Result<Unit> = Result.success(Unit)
+    suspend fun forgetEndpoint(): Result<Unit> =
+        Result.failure(UnsupportedOperationException("Endpoint removal is not implemented"))
     /** Reclaims exact committed media tombstones; logical mutation success is independent. */
     suspend fun cleanupTombstonedMedia(clientUuids: Set<String>): Result<Unit>
 
@@ -485,13 +568,13 @@ interface SyncPort {
     ): com.lezi.babylog.sync.backend.ConflictWithdrawResult =
         throw UnsupportedOperationException("Conflict withdraw is not implemented")
 
-    /** Author equivalence declare (wire §12.1). */
+    /** Author equivalence declare; returns only after durable local canonical settlement (wire §12.1). */
     suspend fun declareSourceRelation(
         request: com.lezi.babylog.sync.backend.SourceRelationDeclareRequest,
     ): com.lezi.babylog.sync.backend.SourceRelationResult =
         throw UnsupportedOperationException("Source relation declare is not implemented")
 
-    /** Owner full-group resolve (wire §12.2). */
+    /** Owner full-group resolve; returns only after durable local canonical settlement (wire §12.2). */
     suspend fun resolveSourceRelationGroup(
         request: com.lezi.babylog.sync.backend.SourceRelationResolveGroupRequest,
     ): com.lezi.babylog.sync.backend.SourceRelationResult =
@@ -534,6 +617,9 @@ interface SyncPort {
         deviceName: String,
         rootPassword: String,
     ): Result<DisasterRecoveryProgress> = Result.failure(SyncNotEnabledException())
+    /** Replays only the original durably bound start target and nonsecret arguments. */
+    suspend fun retryDisasterRecoveryStart(rootPassword: String): Result<DisasterRecoveryProgress> =
+        Result.failure(UnsupportedOperationException("此客户端不支持原恢复开始请求重试"))
     /** Queries and resumes an existing secure checkpoint after process/network interruption. */
     suspend fun resumeDisasterRecovery(): Result<DisasterRecoveryProgress> =
         Result.failure(SyncNotEnabledException())
@@ -552,6 +638,9 @@ interface SyncPort {
         displayName: String,
         deviceName: String,
     ): Result<PendingMemberLogin> = Result.failure(SyncNotEnabledException())
+    /** Local-only non-secret recovery read; never re-probes or submits the candidate. */
+    suspend fun recoverPendingReconnectMember(): Result<PendingMemberLogin?> =
+        Result.failure(SyncNotEnabledException())
     suspend fun checkReconnectMember(): Result<MemberLoginCheckResult> =
         Result.failure(SyncNotEnabledException())
     suspend fun cancelReconnectMember(): Result<Unit> =
@@ -601,6 +690,22 @@ interface SyncPort {
         Result.failure(SyncNotEnabledException())
     suspend fun revokeFamilyDevice(deviceId: String): Result<Unit> =
         Result.failure(SyncNotEnabledException())
+    /**
+     * Reads a frozen preview for the existing logout confirmation. Null proves
+     * there is no source command to abandon; failure must disable confirmation.
+     */
+    fun sourceCommandClearNotice(): Flow<com.lezi.babylog.sync.sourcerelation.SourceCommandClearNotice?> =
+        kotlinx.coroutines.flow.flowOf(null)
+    suspend fun acknowledgeSourceCommandClearNotice(notice: com.lezi.babylog.sync.sourcerelation.SourceCommandClearNotice) {
+        throw UnsupportedOperationException("Source command clear notice acknowledgement is not implemented")
+    }
+
+    suspend fun prepareSourceCommandLogout(): Result<SourceCommandLogoutConsent?> =
+        Result.failure(UnsupportedOperationException("来源操作退出确认不可用"))
+    /** Abandons only the exact source preview shown and confirmed by the user. */
+    suspend fun logoutCurrentDevice(consent: SourceCommandLogoutConsent): Result<Unit> =
+        Result.failure(UnsupportedOperationException("来源操作退出确认不可用"))
+    /** Pending source work requires the consent overload; never infer consent. */
     suspend fun logoutCurrentDevice(): Result<Unit> = Result.failure(SyncNotEnabledException())
     /** Leaves the current device's family session (no familyId; always current session). */
     suspend fun leave(): Result<Unit>
@@ -622,7 +727,7 @@ interface SyncPort {
      * Clears its frozen envelope and pending dirty marker while preserving the local care fact.
      */
     suspend fun abandonRejectedMutation(entityType: String, clientUuid: String): Result<Unit> =
-        Result.success(Unit)
+        Result.failure(UnsupportedOperationException("Rejected mutation abandonment is not implemented"))
 
     /**
      * Abandons each referenced row's frozen-but-unpublished envelope so a
@@ -633,7 +738,7 @@ interface SyncPort {
      */
     suspend fun abandonPendingLocalMutations(
         entities: List<PendingLocalMutationRef>,
-    ): Result<Unit> = Result.success(Unit)
+    ): Result<Unit> = Result.failure(UnsupportedOperationException("Pending mutation abandonment is not implemented"))
 
     /**
      * Local-only dismiss of an unaligned item. Never invents a `conflict_id`.
@@ -644,7 +749,7 @@ interface SyncPort {
         entityType: String,
         clientUuid: String,
         kind: UnresolvedLocalKind,
-    ): Result<Unit> = Result.success(Unit)
+    ): Result<Unit> = Result.failure(UnsupportedOperationException("Local unresolved dismissal is not implemented"))
 
     /** All non-abandoned terminal receipts (except fulfillment candidates). */
     fun unacceptedFacts(): Flow<List<UnacceptedFactPresentation>> =

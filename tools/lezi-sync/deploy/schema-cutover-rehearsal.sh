@@ -113,7 +113,7 @@ validate_receipt() {
     [[ "$(receipt_value "${file}" ready_status)" == ok ]] || die "receipt readiness did not pass"
     receipt_value "${file}" fact_read_status >/dev/null
   fi
-  if rg -n '192\.168\.77\.4|nas-account|secret=|BEGIN .*PRIVATE KEY' "${file}" >/dev/null; then
+  if rg -n '192\.168\.[0-9]+\.[0-9]+|10\.[0-9]+\.[0-9]+\.[0-9]+|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]+\.[0-9]+|secret=|BEGIN .*PRIVATE KEY' "${file}" >/dev/null; then
     die "receipt contains production identity or secret material"
   fi
 }

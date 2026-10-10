@@ -86,3 +86,38 @@ dependencies {
     testImplementation(testFixtures(project(":core:model")))
 
 }
+
+// Capacity proofs perform GiB of real filesystem I/O and need an exclusive validation window.
+// They must never silently run (or appear as skipped passes) in ordinary unit/aggregate suites.
+val publicRestoreCapacityTask = "publicRestoreCapacityTest"
+val manualRestoreCapacityCategory = "com.lezi.babylog.sync.ManualRestoreCapacity"
+tasks.withType<Test>().configureEach {
+    if (name != publicRestoreCapacityTask) {
+        useJUnit { excludeCategories(manualRestoreCapacityCategory) }
+        filter {
+            excludeTestsMatching("*RestoreFileSnapshotStoreCapacityTest")
+        }
+    }
+}
+
+tasks.register<Test>(publicRestoreCapacityTask) {
+    group = "verification"
+    description = "Manually prove the public 520 MiB JVM restore flow beside a full 512 MiB ordinary spool"
+    val debugUnitTests = tasks.named<Test>("testDebugUnitTest").get()
+    dependsOn("compileDebugUnitTestSources")
+    testClassesDirs = debugUnitTests.testClassesDirs
+    classpath = debugUnitTests.classpath
+    useJUnit { includeCategories(manualRestoreCapacityCategory) }
+    filter {
+        includeTestsMatching("com.lezi.babylog.sync.PublicRestoreCapacityTest")
+        isFailOnNoMatchingTests = true
+    }
+    maxParallelForks = 1
+    maxHeapSize = "512m"
+    systemProperty("lezi.publicRestoreCapacity", "true")
+    providers.gradleProperty("leziRestoreCapacityTmpDir").orNull?.let {
+        systemProperty("lezi.restoreCapacityTmpDir", it)
+    }
+    testLogging.showStandardStreams = true
+    doNotTrackState("A manual capacity proof must execute and emit fresh counters on every invocation")
+}

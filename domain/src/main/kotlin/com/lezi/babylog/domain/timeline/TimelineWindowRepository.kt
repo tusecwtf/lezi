@@ -1,9 +1,10 @@
 package com.lezi.babylog.domain.timeline
 import com.lezi.babylog.core.database.MediaAssetEntity
-import com.lezi.babylog.core.database.ProjectedRecordEntity
+import com.lezi.babylog.core.database.causal.SourceRelationRole
 import com.lezi.babylog.core.database.TimelineWindowDao
 import com.lezi.babylog.core.database.TimelineWindowDbSnapshot
 import com.lezi.babylog.core.database.causal.WakeObservationEntity
+import com.lezi.babylog.core.model.canEditWakeContent
 import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.Record
@@ -13,13 +14,19 @@ import com.lezi.babylog.core.model.SleepIntervalProjection
 import com.lezi.babylog.core.model.isWakeShortcutTarget
 import com.lezi.babylog.core.model.rootPublicationState
 import com.lezi.babylog.domain.canManageCreatorOwnedFamilyEntity
+import com.lezi.babylog.domain.carelog.CareDayBounds
+import com.lezi.babylog.domain.carelog.NearbySubtypeHint
+import com.lezi.babylog.domain.carelog.SuspectedDuplicateGroup
+import com.lezi.babylog.domain.carelog.SuspectedDuplicatePresentation
+import com.lezi.babylog.domain.carelog.SuspectedDuplicateProjection
+import com.lezi.babylog.domain.carelog.TimelineDuplicateRow
 import com.lezi.babylog.domain.carelog.SleepPresentation
 import com.lezi.babylog.domain.carelog.toProjectedSleepRecord
 import com.lezi.babylog.domain.toModel
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.session.CreatorAcknowledgementRef
 import com.lezi.babylog.sync.session.FamilyRole
-import com.lezi.babylog.sync.session.SyncSession
+import com.lezi.babylog.sync.session.FamilyReadSnapshot
 import com.lezi.babylog.sync.session.UploaderMemberRef
 import com.lezi.babylog.sync.session.resolveRecordUploaderLabel
 import com.lezi.babylog.sync.session.toUploaderRef
@@ -28,13 +35,19 @@ import java.time.LocalDate
 import java.time.ZoneId
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapLatest
 
@@ -144,6 +157,7 @@ data class TimelineAudienceSnapshot(
     val membershipId: String,
     val role: FamilyRole,
     val members: List<UploaderMemberRef>,
+    val identityEpoch: Long?,
 )
 
 data class TimelineRecordRow(
@@ -187,6 +201,7 @@ data class TimelineCarePlanRow(
     val hasUnacceptedReceipt: Boolean = false,
 )
 
+/** Completed public fact view. Source roots only appear in explicit provenance/duplicate detail. */
 data class TimelineWindowSnapshot(
     val revision: Long,
     val request: TimelineWindowRequest,
@@ -195,13 +210,40 @@ data class TimelineWindowSnapshot(
     val railRecordRows: List<TimelineRecordRow>,
     val planRows: List<TimelineCarePlanRow>,
     val openSleep: Record?,
+    val summaryBounds: CareDayBounds,
+    val openDuplicateGroups: List<SuspectedDuplicateGroup>,
+    val duplicateRows: List<TimelineDuplicateRow>,
+    val autoAlignedDisplayClientUuids: Set<String>,
+    val nearbySubtypeHints: Map<String, String>,
+    val sourceRecordsByDisplay: Map<String, List<Record>>,
+    val evaluatedAtMillis: Long,
+    val lastSuccessAtMillis: Long?,
+)
+
+/** Private wake-projected inputs, never exposed as ordinary display facts. */
+private data class TimelineWindowFacts(
+    val revision: Long,
+    val request: TimelineWindowRequest,
+    val audience: TimelineAudienceSnapshot,
+    val selectedRows: List<TimelineRecordRow>,
+    val allRows: List<TimelineRecordRow>,
+    val planRows: List<TimelineCarePlanRow>,
+    val sourceRoles: Set<String>,
+    val autoAlignedDisplayClientUuids: Set<String>,
+    val nearbySubtypeHints: Map<String, String>,
+    val sourceRecordsByDisplay: Map<String, List<Record>>,
+    val lastSuccessAtMillis: Long?,
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)
-class TimelineWindowRepository @Inject constructor(
+class TimelineWindowRepository internal constructor(
     private val timelineWindowDao: TimelineWindowDao,
     private val syncPort: SyncPort,
+    private val projectionDispatcher: CoroutineDispatcher,
 ) {
+    @Inject constructor(timelineWindowDao: TimelineWindowDao, syncPort: SyncPort) :
+        this(timelineWindowDao, syncPort, Dispatchers.Default)
+
     private val revisions = AtomicLong(0L)
 
     fun refreshMembers() {
@@ -209,49 +251,52 @@ class TimelineWindowRepository @Inject constructor(
     }
 
     fun observe(request: TimelineWindowRequest): Flow<TimelineWindowSnapshot> =
-        audienceSeeds().flatMapLatest { audience ->
-            timelineWindowDao.observeInvalidations().mapLatest {
-                val database = timelineWindowDao.loadSnapshot(
-                    babyId = request.babyId,
-                    recordStartInclusive = request.railStartMillis,
-                    recordEndExclusive = request.railEndMillis,
-                    planDayStart = request.dayStartMillis,
-                    planDayEnd = request.dayEndMillis,
-                    nowMillis = request.overdueHorizonMillis,
-                    includeOverdue = request.includeOverduePlans,
-                )
-                assemble(request, database, audience, revisions.incrementAndGet())
+        observe(request, flowOf(request.nowMillis))
+
+    /** Clock ticks only reproject cached window facts; no Room, member, wake or media reads. */
+    fun observe(
+        request: TimelineWindowRequest,
+        nowMillis: Flow<Long>,
+    ): Flow<TimelineWindowSnapshot> = syncPort.familyReadSnapshot()
+        .map(FamilyReadSnapshot::identityKey)
+        .distinctUntilChanged()
+        .flatMapLatest { identity ->
+            combine(
+                timelineWindowDao.observeInvalidations().mapLatest {
+                    timelineWindowDao.loadSnapshot(
+                        babyId = request.babyId,
+                        recordStartInclusive = request.railStartMillis,
+                        recordEndExclusive = request.railEndMillis,
+                        planDayStart = request.dayStartMillis,
+                        planDayEnd = request.dayEndMillis,
+                        nowMillis = request.overdueHorizonMillis,
+                        includeOverdue = request.includeOverduePlans,
+                    ).also { currentCoroutineContext().ensureActive() }
+                },
+                syncPort.familyReadSnapshot()
+                    .filter { it.identityKey() == identity }
+                    .distinctUntilChanged(),
+            ) { database, family ->
+                withContext(projectionDispatcher) {
+                    assemble(request, database, family, revisions.incrementAndGet())
+                }
+            }.combine(nowMillis) { facts, now ->
+                withContext(projectionDispatcher) { complete(facts, now) }
             }
-        }
+        }.buffer(0)
 
     fun observe(requests: Flow<TimelineWindowRequest>): Flow<TimelineWindowSnapshot> =
         requests.distinctUntilChanged { old, new -> old.loadKey == new.loadKey }
             .flatMapLatest(::observe)
 
-    private fun audienceSeeds(): Flow<TimelineAudienceSeed> =
-        combine(
-            syncPort.session()
-                .map { it.toTimelineAudienceKey() }
-                .distinctUntilChanged(),
-            syncPort.familyMemberDirectory(),
-        ) { key, directory ->
-            TimelineAudienceSeed(
-                key = key,
-                members = if (key.isFamilyJoined) {
-                    directory.mapNotNull { it.toUploaderRef() }
-                } else {
-                    emptyList()
-                },
-            )
-        }.distinctUntilChanged()
-
     private suspend fun assemble(
         request: TimelineWindowRequest,
         database: TimelineWindowDbSnapshot,
-        audienceSeed: TimelineAudienceSeed,
+        family: FamilyReadSnapshot,
         revision: Long,
-    ): TimelineWindowSnapshot {
+    ): TimelineWindowFacts {
         val context = currentCoroutineContext()
+        val session = family.session
         val recordMedia = database.media
             .filter { it.recordId != null }
             .groupBy { requireNotNull(it.recordId) }
@@ -260,11 +305,12 @@ class TimelineWindowRepository @Inject constructor(
             .groupBy { requireNotNull(it.carePlanId) }
         val audience = TimelineAudienceSnapshot(
             revision = revision,
-            isFamilyJoined = audienceSeed.key.isFamilyJoined,
-            familyId = audienceSeed.key.familyId,
-            membershipId = audienceSeed.key.membershipId,
-            role = audienceSeed.key.role,
-            members = audienceSeed.members,
+            isFamilyJoined = session.isJoined,
+            familyId = session.familyId,
+            membershipId = session.membershipId.trim(),
+            role = session.role,
+            members = if (session.isJoined) family.members.mapNotNull { it.toUploaderRef() } else emptyList(),
+            identityEpoch = family.identityEpoch,
         )
 
         val allRecordRows = database.records.map { projection ->
@@ -280,7 +326,7 @@ class TimelineWindowRepository @Inject constructor(
                 creatorMembershipId = record.createdByMembershipId,
                 actorMembershipId = audience.membershipId,
                 actorIsAdmin = audience.role == FamilyRole.Owner,
-                creatorAcknowledgementPending = audienceSeed.key.pendingCreatorAcknowledgements
+                creatorAcknowledgementPending = session.pendingCreatorAcknowledgements
                     .contains(CreatorAcknowledgementRef("record", record.clientUuid)),
             )
             val legalWakeUuids = sleepInterval?.visibleObservations
@@ -310,8 +356,12 @@ class TimelineWindowRepository @Inject constructor(
                         effective = sleepInterval?.endSource ==
                             com.lezi.babylog.core.model.SleepEndSource.EFFECTIVE &&
                             sleepInterval.endObservationClientUuid == wake.clientUuid,
-                        canEdit = wake.observerMembershipId.isNotBlank() &&
-                            wake.observerMembershipId == audience.membershipId,
+                        canEdit = canEditWakeContent(
+                            observerMembershipId = wake.observerMembershipId,
+                            actorMembershipId = audience.membershipId,
+                            actorIsOwner = audience.role == FamilyRole.Owner,
+                            syncDirty = wake.syncDirty,
+                        ),
                     )
                 }
             TimelineRecordRow(
@@ -362,7 +412,7 @@ class TimelineWindowRepository @Inject constructor(
                 creatorMembershipId = plan.createdByMembershipId,
                 actorMembershipId = audience.membershipId,
                 actorIsAdmin = audience.role == FamilyRole.Owner,
-                creatorAcknowledgementPending = audienceSeed.key.pendingCreatorAcknowledgements
+                creatorAcknowledgementPending = session.pendingCreatorAcknowledgements
                     .contains(CreatorAcknowledgementRef("care_plan", plan.clientUuid)),
             )
             TimelineCarePlanRow(
@@ -382,56 +432,104 @@ class TimelineWindowRepository @Inject constructor(
                 ),
                 hasUnacceptedReceipt = database.unacceptedReceiptEpochs[plan.clientUuid] == plan.updatedAt,
             )
-        }.sortedWith(
-            compareBy<TimelineCarePlanRow> {
-                if (it.carePlan.effectiveStatus(request.nowMillis) == CarePlanStatus.MISSED) {
-                    0
-                } else {
-                    1
-                }
-            }.thenBy { it.carePlan.scheduledAt },
-        )
+        }
         context.ensureActive()
-        val openSleep = allRecordRows.asSequence()
-            .filter { row ->
-                val interval = row.sleepInterval
-                interval != null && isWakeShortcutTarget(interval)
+        val recordsByUuid = allRecordRows.associate { it.record.clientUuid to it.record }
+        val sourceRoles = database.sourceRelations.asSequence()
+            .filter { it.role == SourceRelationRole.SOURCE }
+            .mapTo(linkedSetOf()) { it.recordClientUuid }
+        val sourcesByDisplay = linkedMapOf<String, MutableList<Record>>()
+        database.sourceRelations.forEach { relation ->
+            context.ensureActive()
+            if (relation.role == SourceRelationRole.SOURCE && relation.displayClientUuid.isNotBlank()) {
+                recordsByUuid[relation.recordClientUuid]?.let { source ->
+                    sourcesByDisplay.getOrPut(relation.displayClientUuid, ::mutableListOf).add(source)
+                }
             }
-            .map(TimelineRecordRow::record)
-            .maxWithOrNull(
-                compareBy<Record> { it.timestamp }.thenBy { it.clientUuid },
-            )
-        return TimelineWindowSnapshot(
+        }
+        return TimelineWindowFacts(
             revision = revision,
             request = request,
             audience = audience,
-            recordRows = selectedRows,
-            railRecordRows = allRecordRows,
+            selectedRows = selectedRows,
+            allRows = allRecordRows,
             planRows = planRows,
-            openSleep = openSleep,
+            sourceRoles = sourceRoles,
+            autoAlignedDisplayClientUuids = database.sourceRelations.asSequence()
+                .filter { it.autoAligned }
+                .mapTo(linkedSetOf()) { it.displayClientUuid },
+            nearbySubtypeHints = NearbySubtypeHint.hints(
+                selectedRows.map(TimelineRecordRow::record), sourceRoles,
+            ),
+            sourceRecordsByDisplay = sourcesByDisplay,
+            lastSuccessAtMillis = session.lastSuccessAt,
+        )
+    }
+
+    private suspend fun complete(facts: TimelineWindowFacts, nowMillis: Long): TimelineWindowSnapshot {
+        val context = currentCoroutineContext()
+        val request = facts.request
+        val rawRail = facts.allRows.map { context.ensureActive(); it.record }
+        val projection = SuspectedDuplicateProjection.project(
+            records = rawRail,
+            startDate = request.selectedDay,
+            dayCount = 1,
+            zone = request.zoneId,
+            now = nowMillis,
+            sourceRoleClientUuids = facts.sourceRoles,
+        )
+        val groupMembers = projection.openGroups.flatMapTo(linkedSetOf()) { it.memberClientUuids }
+        val duplicateRecords = (facts.selectedRows.map(TimelineRecordRow::record) +
+            rawRail.filter { it.clientUuid in groupMembers }).distinctBy(Record::clientUuid)
+        val ordinaryRows = facts.selectedRows.filter { it.record.clientUuid !in facts.sourceRoles }
+        val ordinaryRail = facts.allRows.filter { it.record.clientUuid !in facts.sourceRoles }
+        context.ensureActive()
+        return TimelineWindowSnapshot(
+            revision = facts.revision,
+            request = request,
+            audience = facts.audience,
+            recordRows = ordinaryRows,
+            railRecordRows = ordinaryRail,
+            planRows = facts.planRows.sortedWith(
+                compareBy<TimelineCarePlanRow> {
+                    if (it.carePlan.effectiveStatus(nowMillis) == CarePlanStatus.MISSED) 0 else 1
+                }.thenBy { it.carePlan.scheduledAt },
+            ),
+            openSleep = ordinaryRail.asSequence()
+                .filter { it.sleepInterval?.let(::isWakeShortcutTarget) == true }
+                .map(TimelineRecordRow::record)
+                .maxWithOrNull(compareBy<Record> { it.timestamp }.thenBy { it.clientUuid }),
+            summaryBounds = projection.bounds.days.single(),
+            openDuplicateGroups = projection.openGroups,
+            duplicateRows = SuspectedDuplicatePresentation.timelineRows(
+                records = duplicateRecords,
+                openGroups = projection.openGroups,
+                sourceRoleClientUuids = facts.sourceRoles,
+                timelineIndex = projection.timelineIndex,
+            ),
+            autoAlignedDisplayClientUuids = facts.autoAlignedDisplayClientUuids,
+            nearbySubtypeHints = facts.nearbySubtypeHints,
+            sourceRecordsByDisplay = facts.sourceRecordsByDisplay,
+            evaluatedAtMillis = nowMillis,
+            lastSuccessAtMillis = facts.lastSuccessAtMillis,
         )
     }
 }
 
-private data class TimelineAudienceKey(
-    val isFamilyJoined: Boolean,
+private data class TimelineIdentityKey(
+    val epoch: Long?,
     val familyId: String,
     val membershipId: String,
-    val role: FamilyRole,
-    val pendingCreatorAcknowledgements: Set<CreatorAcknowledgementRef>,
+    val deviceId: String,
+    val origin: String,
 )
 
-private data class TimelineAudienceSeed(
-    val key: TimelineAudienceKey,
-    val members: List<UploaderMemberRef>,
-)
-
-private fun SyncSession.toTimelineAudienceKey(): TimelineAudienceKey = TimelineAudienceKey(
-    isFamilyJoined = isJoined,
-    familyId = familyId,
-    membershipId = membershipId.trim(),
-    role = role,
-    pendingCreatorAcknowledgements = pendingCreatorAcknowledgements,
+private fun FamilyReadSnapshot.identityKey() = TimelineIdentityKey(
+    epoch = identityEpoch,
+    familyId = session.familyId,
+    membershipId = session.membershipId,
+    deviceId = session.deviceId,
+    origin = session.baseUrl,
 )
 
 private fun mediaSnapshot(

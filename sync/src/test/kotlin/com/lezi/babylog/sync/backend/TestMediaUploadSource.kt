@@ -21,7 +21,7 @@ internal class TestMediaUploadSource(
 
 internal fun testPreparedMedia(
     content: ByteArray,
-    mime: String = "image/jpeg",
+    mime: String? = "image/jpeg",
     width: Int? = null,
     height: Int? = null,
 ): PreparedMedia {

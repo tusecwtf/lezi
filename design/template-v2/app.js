@@ -35,6 +35,7 @@
     { id: "nursing", name: "母乳", mode: "nursing", icon: "nursing", color: "nursing", group: "feed", tip: "左右计时" },
     { id: "formula", name: "配方奶", mode: "milk", icon: "bottle", color: "milk", group: "feed", tip: "奶量" },
     { id: "pumped_feed", name: "母乳瓶喂", mode: "milk", icon: "bottle", color: "nursing", group: "feed", tip: "奶量" },
+    { id: "pump_express", name: "吸奶", mode: "milk", icon: "pump", color: "nursing", group: "feed", tip: "吸出奶量" },
     { id: "pee", name: "尿尿", mode: "pee", icon: "pee", color: "pee", group: "diaper", tip: "小中大" },
     { id: "poop", name: "便便", mode: "poop", icon: "poop", color: "poop", group: "diaper", tip: "三组分档" },
     { id: "both_diaper", name: "尿+便", mode: "both", icon: "poop", color: "poop", group: "diaper", tip: "完整分档" },

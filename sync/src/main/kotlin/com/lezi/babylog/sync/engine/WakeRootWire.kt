@@ -22,7 +22,7 @@ internal data class WakeRootWire(
     val wakeTimestamp: Long,
     val note: String?,
     val withdrawn: Boolean,
-    /** Null for client-authored mutation and unstamped Pull; StableRoot requires the stamp. */
+    /** Null for mutation/unstamped Pull, empty for explicit anonymity; StableRoot requires the key. */
     val observerMembershipId: String?,
     /** Pull carries updated_at in its envelope; mutation/proof carry it in the root. */
     val inlineUpdatedAt: Long?,
@@ -64,11 +64,11 @@ internal fun decodeWakeRootWire(
         WakeRootWireShape.LocalMutation -> null
         WakeRootWireShape.Pull ->
             if ("observer_membership_id" in root) {
-                root.requireWakeNonBlankString("observer_membership_id")
+                root.requireWakeObserverStamp()
             } else {
                 null
             }
-        WakeRootWireShape.StableRoot -> root.requireWakeNonBlankString("observer_membership_id")
+        WakeRootWireShape.StableRoot -> root.requireWakeObserverStamp()
     }
     val updatedAt = when (shape) {
         WakeRootWireShape.Pull -> null
@@ -179,6 +179,11 @@ private fun JsonObject.requireWakeKeys(shape: WakeRootWireShape) {
         "wake_observation current wire 字段不完整或包含未知字段: ${keys.sorted()}"
     }
 }
+
+/** A present null is ADR-0025 anonymity, never a missing server stamp. */
+private fun JsonObject.requireWakeObserverStamp(): String =
+    if (get("observer_membership_id") === JsonNull) ""
+    else requireWakeNonBlankString("observer_membership_id")
 
 private fun JsonObject.requireWakeNonBlankString(key: String): String {
     val primitive = get(key) as? JsonPrimitive

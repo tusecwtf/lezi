@@ -130,6 +130,7 @@ impl Fx {
             membership_id: "m-member".to_owned(),
             device_id: "d-member".to_owned(),
         };
+        register_test_principal(&store, &member);
         Self {
             store,
             _dir: dir,
@@ -276,12 +277,8 @@ impl Fx {
                 |row| row.get(0),
             )
             .unwrap();
-        Principal {
-            family_id: self.family_id.clone(),
-            role: "owner".to_owned(),
-            membership_id,
-            device_id: "d-real-owner".to_owned(),
-        }
+        assert_eq!(membership_id, self.owner.membership_id);
+        self.owner.clone()
     }
 
     fn commit_named_record(
@@ -1417,4 +1414,76 @@ fn auto_align_treats_legacy_end_timestamp_as_closed() {
         .source_summary(second)
         .expect("legacy-closed neighbor aligned");
     assert_eq!(first_summary.relation_id, second_summary.relation_id);
+}
+
+#[test]
+fn member_removal_keeps_source_groups_and_anonymous_roots_eligible_for_owner_edits() {
+    let fx = Fx::new();
+    fx.enable_auto_align();
+    let a = Uuid::new_v4();
+    let b = Uuid::new_v4();
+    fx.commit_record_at(&fx.member, a, fx.baby_id, "formula", 100, "a");
+    fx.commit_record_at(&fx.member, b, fx.baby_id, "formula", 200, "b");
+    let before = fx.store.pull(&fx.family_id, 0).unwrap();
+    let before_a = before
+        .entities
+        .iter()
+        .find(|e| e.client_uuid == a.to_string())
+        .unwrap()
+        .source_relation_summary
+        .clone()
+        .unwrap();
+    fx.store
+        .hard_delete_membership(&fx.owner, &fx.member.membership_id, 1_700_000_002)
+        .unwrap();
+    let after = fx.store.pull(&fx.family_id, 0).unwrap();
+    let row = after
+        .entities
+        .iter()
+        .find(|e| e.client_uuid == a.to_string())
+        .unwrap();
+    assert_eq!(row.source_relation_summary.as_ref().unwrap(), &before_a);
+    assert_eq!(
+        row.payload.get("created_by_membership_id"),
+        Some(&Value::Null)
+    );
+    let mut root = row.payload.clone();
+    root.insert("updated_at".to_owned(), json!(1_700_000_003_000_i64));
+    root.insert("note".to_owned(), json!("owner edit of anonymous fact"));
+    let result = fx
+        .store
+        .causal_commit(
+            &fx.owner,
+            vec![mut_unit(
+                "record",
+                a,
+                row.version_id.as_deref(),
+                root,
+                false,
+            )],
+            1_700_000_003,
+        )
+        .unwrap();
+    assert_eq!(
+        result.results[0]
+            .stable_root
+            .get("created_by_membership_id"),
+        Some(&Value::Null)
+    );
+    let c = Uuid::new_v4();
+    fx.commit_record_at(&fx.owner, c, fx.baby_id, "formula", 300, "c");
+    let final_page = fx.store.pull(&fx.family_id, 0).unwrap();
+    for id in [a, b, c] {
+        let row = final_page
+            .entities
+            .iter()
+            .find(|e| e.client_uuid == id.to_string())
+            .unwrap();
+        let summary = row.source_relation_summary.as_ref().unwrap();
+        assert_eq!(summary.peer_ids.len(), 2);
+        assert_eq!(summary.auto_aligned, Some(true));
+    }
+    fx.store
+        .validate_authority_graph(1024, |_, _, _| Ok(true))
+        .unwrap();
 }

@@ -14,6 +14,16 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.activity.compose.BackHandler
+import androidx.compose.material3.ModalBottomSheetProperties
+import androidx.compose.material3.SheetValue
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
+import com.lezi.babylog.core.model.RecordTime
+import com.lezi.babylog.core.model.RecordTimeDecision
+import java.time.LocalDate
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -57,8 +67,17 @@ internal fun SleepObservationSheet(
     onUpdate: (TimelineWakeObservation, Long, String?) -> Unit,
     onWithdraw: (TimelineWakeObservation) -> Unit,
     onSelect: (TimelineWakeObservation?) -> Unit,
+    editCommand: WakeEditCommandState = WakeEditCommandState(),
+    onConsumeEditResult: () -> Unit = {},
 ) {
-    var editing by remember { mutableStateOf<TimelineWakeObservation?>(null) }
+    var editingUuid by rememberSaveable(row.record.clientUuid) { mutableStateOf<String?>(null) }
+    val editing = row.wakeObservations.firstOrNull { it.clientUuid == editingUuid }
+    LaunchedEffect(editCommand) {
+        if (editCommand.saved && editCommand.clientUuid == editingUuid) {
+            editingUuid = null
+            onConsumeEditResult()
+        }
+    }
     var previewPaths by remember { mutableStateOf<List<String>>(emptyList()) }
     ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.testTag("sleep_observation_sheet")) {
         Column(
@@ -94,7 +113,7 @@ internal fun SleepObservationSheet(
                     zone = zone,
                     canSelect = row.canSelectEffectiveWakeObservation,
                     onPreview = { previewPaths = wake.photoPaths },
-                    onEdit = { editing = wake },
+                    onEdit = { if (!editCommand.saving) { onConsumeEditResult(); editingUuid = wake.clientUuid } },
                     onWithdraw = { onWithdraw(wake) },
                     onSelect = { onSelect(wake) },
                 )
@@ -115,11 +134,10 @@ internal fun SleepObservationSheet(
         WakeObservationEditSheet(
             wake = wake,
             zone = zone,
-            onDismiss = { editing = null },
-            onSave = { timestamp, note ->
-                editing = null
-                onUpdate(wake, timestamp, note)
-            },
+            onDismiss = { editingUuid = null },
+            onSave = { timestamp, note -> onUpdate(wake, timestamp, note) },
+            saving = editCommand.saving,
+            saveError = editCommand.error.takeIf { editCommand.clientUuid == wake.clientUuid },
         )
     }
     if (previewPaths.isNotEmpty()) {
@@ -197,44 +215,79 @@ private fun WakeObservationCard(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun WakeObservationEditSheet(
+internal fun WakeObservationEditSheet(
     wake: TimelineWakeObservation,
     zone: ZoneId,
     onDismiss: () -> Unit,
     onSave: (Long, String?) -> Unit,
+    saving: Boolean = false,
+    saveError: String? = null,
 ) {
     val zoned = remember(wake.wakeTimestamp, zone) {
         Instant.ofEpochMilli(wake.wakeTimestamp).atZone(zone)
     }
-    var timeText by remember { mutableStateOf(zoned.toLocalTime().format(TIME_FORMAT)) }
-    var note by remember { mutableStateOf(wake.note.orEmpty()) }
+    var dateText by rememberSaveable(wake.clientUuid) { mutableStateOf(zoned.toLocalDate().toString()) }
+    var timeText by rememberSaveable(wake.clientUuid) { mutableStateOf(zoned.toLocalTime().format(TIME_FORMAT)) }
+    var note by rememberSaveable(wake.clientUuid) { mutableStateOf(wake.note.orEmpty()) }
+    val parsedDate = runCatching { LocalDate.parse(dateText) }.getOrNull()
     val parsedTime = runCatching { LocalTime.parse(timeText, TIME_FORMAT) }.getOrNull()
-    ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.testTag("wake_edit_sheet")) {
+    val resolved = if (parsedDate != null && parsedTime != null) {
+        RecordTime.resolve(parsedDate, parsedTime, zone, zoned.offset)
+    } else null
+    val timestamp = (resolved as? RecordTimeDecision.Accepted)?.value?.toInstant()?.toEpochMilli()
+    val currentSaving by rememberUpdatedState(saving)
+    val sheetState = rememberModalBottomSheetState(
+        skipPartiallyExpanded = true,
+        confirmValueChange = { it != SheetValue.Hidden || !currentSaving },
+    )
+    ModalBottomSheet(
+        onDismissRequest = { if (!saving) onDismiss() },
+        sheetState = sheetState,
+        properties = ModalBottomSheetProperties(shouldDismissOnBackPress = false),
+        modifier = Modifier.testTag("wake_edit_sheet"),
+    ) {
+        BackHandler { if (!saving) onDismiss() }
         Column(
             Modifier.fillMaxWidth().padding(LeziSpacing.Page),
             verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
         ) {
             Text("修正醒来观察", style = LeziThemeExt.typography.Title)
             LeziTextField(
+                value = dateText,
+                onValueChange = { dateText = it },
+                label = { Text("日期 yyyy-MM-dd") },
+                enabled = !saving,
+                isError = parsedDate == null,
+                modifier = Modifier.fillMaxWidth().testTag("wake_edit_date"),
+            )
+            LeziTextField(
                 value = timeText,
                 onValueChange = { timeText = it },
                 label = { Text("时间 HH:mm") },
-                isError = parsedTime == null,
+                isError = timestamp == null,
+                enabled = !saving,
                 modifier = Modifier.fillMaxWidth().testTag("wake_edit_time"),
             )
             LeziTextField(
                 value = note,
                 onValueChange = { note = it },
                 label = { Text("备注") },
+                enabled = !saving,
                 modifier = Modifier.fillMaxWidth().testTag("wake_edit_note"),
             )
+            if (resolved == RecordTimeDecision.RejectedGap) {
+                Text("该时区不存在这个时间，请重新选择", color = MaterialTheme.colorScheme.error)
+            }
+            saveError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             LeziPrimaryButton(
-                label = "保存修正",
-                enabled = parsedTime != null,
+                label = if (saving) "正在保存…" else "保存修正",
+                enabled = timestamp != null && !saving,
                 onClick = {
-                    val timestamp = zoned.toLocalDate().atTime(requireNotNull(parsedTime))
-                        .atZone(zone).toInstant().toEpochMilli()
-                    onSave(timestamp, note.trim().takeIf(String::isNotEmpty))
+                    // A note-only edit must retain seconds and the original overlap offset.
+                    val unchangedTime = parsedDate == zoned.toLocalDate() &&
+                        parsedTime == zoned.toLocalTime().withSecond(0).withNano(0)
+                    onSave(if (unchangedTime) wake.wakeTimestamp else requireNotNull(timestamp),
+                        note.trim().takeIf(String::isNotEmpty))
                 },
                 modifier = Modifier.fillMaxWidth().testTag("wake_edit_confirm"),
             )
@@ -256,6 +309,16 @@ internal fun DuplicateGroupCard(
     modifier: Modifier = Modifier,
 ) {
     val members = group.memberClientUuids.mapNotNull(recordsByUuid::get)
+        .sortedWith(compareBy<Record> { it.timestamp }.thenBy { it.clientUuid })
+    val sourceLabels = members.mapIndexed { index, record ->
+        val author = recordRowsById[record.id]?.uploaderLabel
+            ?: if (record.createdByMembershipId == currentMembershipId && currentMembershipId.isNotBlank()) {
+                "本人"
+            } else "家人"
+        val time = Instant.ofEpochMilli(record.timestamp).atZone(ZoneId.systemDefault())
+            .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm xxx"))
+        record.clientUuid to "来源 ${index + 1} · $author · $time · ${record.displayLabel()} · ${record.presentationSummary()}"
+    }.toMap()
     val actions = SuspectedDuplicatePresentation.availableActions(
         group, recordsByUuid, currentMembershipId, isOwner,
     )
@@ -268,16 +331,15 @@ internal fun DuplicateGroupCard(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("疑似重复 · 待确认", style = LeziTypography.TitleSm)
-                Text("${members.size} 台设备记过；核对前按最早到最晚显示", style = LeziTypography.Meta)
+                Text("${members.size} 个来源；核对前按最早到最晚显示", style = LeziTypography.Meta)
             }
             LeziTextButton(if (expanded) "收起" else "展开", onClick = onToggle, modifier = Modifier.testTag("duplicate_toggle_${group.groupId}"))
         }
         if (expanded) {
-            members.sortedBy(Record::timestamp).forEach { record ->
+            members.forEach { record ->
                 val photos = recordRowsById[record.id]?.media?.photoCount ?: 0
                 Text(
-                    "${record.createdByMembershipId.ifBlank { "家人" }} · ${record.displayLabel()} · " +
-                        "${record.presentationSummary()}" +
+                    sourceLabels.getValue(record.clientUuid) +
                         record.note?.takeIf(String::isNotBlank)?.let { " · $it" }.orEmpty() +
                         if (photos > 0) " · ${photos}张照片" else "",
                     modifier = Modifier.testTag("duplicate_source_${record.clientUuid}"),
@@ -287,7 +349,7 @@ internal fun DuplicateGroupCard(
                 val label = when (action) {
                     is DuplicateGroupAction.AuthorDeclare -> "声明我的记录与另一来源相同"
                     is DuplicateGroupAction.OwnerResolve ->
-                        "以 ${recordsByUuid[action.displayClientUuid]?.displayLabel() ?: "所选来源"} 展示"
+                        "以 ${sourceLabels[action.displayClientUuid] ?: "所选来源"} 展示"
                 }
                 LeziTextButton(
                     label = label,
@@ -301,3 +363,10 @@ internal fun DuplicateGroupCard(
 }
 
 private val TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm")
+
+internal data class WakeEditCommandState(
+    val clientUuid: String? = null,
+    val saving: Boolean = false,
+    val saved: Boolean = false,
+    val error: String? = null,
+)

@@ -12,8 +12,8 @@ use super::super::causal_media_staging::{
 };
 use super::super::*;
 use super::test_support::{
-    entity, family, owner_principal, publish_root, publish_root_with_media, stage_log_media,
-    TestCausalMediaStage,
+    entity, family, owner_principal, publish_root, publish_root_with_media,
+    register_test_principal, stage_log_media, TestCausalMediaStage,
 };
 use serde_json::json;
 
@@ -177,8 +177,10 @@ fn causal_media_staging_enforces_file_membership_family_and_byte_quotas() {
     let peer = Principal {
         membership_id: "m-peer".to_owned(),
         device_id: "d-peer".to_owned(),
+        role: "member".to_owned(),
         ..owner.clone()
     };
+    register_test_principal(&store, &peer);
     assert!(matches!(
         store.stage_test_preimage(&peer, &first, b"abc", &digest(b"abc"), 101, limits(),),
         Err(StoreError::CausalMediaMembershipMismatch)
@@ -212,8 +214,10 @@ fn causal_media_staging_enforces_file_membership_family_and_byte_quotas() {
     let peer = Principal {
         membership_id: "m-peer".to_owned(),
         device_id: "d-peer".to_owned(),
+        role: "member".to_owned(),
         ..owner.clone()
     };
+    register_test_principal(&store, &peer);
     assert!(matches!(
         store.stage_test_preimage(
             &peer,
@@ -385,6 +389,7 @@ fn causal_media_family_scoped_gc_does_not_touch_peer_family_files() {
         )
         .unwrap();
     let peer = owner_principal(&peer_family_id);
+    register_test_principal(&store, &peer);
     let peer_reservation = store
         .reserve_causal_media_upload(&peer, &Uuid::new_v4().to_string(), 1)
         .unwrap();
@@ -1249,6 +1254,7 @@ fn empty_put_does_not_bind_cross_family_consumed_sha() {
         )
         .unwrap();
     let stranger = owner_principal(&other_family);
+    register_test_principal(&store, &stranger);
     let new_id = Uuid::new_v4();
 
     assert!(matches!(
@@ -1478,3 +1484,5 @@ fn empty_put_fails_closed_when_same_uuid_stored_size_does_not_match_file() {
         .unwrap();
     assert_eq!(count, 1);
 }
+
+mod renewal_tests;

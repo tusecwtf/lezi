@@ -19,8 +19,10 @@ if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-
   exit 1
 fi
 
-NAS_SSH="${NAS_SSH:-nas-account@192.168.77.4}"
-NAS_SSH_PORT="${NAS_SSH_PORT:-10000}"
+NAS_SSH="${NAS_SSH:?Set NAS_SSH to the explicitly approved user@NAS host}"
+NAS_SSH_PORT="${NAS_SSH_PORT:?Set NAS_SSH_PORT to the explicitly approved NAS port}"
+: "${LEZI_DATA_HOST_PATH:?Set LEZI_DATA_HOST_PATH to the explicitly approved absolute NAS data path}"
+: "${LEZI_TLS_HOST:?Set LEZI_TLS_HOST to the explicitly approved certificate host}"
 case "${NAS_SSH#*@}" in
   vps-host|192.0.2.36|203.0.113.10|192.0.2.97|192.0.2.105)
     echo "error: NAS scripts cannot target ${NAS_SSH}; the VPS CD line was removed 2026-09-06 and must not be recreated" >&2
@@ -28,7 +30,7 @@ case "${NAS_SSH#*@}" in
     ;;
 esac
 if [[ "${NAS_SSH_PORT}" == "22" ]]; then
-  echo "error: NAS_SSH_PORT 22 is the VPS control plane; NAS rollback stays on port 10000" >&2
+  echo "error: NAS_SSH_PORT 22 is the VPS control plane; use the explicitly approved NAS port" >&2
   exit 1
 fi
 # Zspace SSH users often have HOME=/home/ (not writable). Default to /tmp.
@@ -120,6 +122,15 @@ if [[ "${allow_tls_bootstrap}" == "1" \
 fi
 printf -v version_q '%q' "${version}"
 remote_env_prefix="LEZI_SYNC_VERSION=${version_q} "
+# Optional vendor Compose path is operator configuration, never a repository default.
+if [[ -n "${ZDOCKER_COMPOSE:-}" ]]; then
+  if [[ "${ZDOCKER_COMPOSE}" != /* || ! "${ZDOCKER_COMPOSE}" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+    echo "error: ZDOCKER_COMPOSE must be an explicit absolute executable path" >&2
+    exit 1
+  fi
+  printf -v compose_path_q '%q' "${ZDOCKER_COMPOSE}"
+  remote_env_prefix+="ZDOCKER_COMPOSE=${compose_path_q} "
+fi
 if [[ "${allow_tls_bootstrap}" == "1" ]]; then
   remote_env_prefix+="LEZI_ALLOW_TLS_BOOTSTRAP=1 "
 fi
@@ -161,6 +172,7 @@ guarded_package_files=(
   remote-deploy.sh
   schema-cutover.sh
   schema-cutover-steps.sh
+  schema-update-pair.sh
   tls-certificate-sha256.sh
   tls-spki.sh
   validate-nas-package.sh
@@ -239,8 +251,8 @@ if [[ -n "${LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID:-}" ]]; then
     exit 1
   fi
 fi
-expected_data_host_path="${LEZI_DATA_HOST_PATH:-/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data}"
-expected_tls_host="${LEZI_TLS_HOST:-192.168.77.4}"
+expected_data_host_path="${LEZI_DATA_HOST_PATH:?Set LEZI_DATA_HOST_PATH to the explicitly approved absolute NAS data path}"
+expected_tls_host="${LEZI_TLS_HOST:?Set LEZI_TLS_HOST to the explicitly approved certificate host}"
 expected_lan_apk_download_origin="${LEZI_LAN_APK_DOWNLOAD_ORIGIN:-http://${expected_tls_host}:8767}"
 if [[ "${manifest_data_host_path}" != "${expected_data_host_path}" \
     || "${manifest_tls_host}" != "${expected_tls_host}" \

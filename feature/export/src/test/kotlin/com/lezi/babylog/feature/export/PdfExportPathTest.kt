@@ -49,6 +49,40 @@ class PdfExportPathTest {
     }
 
     @Test
+    fun cancelledTxtWriteRemovesPartialFileAndAllowsAnotherExport() {
+        val dir = temp.newFolder("cancelled-export")
+        var checkpoints = 0
+        val failure = runCatching {
+            ExportFileGenerator.writeTxtFile(
+                exportDir = dir,
+                body = "宝宝记录".repeat(10_000),
+                checkpoint = {
+                    if (++checkpoints == 3) throw kotlinx.coroutines.CancellationException("leave export")
+                },
+            )
+        }.exceptionOrNull()
+
+        assertTrue(failure is kotlinx.coroutines.CancellationException)
+        assertTrue(dir.listFiles().orEmpty().isEmpty())
+        val retry = ExportFileGenerator.writeTxtFile(dir, "再试一次")
+        assertTrue(retry.readText() == "再试一次")
+    }
+
+    @Test
+    fun nextProcessCleanupRemovesAbandonedStagingButPreservesCurrentWorkAndShares() {
+        val dir = temp.newFolder("abandoned-staging")
+        val abandoned = File(dir, "previous-process-attempt.partial").apply { writeText("unfinished") }
+        val request = File(dir, "previous-process-attempt.request").apply { writeText("private request") }
+        val active = File(dir, ExportCacheCleanup.newAttemptToken() + ".partial").apply { writeText("active") }
+        val shared = File(dir, "lezi-shared.pdf").apply { writeText("complete") }
+        ExportCacheCleanup.deleteFiles(ExportCacheCleanup.staleFiles(dir.listFiles()!!.toList(), System.currentTimeMillis()))
+        assertFalse(abandoned.exists())
+        assertFalse(request.exists())
+        assertTrue(active.exists())
+        assertTrue(shared.exists())
+    }
+
+    @Test
     fun cleanupDeletesOnlyAgedExportsAndNeverUsesChooserLaunchAsCompletion() {
         val dir = temp.newFolder("aged-export-cleanup")
         val now = 2 * ExportCacheCleanup.STALE_EXPORT_AGE_MS

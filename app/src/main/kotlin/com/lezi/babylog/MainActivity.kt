@@ -72,8 +72,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -485,7 +487,7 @@ class RootViewModel @Inject constructor(
         rootUiFromLocalSettings(has, current, babies, s, day)
     }
 
-    private val baseUi = combine(localBaseUi, syncPort.session()) { base, session ->
+    private val baseUi = combine(localBaseUi, syncPort.sessionPresentation()) { base, session ->
         base.copy(familyRole = session.role)
     }
 
@@ -563,7 +565,7 @@ class RootViewModel @Inject constructor(
     /** Root-level force-update surface; null when not forced. */
     val forcedAppUpdate: StateFlow<ForcedAppUpdateState?> =
         syncPort.availableForcedAppUpdate()
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+            .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     /**
      * Session snapshot for force-shell recovery / LAN invite guidance.
@@ -573,7 +575,7 @@ class RootViewModel @Inject constructor(
      */
     val forcedUpdateSessionRecovery: StateFlow<ForcedUpdateSessionRecovery> =
         combine(
-            syncPort.session(),
+            syncPort.sessionPresentation(),
             syncPort.forcedUpdateLanInviteHost(),
         ) { session, inviteHostOverride ->
             val inviteHost = inviteHostOverride?.trim()?.takeIf { it.isNotEmpty() }
@@ -630,7 +632,7 @@ class RootViewModel @Inject constructor(
             _forcedUpdateNeedsInstallPermission.value = false
             _forcedUpdateMessage.value = "正在从家庭服务器下载更新包…"
             try {
-                val session = syncPort.session().first()
+                val session = syncPort.sessionPresentation().first()
                 if (!session.isJoined) {
                     _forcedUpdateNeedsInstallPermission.value = false
                     _forcedUpdateMessage.value =
@@ -729,20 +731,16 @@ class RootViewModel @Inject constructor(
         }
     }
 
-    fun confirmSystemCalendar(calendarId: String, disclosureLevel: Int) {
-        viewModelScope.launch {
-            // Storage/provider failure keeps the dialog state unchanged
-            // instead of crashing the process from a confirm tap.
-            runCatching { systemCalendarConfiguration.confirm(calendarId, disclosureLevel) }
-                .onFailure { error -> if (error is CancellationException) throw error }
-        }
+    private val calendarSetupCommand = com.lezi.babylog.feature.settings.calendar.SystemCalendarSetupCommand(systemCalendarConfiguration)
+    val calendarSetupState = calendarSetupCommand.state
+
+    fun consumeCalendarSetupResult() = calendarSetupCommand.consume()
+
+    fun confirmSystemCalendar(calendarId: String, disclosureLevel: Int) = viewModelScope.launch {
+        calendarSetupCommand.confirm(com.lezi.babylog.feature.settings.calendar.SystemCalendarSetupSelection(calendarId, disclosureLevel))
     }
 
-    fun disableSystemCalendar() =
-        viewModelScope.launch {
-            runCatching { systemCalendarConfiguration.disable() }
-                .onFailure { error -> if (error is CancellationException) throw error }
-        }
+    fun disableSystemCalendar() = viewModelScope.launch { calendarSetupCommand.disable() }
 
     fun cycleBaby() {
         viewModelScope.launch {
@@ -835,12 +833,17 @@ class RootViewModel @Inject constructor(
         }
     }
 
+    private var composerNavigationGeneration = 0L
+
     fun openComposer(request: RecordComposerRequest) {
+        if (forcedAppUpdate.value != null) return
+        composerNavigationGeneration++
         val restorable = restorableComposerRequest(request) ?: return
         savedStateHandle[COMPOSER_REQUEST_KEY] = restorable
     }
 
     fun closeComposer() {
+        composerNavigationGeneration++
         savedStateHandle[COMPOSER_REQUEST_KEY] = null
     }
 
@@ -850,10 +853,31 @@ class RootViewModel @Inject constructor(
      * re-subscribe / rotation while a post-save stage remains cannot spam refresh.
      */
     fun closeComposerAfterPersist() {
+        composerNavigationGeneration++
         val hadRequest = savedStateHandle.get<RecordComposerRequest>(COMPOSER_REQUEST_KEY) != null
         savedStateHandle[COMPOSER_REQUEST_KEY] = null
         if (hadRequest) {
             refreshWidgets()
+        }
+    }
+
+    /** The retained root owns async navigation; a newer draft/close invalidates delivery. */
+    fun openExternalCarePlan(planId: Long?, clientUuid: String) {
+        if (forcedAppUpdate.value != null || composerRequestFlow.value != null) return
+        val generation = ++composerNavigationGeneration
+        viewModelScope.launch {
+            val resolved = try {
+                planId ?: clientUuid.takeIf { it.isNotBlank() }?.let { resolveCarePlanId(it) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
+            }
+            if (generation == composerNavigationGeneration &&
+                composerRequestFlow.value == null && resolved != null && resolved > 0L
+            ) {
+                openComposer(RecordComposerRequest.Fulfill(resolved))
+            }
         }
     }
 
@@ -1066,6 +1090,10 @@ internal fun LeziRoot(
     pendingTimerFinishRequest: Boolean = false,
     onTimerFinishRequestConsumed: () -> Unit = {},
 ) {
+    val forcedUpdate by vm.forcedAppUpdate.collectAsStateWithLifecycle()
+    val recoveryExpanded by vm.forceShellSessionRecoveryExpanded.collectAsStateWithLifecycle()
+    val recoveryState by vm.forcedUpdateSessionRecovery.collectAsStateWithLifecycle()
+    val businessBlocked by rememberUpdatedState(forcedUpdate != null)
     val pendingUi by vm.ui.collectAsStateWithLifecycle()
     val pendingCreateBaby by vm.pendingCreateBaby.collectAsStateWithLifecycle()
     val ui = pendingUi
@@ -1087,6 +1115,19 @@ internal fun LeziRoot(
         null
     }
     Box(Modifier.fillMaxSize()) {
+        RootBusinessWindowGate(
+            blocked = forcedUpdate != null,
+            recovering = recoveryExpanded && recoveryState.needsSessionRecovery,
+            recovery = {
+                // Recovery can authenticate only; business routes stay unmounted until force clears.
+                if (onboardingOwner != null) {
+                    CompositionLocalProvider(LocalViewModelStoreOwner provides onboardingOwner) {
+                        OnboardingRoute(onFinished = {}, recoveryOnly = true)
+                    }
+                } else OnboardingRoute(onFinished = {}, recoveryOnly = true)
+            },
+        ) {
+
         if (ui == null) {
             // First emission pending: hold a themed blank frame instead of flashing
             // Onboarding off RootUi() defaults (motion-polish ticket 01).
@@ -1108,7 +1149,7 @@ internal fun LeziRoot(
                     CompositionLocalProvider(LocalViewModelStoreOwner provides onboardingOwner) {
                         DisposableEffect(onboardingOwner) {
                             onDispose {
-                                if (clearOnboardingGraphOnDispose(activity.isChangingConfigurations)) {
+                                if (clearOnboardingGraphOnDispose(activity.isChangingConfigurations || businessBlocked)) {
                                     onboardingGraph?.clearGraph()
                                 }
                             }
@@ -1130,7 +1171,24 @@ internal fun LeziRoot(
                 }
             }
         }
+        }
         RootForcedAppUpdateLayer(vm)
+    }
+}
+
+/** Detach business windows as well as nodes; an in-tree overlay cannot cover Dialog windows. */
+@Composable
+internal fun RootBusinessWindowGate(
+    blocked: Boolean,
+    recovering: Boolean,
+    recovery: @Composable () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    val retainedNavigation = rememberSaveableStateHolder()
+    if (!blocked) {
+        retainedNavigation.SaveableStateProvider("business") { content() }
+    } else if (recovering) {
+        recovery()
     }
 }
 
@@ -1184,6 +1242,10 @@ private fun RootForcedAppUpdateLayer(vm: RootViewModel) {
     }
     // Compact non-blocking banner while reauth/onboarding under the shell is usable.
     if (forcedUpdate != null && recoveryExpanded && sessionRecovery.needsSessionRecovery) {
+        // Recovery is a bounded exception inside the forced shell. Back returns to that
+        // shell rather than finishing the Activity that retains unsaved business drafts.
+        // Business content stays detached because the force state itself is unchanged.
+        BackHandler(onBack = vm::collapseForceShellSessionRecovery)
         ForcedAppUpdateRecoveryBanner(
             message = forcedMessage
                 ?: "须更新乐记。请先完成重新登录，然后再回到强制更新安装。",
@@ -1243,7 +1305,7 @@ private fun LeziMainScaffold(
     val systemCalendarId by vm.systemCalendarId.collectAsStateWithLifecycle()
     val systemCalendarDisclosureLevel by vm.systemCalendarDisclosureLevel.collectAsStateWithLifecycle()
     var showHeaderCalendar by remember { mutableStateOf(false) }
-    var showSystemCalendarSetup by remember { mutableStateOf(false) }
+    var showSystemCalendarSetup by rememberSaveable { mutableStateOf(false) }
     var displayedMonth by remember { mutableStateOf(YearMonth.from(ui.selectedDate)) }
     var logLayoutEditActive by remember { mutableStateOf(false) }
     var conflictOverlay by rememberSaveable(stateSaver = ConflictOverlayStateSaver) {
@@ -1305,15 +1367,7 @@ private fun LeziMainScaffold(
                     }
                     is AuthorizedExternalNavigation.Fulfill -> {
                         val target = authorized.target
-                        scope.launch {
-                            val planId = target.planId
-                                ?: target.clientUuid.takeIf { it.isNotBlank() }?.let { uuid ->
-                                    vm.resolveCarePlanId(uuid)
-                                }
-                            if (planId != null && planId > 0L) {
-                                vm.openComposer(RecordComposerRequest.Fulfill(planId))
-                            }
-                        }
+                        vm.openExternalCarePlan(target.planId, target.clientUuid)
                     }
                 }
             },
@@ -1762,21 +1816,21 @@ private fun LeziMainScaffold(
     )
 
     if (showSystemCalendarSetup) {
+        val calendarCommandState by vm.calendarSetupState.collectAsStateWithLifecycle()
         SystemCalendarSetupDialog(
             currentCalendarId = systemCalendarId,
             currentDisclosureLevel = systemCalendarDisclosureLevel,
+            commandState = calendarCommandState,
             onConfirm = { selection ->
-                vm.confirmSystemCalendar(
-                    selection.calendarId,
-                    selection.disclosureLevel,
-                )
-                showSystemCalendarSetup = false
+                vm.confirmSystemCalendar(selection.calendarId, selection.disclosureLevel)
             },
-            onDisable = {
-                vm.disableSystemCalendar()
-                showSystemCalendarSetup = false
+            onDisable = { vm.disableSystemCalendar() },
+            onDismiss = {
+                if (!calendarCommandState.busy) {
+                    vm.consumeCalendarSetupResult()
+                    showSystemCalendarSetup = false
+                }
             },
-            onDismiss = { showSystemCalendarSetup = false },
         )
     }
 

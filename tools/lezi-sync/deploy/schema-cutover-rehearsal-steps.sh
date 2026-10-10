@@ -19,15 +19,6 @@ if [[ "${LEZI_REHEARSAL_FAIL_PHASE:-}" == "${action}" ]]; then
   exit 42
 fi
 
-command -v docker >/dev/null 2>&1 || die "docker is required"
-command -v curl >/dev/null 2>&1 || die "curl is required"
-command -v openssl >/dev/null 2>&1 || die "openssl is required"
-sqlite3_bin="${LEZI_REHEARSAL_SQLITE3_BIN:-}"
-if [[ -z "${sqlite3_bin}" ]]; then
-  sqlite3_bin="$(command -v sqlite3 || true)"
-fi
-[[ -x "${sqlite3_bin}" ]] || die "set LEZI_REHEARSAL_SQLITE3_BIN to sqlite3"
-
 source_root_var="LEZI_REHEARSAL_SOURCE_ROOT_${source_schema}"
 source_image_var="LEZI_REHEARSAL_SOURCE_IMAGE_${source_schema}"
 source_root="${!source_root_var:-}"
@@ -43,7 +34,7 @@ case "${source_root}/" in
   *) die "${source_root_var} must be an isolated fixture under /tmp or /var/tmp" ;;
 esac
 case "${source_root}/" in
-  /tmp/zfsv3/*) die "family NAS bind ancestry is forbidden" ;;
+  /tmp/zfs*/*) die "NAS storage mount ancestry is forbidden" ;;
 esac
 fixture_marker="${source_root}/.isolated-schema-cutover-fixture"
 [[ -f "${fixture_marker}" && ! -L "${fixture_marker}" \
@@ -54,6 +45,15 @@ fixture_marker="${source_root}/.isolated-schema-cutover-fixture"
 [[ -f "${target_apk}" && ! -L "${target_apk}" ]] || die "LEZI_REHEARSAL_TARGET_APK is required"
 [[ -f "${target_metadata}" && ! -L "${target_metadata}" ]] \
   || die "LEZI_REHEARSAL_TARGET_APP_UPDATE is required"
+
+command -v docker >/dev/null 2>&1 || die "docker is required"
+command -v curl >/dev/null 2>&1 || die "curl is required"
+command -v openssl >/dev/null 2>&1 || die "openssl is required"
+sqlite3_bin="${LEZI_REHEARSAL_SQLITE3_BIN:-}"
+if [[ -z "${sqlite3_bin}" ]]; then
+  sqlite3_bin="$(command -v sqlite3 || true)"
+fi
+[[ -x "${sqlite3_bin}" ]] || die "set LEZI_REHEARSAL_SQLITE3_BIN to sqlite3"
 
 live="${case_dir}/live"
 original="${case_dir}/original"

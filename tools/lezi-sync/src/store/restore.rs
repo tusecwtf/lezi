@@ -16,6 +16,7 @@ impl Store {
         &self,
         identity: DisasterRestoreIdentityInput<'_>,
         mut entities: Vec<Entity>,
+        authority: super::RestoreAuthorityInput<'_>,
     ) -> Result<CreatedDeviceSession, StoreError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -97,12 +98,13 @@ impl Store {
                 "INSERT INTO entities(
                      family_id, entity_type, client_uuid, updated_at,
                      deleted_at, payload_json, rev
-                 ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     identity.family_id,
                     entity.entity_type,
                     entity.client_uuid,
                     entity.updated_at,
+                    entity.deleted_at,
                     serde_json::to_string(&entity.payload)?,
                     cursor,
                 ],
@@ -115,6 +117,7 @@ impl Store {
                 )?;
             }
         }
+        super::restore_authority::establish(&transaction, &identity, &authority, &entities)?;
         transaction.execute(
             "UPDATE family_meta SET rev = ?1 WHERE family_id = ?2",
             params![cursor, identity.family_id],
@@ -123,6 +126,24 @@ impl Store {
         // unconditionally so a watermark that reuses a previous rev value can
         // never be served from a stale entry (0.5 design §1.1, review A4/B7).
         self.live_census_cache.invalidate(identity.family_id);
+        super::authority_graph::validate_authority_graph_on(
+            &transaction,
+            &self.database_path,
+            usize::MAX,
+            |family, uuid, size| {
+                let path =
+                    super::causal_media_staging::published_path(&self.database_path, family, uuid);
+                let expected = authority
+                    .media_sha256
+                    .get(uuid)
+                    .ok_or(StoreError::InvalidStoredPayload)?;
+                Ok(
+                    super::causal_media_staging::published_file_sha256(&path, size as u64)?
+                        .as_ref()
+                        == Some(expected),
+                )
+            },
+        )?;
         transaction.commit()?;
         self.secure_database_files()?;
         Ok(CreatedDeviceSession {
@@ -142,7 +163,7 @@ impl Store {
 fn reauthor_history(entity: &mut Entity, owner_membership_id: &str) {
     if matches!(
         entity.entity_type.as_str(),
-        "record" | "care_plan" | "custom_item"
+        "baby" | "record" | "care_plan" | "custom_item"
     ) {
         entity.payload.insert(
             "created_by_membership_id".to_owned(),
@@ -165,5 +186,86 @@ fn reauthor_history(entity: &mut Entity, owner_membership_id: &str) {
             "submitter_role".to_owned(),
             Value::String("owner".to_owned()),
         );
+    }
+}
+
+impl Store {
+    /// Identity-chain equality proves activation without reviving expired/revoked credentials.
+    pub fn has_restore_identity(
+        &self,
+        family: &str,
+        membership: &str,
+        device: &str,
+        session: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(self.connect()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM families f JOIN memberships m ON m.family_id=f.id JOIN devices d ON d.membership_id=m.membership_id JOIN device_sessions s ON s.device_id=d.device_id WHERE f.id=?1 AND m.membership_id=?2 AND d.device_id=?3 AND s.session_id=?4)",
+            params![family,membership,device,session], |row| row.get(0))?)
+    }
+
+    pub fn has_restore_authority_coverage(
+        &self,
+        family: &str,
+        batch: &str,
+        request: Option<&str>,
+        hash: Option<&str>,
+    ) -> Result<bool, StoreError> {
+        let receipt: Option<(String,String)> = self.connect()?.query_row(
+            "SELECT content_hash,receipt_json FROM mutation_receipts WHERE family_id=?1 AND membership_id=?2 AND entity_type='baby' AND client_uuid=?3 AND mutation_id=?3",
+            params![family,super::restore_authority::COVERAGE_PRINCIPAL,batch], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+        let Some((stored_hash, json)) = receipt else {
+            return Ok(false);
+        };
+        let value: Value = serde_json::from_str(&json)?;
+        let keys = [
+            "protocol_version",
+            "batch_id",
+            "manifest_request_id",
+            "manifest_sha256",
+            "source_relations_sha256",
+            "relation_count",
+            "member_count",
+        ];
+        if value.as_object().is_none_or(|object| {
+            object.len() != keys.len() || keys.iter().any(|key| !object.contains_key(*key))
+        }) {
+            return Ok(false);
+        }
+        let Some(relations) = value.get("relation_count").and_then(Value::as_u64) else {
+            return Ok(false);
+        };
+        let Some(members) = value.get("member_count").and_then(Value::as_u64) else {
+            return Ok(false);
+        };
+        if members < relations.saturating_mul(2)
+            || members > relations.saturating_mul(64)
+            || value
+                .get("source_relations_sha256")
+                .and_then(Value::as_str)
+                .is_none_or(|hash| {
+                    hash.len() != 64
+                        || !hash
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                })
+        {
+            return Ok(false);
+        }
+        Ok(
+            value.get("protocol_version").and_then(Value::as_u64) == Some(1)
+                && value.get("batch_id").and_then(Value::as_str) == Some(batch)
+                && value.get("manifest_sha256").and_then(Value::as_str)
+                    == Some(stored_hash.as_str())
+                && request.is_none_or(|request| {
+                    value.get("manifest_request_id").and_then(Value::as_str) == Some(request)
+                })
+                && hash.is_none_or(|hash| stored_hash == hash),
+        )
+    }
+}
+
+impl Store {
+    pub fn has_complete_restore_baselines(&self, family: &str) -> Result<bool, StoreError> {
+        Ok(!self.connect()?.query_row("SELECT EXISTS(SELECT 1 FROM entities e LEFT JOIN entity_stable_heads h ON h.family_id=e.family_id AND h.entity_type=e.entity_type AND h.client_uuid=e.client_uuid WHERE e.family_id=?1 AND e.entity_type IN ('baby','record','care_plan','custom_item','wake_observation') AND h.version_id IS NULL)",params![family],|row|row.get::<_,bool>(0))?)
     }
 }

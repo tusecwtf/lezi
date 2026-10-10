@@ -28,6 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -109,10 +110,13 @@ fun LogRoute(
     // only the discrete summary selection, so digest + dedupe it here and let
     // LogTimelineList collect the full state itself — a drag no longer
     // recomposes this whole route (dialogs, docks, day chart, scaffold).
+    val initialDayChartFilter = remember(vm.timelineInteraction) {
+        vm.timelineInteraction.value.filter.selection
+    }
     val dayChartFilter by remember(vm.timelineInteraction) {
         vm.timelineInteraction.map { it.filter.selection }.distinctUntilChanged()
     }.collectAsStateWithLifecycle(
-        initialValue = vm.timelineInteraction.value.filter.selection,
+        initialValue = initialDayChartFilter,
     )
     val layoutWriteState by vm.deviceLayoutWriteState.collectAsStateWithLifecycle()
     val layoutSession by vm.layoutEditSession.collectAsStateWithLifecycle()
@@ -125,10 +129,11 @@ fun LogRoute(
     val screenTime by rememberRecordScreenTime(clock)
     val layoutGuidanceScope = rememberCoroutineScope()
     var showMore by remember { mutableStateOf(false) }
-    var showCustomManage by remember { mutableStateOf(false) }
+    var showCustomManage by rememberSaveable { mutableStateOf(false) }
     var publishChromeRecord by remember { mutableStateOf<PublishChromeTarget?>(null) }
     var listDeleteTarget by remember { mutableStateOf<ListDeleteTarget?>(null) }
-    var causalDetailRecord by remember { mutableStateOf<Record?>(null) }
+    var causalDetailRecordId by rememberSaveable { mutableStateOf<Long?>(null) }
+    val causalDetailRecord = causalDetailRecordId?.let { state.recordMetadata[it]?.record }
     var layoutDragCancelSignal by remember { mutableLongStateOf(0L) }
     val listState = rememberLazyListState()
     val timelineListState = rememberLogTimelineListState()
@@ -220,11 +225,13 @@ fun LogRoute(
     }
 
     fun openCausalDetails(record: Record) {
-        record.openConflictId?.let(onOpenConflictResolver) ?: run { causalDetailRecord = record }
+        record.openConflictId?.let(onOpenConflictResolver) ?: run { causalDetailRecordId = record.id }
     }
 
     fun duplicateOutcomeMessage(outcome: SourceRelationOutcome): String = when (outcome) {
         is SourceRelationOutcome.Accepted -> "重复来源已确认并保留"
+        is SourceRelationOutcome.ConfirmedRefreshRequired -> outcome.message
+        is SourceRelationOutcome.ConfirmedAndRefreshed -> outcome.message
         is SourceRelationOutcome.CasMismatch -> outcome.message
         is SourceRelationOutcome.Rejected -> outcome.message
     }
@@ -524,6 +531,8 @@ fun LogRoute(
 
     LogDialogHost(
         showCustomManage = showCustomManage,
+        customSaveCommand = vm.customSaveCommand.collectAsStateWithLifecycle().value,
+        onConsumeCustomSaveResult = vm::consumeCustomSaveResult,
         customItems = state.customItems,
         onDismissCustomManage = { showCustomManage = false },
         onAddCustomItem = vm::addCustomItem,
@@ -572,15 +581,18 @@ fun LogRoute(
         )
     }
 
+    val wakeEditCommand by vm.wakeEditCommand.collectAsStateWithLifecycle()
     val causalRecord = causalDetailRecord
     val causalRow = causalRecord?.let { state.recordMetadata[it.id] }
     if (causalRecord != null && causalRow != null && causalRow.sleepInterval != null) {
         SleepObservationSheet(
             row = causalRow,
             zone = zone,
-            onDismiss = { causalDetailRecord = null },
+            editCommand = wakeEditCommand,
+            onConsumeEditResult = vm::consumeWakeEditResult,
+            onDismiss = { causalDetailRecordId = null },
             onAddWake = {
-                causalDetailRecord = null
+                causalDetailRecordId = null
                 onOpenComposer(
                     RecordComposerRequest.New(
                         babyId = causalRecord.babyId,

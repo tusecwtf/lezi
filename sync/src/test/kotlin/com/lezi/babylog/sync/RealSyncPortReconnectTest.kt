@@ -340,7 +340,7 @@ class RealSyncPortReconnectTest {
                 assertThat(persisted.pullGeneration).isEqualTo(joined.pullGeneration)
                 assertThat(persisted.lastSuccessAt).isEqualTo(joined.lastSuccessAt)
             }
-            assertThat(rig.backend.ownerLoginTakeovers).containsExactly(false, true).inOrder()
+            assertThat(rig.backend.ownerLoginTakeovers).containsExactly(false)
             assertThat(rig.preferences.verifiedEndpoint.first()).isEqualTo(candidate)
             assertThat(rig.preferences.familyMemberDirectory.first()).isEmpty()
         } finally {
@@ -349,7 +349,7 @@ class RealSyncPortReconnectTest {
     }
 
     @Test
-    fun ownerReconnectRetriesWithOneDurableTakeoverRequestInsteadOfMintingGhostDevices() =
+    fun ownerReconnectRetriesOneDurableNonDestructiveLoginInsteadOfMintingGhostDevices() =
         runTest {
             val candidate = TrustedEndpointProfile.systemPki("https://nas-new.example.test")
             val rig = SyncRig(
@@ -369,11 +369,134 @@ class RealSyncPortReconnectTest {
                 rig.port.reconnectOwner(candidate, "同一部手机", "root-password").isSuccess,
             ).isTrue()
 
-            assertThat(rig.backend.ownerLoginTakeovers).containsExactly(false, false, true).inOrder()
-            assertThat(rig.backend.ownerLoginRequestIds).hasSize(3)
+            assertThat(rig.backend.ownerLoginTakeovers).containsExactly(false, false).inOrder()
+            assertThat(rig.backend.ownerLoginRequestIds).hasSize(2)
             assertThat(rig.backend.ownerLoginRequestIds.take(2).distinct()).hasSize(1)
-            assertThat(rig.backend.ownerLoginRequestIds[2]).isNotEqualTo(rig.backend.ownerLoginRequestIds[0])
         }
+
+    @Test
+    fun retiredNormalCheckDoesNotBroadcastCancellationForANewerApplication() = runTest {
+        val first = SyncRig(session = SyncSession(serverHost = "family.home"))
+        first.awaitInitialReplicaBarrier()
+        first.port.requestMemberLogin("爸爸", "Phone").getOrThrow()
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        first.backend.memberLoginStatuses += MemberLoginStatus.Approved
+        first.backend.beforeMemberLoginClaimReturn = { started.complete(Unit); release.await() }
+        val events = mutableListOf<MemberLoginCheckResult>()
+        backgroundScope.launch(kotlinx.coroutines.test.UnconfinedTestDispatcher(testScheduler)) {
+            first.port.memberLoginChecks().collect { events += it }
+        }
+        val oldCheck = async { first.port.checkMemberLogin() }
+        started.await()
+        val replacement = SyncRig(session = first.preferences.current(), syncPreferences = first.preferences)
+        replacement.awaitInitialReplicaBarrier()
+        replacement.port.cancelMemberLogin().getOrThrow()
+        replacement.backend.nextMemberLoginReceipt = replacement.backend.nextMemberLoginReceipt.copy(requestId = "server-b", pendingSecret = "secret-b")
+        replacement.port.requestMemberLogin("妈妈", "Tablet").getOrThrow()
+        release.complete(Unit)
+        assertThat(oldCheck.await().exceptionOrNull()).isInstanceOf(MemberLoginAttemptRetiredException::class.java)
+        assertThat(events).isEmpty()
+        assertThat(replacement.preferences.pendingMemberLogin.first()?.requestId).isEqualTo("server-b")
+        assertThat(replacement.preferences.pendingMemberSecret()).isEqualTo("secret-b")
+    }
+
+    @Test
+    fun reconstructedPortExposesCandidateRecoveryWithoutSendingOrReprobing() = runTest {
+        for (responseLost in listOf(true, false)) {
+            val candidate = TrustedEndpointProfile.systemPki("https://nas-new.example.test")
+            val first = SyncRig(session = joinedSession("family-a").copy(role = FamilyRole.Member),
+                setupProbe = SetupProbe { _, trusted -> SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Configured) })
+            if (responseLost) first.backend.memberLoginRequestFailure = java.io.IOException("lost")
+            val operation = first.port.requestReconnectMember(candidate, "妈妈", "Phone").getOrThrow()
+            val reconstructed = SyncRig(session = first.preferences.current(), syncPreferences = first.preferences,
+                setupProbe = SetupProbe { _, _ -> error("Recovery must not probe") })
+            val recovered = requireNotNull(reconstructed.port.recoverPendingReconnectMember().getOrThrow())
+            assertThat(recovered.operationId).isEqualTo(operation.operationId)
+            assertThat(recovered.endpointOrigin).isEqualTo(candidate.origin)
+            assertThat(recovered.remoteOutcomeUnknown).isTrue()
+            assertThat(reconstructed.backend.memberLoginRequests).isEmpty()
+            reconstructed.port.cancelReconnectMember().getOrThrow()
+            assertThat(reconstructed.port.recoverPendingReconnectMember().getOrThrow()).isNull()
+        }
+    }
+
+    @Test
+    fun forgottenCandidateCannotBeRevivedByALateApplicationReceipt() = runTest {
+        val candidate = TrustedEndpointProfile.systemPki("https://nas-new.example.test")
+        val rig = SyncRig(session = joinedSession("family-a").copy(role = FamilyRole.Member),
+            setupProbe = SetupProbe { _, trusted -> SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Configured) })
+        rig.backend.memberLoginRequestStarted = kotlinx.coroutines.CompletableDeferred()
+        rig.backend.releaseMemberLoginRequest = kotlinx.coroutines.CompletableDeferred()
+        val pending = async { rig.port.requestReconnectMember(candidate, "妈妈", "Phone") }
+        rig.backend.memberLoginRequestStarted!!.await()
+        rig.port.forgetEndpoint().getOrThrow()
+        rig.backend.releaseMemberLoginRequest!!.complete(Unit)
+        assertThat(pending.await().isFailure).isTrue()
+        assertThat(rig.port.checkReconnectMember().isFailure).isTrue()
+        assertThat(rig.backend.memberLoginClaimCalls).isEqualTo(0)
+        assertThat(rig.preferences.verifiedEndpoint.first()).isNull()
+    }
+
+    @Test
+    fun forgottenExistingCandidateReceiptCannotStartAClaim() = runTest {
+        val candidate = TrustedEndpointProfile.systemPki("https://nas-new.example.test")
+        val rig = SyncRig(session = joinedSession("family-a").copy(role = FamilyRole.Member),
+            setupProbe = SetupProbe { _, trusted -> SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Configured) })
+        rig.port.requestReconnectMember(candidate, "妈妈", "Phone").getOrThrow()
+        rig.port.forgetEndpoint().getOrThrow()
+        rig.backend.memberLoginStatuses += MemberLoginStatus.Approved
+        assertThat(rig.port.checkReconnectMember().isFailure).isTrue()
+        assertThat(rig.backend.memberLoginClaimCalls).isEqualTo(0)
+        assertThat(rig.preferences.verifiedEndpoint.first()).isNull()
+    }
+
+    @Test
+    fun lateCandidateClaimCannotReplaceForgottenOrSameFamilyNewDeviceIdentity() = runTest {
+        for (forget in listOf(true, false)) {
+            val candidate = TrustedEndpointProfile.systemPki("https://nas-new.example.test")
+            val rig = SyncRig(session = joinedSession("family-a").copy(role = FamilyRole.Member),
+                setupProbe = SetupProbe { _, trusted -> SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Configured) })
+            rig.port.requestReconnectMember(candidate, "妈妈", "Phone").getOrThrow()
+            val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+            rig.backend.beforeMemberLoginClaimReturn = { entered.complete(Unit); release.await() }
+            rig.backend.memberLoginStatuses += MemberLoginStatus.Approved
+            rig.backend.nextMemberLoginClaim = rig.backend.nextMemberLoginClaim.copy(familyId = "family-a")
+            val claim = async { rig.port.checkReconnectMember() }
+            entered.await()
+            if (forget) rig.port.forgetEndpoint().getOrThrow()
+            else rig.preferences.saveSession(rig.preferences.current().copy(deviceId = "replacement-device", membershipId = "replacement-member"))
+            val retained = rig.preferences.current()
+            release.complete(Unit)
+            assertThat(claim.await().isFailure).isTrue()
+            assertThat(rig.preferences.current()).isEqualTo(retained)
+            assertThat(rig.preferences.verifiedEndpoint.first()?.origin).isNotEqualTo(candidate.origin)
+        }
+    }
+
+    @Test
+    fun uncertainCandidateApplicationIsRetainedWithoutReplacingTheActiveFamilyOrResending() = runTest {
+        val candidate = TrustedEndpointProfile.systemPki("https://nas-new.example.test")
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(role = FamilyRole.Member),
+            setupProbe = SetupProbe { _, trusted ->
+                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Configured)
+            },
+        )
+        val original = rig.preferences.current()
+        rig.backend.memberLoginRequestFailure = java.io.IOException("response lost")
+        val first = rig.port.requestReconnectMember(candidate, "妈妈", "Phone").getOrThrow()
+        val second = rig.port.requestReconnectMember(candidate, "妈妈", "Phone").getOrThrow()
+        assertThat(first.remoteOutcomeUnknown).isTrue()
+        assertThat(second.operationId).isEqualTo(first.operationId)
+        assertThat(rig.backend.memberLoginRequests).hasSize(1)
+        assertThat(rig.preferences.current()).isEqualTo(original)
+        assertThat(rig.port.checkReconnectMember().exceptionOrNull())
+            .isInstanceOf(MemberLoginOutcomeUnknownException::class.java)
+        rig.port.cancelReconnectMember().getOrThrow()
+        assertThat(rig.preferences.memberLoginAttempt(reconnect = true)).isNull()
+    }
 
     @Test
     fun memberCandidateWaitsWithoutReplacingOldSessionThenBlocksDifferentFamilyClaim() = runTest {

@@ -134,6 +134,8 @@ class RealSyncPortAtomicMediaTest {
             ),
         )
         val mediaUuid = "32323232-3232-3232-3232-323232323232"
+        val publishedBytes = ByteArray(12) { 1 }
+        rig.mediaFiles.preparedUploadBytes["photos/user-new.jpg"] = publishedBytes
         rig.media.seed(
             MediaAssetEntity(
                 recordId = recordId,
@@ -143,15 +145,23 @@ class RealSyncPortAtomicMediaTest {
                 remoteUri = rig.preferences.current().expectedMediaReceipt(mediaUuid),
                 mime = "image/jpeg",
                 byteSize = 12,
+                sha256 = com.lezi.babylog.core.common.MediaContentDigest.ofBytes(publishedBytes),
                 createdAt = 100,
                 updatedAt = 100,
                 syncDirty = false,
             ),
         )
+        // Model a current-version publication, including its durable canonical evidence.
+        rig.mediaFiles.preparePublishedUpload("photos/user-new.jpg",
+            com.lezi.babylog.sync.media.PublishedMediaIdentity(
+                com.lezi.babylog.core.common.MediaContentDigest.ofBytes(publishedBytes), 12,
+                "image/jpeg", null, null,
+            )).close()
+        rig.conflictDetails.putTransportJournal("canonical-media-bytes-v1:$mediaUuid", "photos/user-new.jpg", 100)
         rig.backend.remember("baby", "baby-local")
         rig.backend.remember("record", "record-local")
         rig.backend.remember("media", mediaUuid)
-        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        rig.port.sync(SyncTrigger.LocalWrite).getOrThrow()
 
         val record = requireNotNull(rig.records.getIncludingDeleted(recordId))
         assertThat(record.payloadJson).isEqualTo("""{"amount_ml":120}""")
@@ -159,14 +169,22 @@ class RealSyncPortAtomicMediaTest {
         assertThat(record.updatedAt).isEqualTo(120)
         assertThat(record.syncDirty).isFalse()
         assertThat(rig.media.getByClientUuid(mediaUuid)?.deletedAt).isNull()
-        assertThat(rig.media.listAllIncludingDeleted().map(MediaAssetEntity::localUri))
-            .containsExactly("photos/user-new.jpg")
+        val media = rig.media.listAllIncludingDeleted().single()
+        assertThat(media.clientUuid).isEqualTo(mediaUuid)
+        assertThat(media.recordId).isEqualTo(recordId)
+        assertThat(media.updatedAt).isEqualTo(100)
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(media.localUri)).readBytes())
+            .isEqualTo(publishedBytes)
+        assertThat(media.sha256).isEqualTo(
+            com.lezi.babylog.core.common.MediaContentDigest.ofBytes(publishedBytes),
+        )
     }
 
     @Test
     fun downloadedPhotoRefreshPreservesAConcurrentRecordEdit() = runTest {
         val session = joinedSession("family-a")
         val rig = SyncRig(session = session)
+        rig.backend.mediaBytes = ByteArray(12) { 1 } // Match the persisted published length.
         val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
         val recordId = rig.records.seed(
             localRecord(babyId).copy(
@@ -203,13 +221,13 @@ class RealSyncPortAtomicMediaTest {
             )
         }
         rig.backend.nextPull = PullResult(
-            emptyList(),
+            listOf(authenticatedMedia(mediaUuid, "log", rig.backend.mediaBytes)),
             cursor = 1,
             generation = "current-generation",
             hasMore = false,
         )
 
-        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        rig.port.sync(SyncTrigger.PullToRefresh).getOrThrow()
 
         val record = requireNotNull(rig.records.getIncludingDeleted(recordId))
         assertThat(record.note).isEqualTo("并发补充说明")
@@ -218,13 +236,15 @@ class RealSyncPortAtomicMediaTest {
         assertThat(rig.backend.causalCommittedUnits.flatten().map { it.clientUuid })
             .contains("record-local")
         assertThat(record.payloadJson).isEqualTo("""{"amount_ml":120}""")
-        assertThat(rig.media.getByClientUuid(mediaUuid)?.localUri)
-            .isEqualTo("downloaded/$mediaUuid")
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(
+            requireNotNull(rig.media.getByClientUuid(mediaUuid)).localUri,
+        )).readBytes()).isEqualTo(rig.backend.mediaBytes)
     }
 
     @Test
     fun pullWindowPhotoEditStaysAuthoritativeWhenDownloadStartsLater() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
+        rig.backend.mediaBytes = ByteArray(12) { 1 } // Match the persisted published length.
         val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
         val recordId = rig.records.seed(
             localRecord(babyId).copy(syncDirty = false),
@@ -255,24 +275,26 @@ class RealSyncPortAtomicMediaTest {
             )
         }
         rig.backend.nextPull = PullResult(
-            emptyList(),
+            listOf(authenticatedMedia(mediaUuid, "log", rig.backend.mediaBytes)),
             cursor = 1,
             generation = "current-generation",
             hasMore = false,
         )
 
-        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        rig.port.sync(SyncTrigger.PullToRefresh).getOrThrow()
 
         val record = requireNotNull(rig.records.getIncludingDeleted(recordId))
         assertThat(record.payloadJson).isEqualTo("""{"amount_ml":120}""")
         assertThat(record.note).isEqualTo("拉取期间编辑")
-        assertThat(rig.media.getByClientUuid(mediaUuid)?.localUri)
-            .isEqualTo("downloaded/$mediaUuid")
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(
+            requireNotNull(rig.media.getByClientUuid(mediaUuid)).localUri,
+        )).readBytes()).isEqualTo(rig.backend.mediaBytes)
     }
 
     @Test
     fun photoEditBetweenTwoDownloadsPreventsTheSecondDerivedRefresh() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
+        rig.backend.mediaBytes = ByteArray(12) { 1 } // Match the persisted published length.
         val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
         val recordId = rig.records.seed(
             localRecord(babyId).copy(syncDirty = false),
@@ -297,36 +319,56 @@ class RealSyncPortAtomicMediaTest {
                 ),
             )
         }
+        val replacementUuid = "37373737-3737-4737-8737-373737373737"
+        val replacementBytes = byteArrayOf(7, 8, 9)
+        rig.mediaFiles.preparedUploadBytes["photos/between-downloads.jpg"] = replacementBytes
         rig.mediaFiles.afterSaveDownloaded = {
             val current = requireNotNull(rig.media.getByClientUuid(mediaUuids.last()))
             rig.media.update(
                 current.copy(
-                    localUri = "photos/between-downloads.jpg",
-                    updatedAt = current.updatedAt + 1,
+                    deletedAt = 101,
+                    updatedAt = 101,
                     syncDirty = true,
                 ),
             )
+            rig.media.seed(MediaAssetEntity(
+                recordId = recordId, clientUuid = replacementUuid, kind = "log",
+                localUri = "photos/between-downloads.jpg", byteSize = 3, mime = "image/jpeg",
+                createdAt = 101, updatedAt = 101, syncDirty = true,
+            ))
         }
         rig.backend.nextPull = PullResult(
-            emptyList(),
+            mediaUuids.map { authenticatedMedia(it, "log", rig.backend.mediaBytes) },
             cursor = 1,
             generation = "current-generation",
             hasMore = false,
         )
 
-        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        rig.port.sync(SyncTrigger.PullToRefresh).getOrThrow()
+        assertThat(rig.media.getByClientUuid(mediaUuids.last())?.deletedAt).isEqualTo(101)
+        // The replacement edit queues the next local publish after guarded receive defers.
+        rig.port.sync(SyncTrigger.LocalWrite).getOrThrow()
 
         assertThat(rig.records.getIncludingDeleted(recordId)?.payloadJson)
             .isEqualTo("""{"amount_ml":120}""")
-        assertThat(rig.media.getByClientUuid(mediaUuids.first())?.localUri)
-            .isEqualTo("downloaded/${mediaUuids.first()}")
-        assertThat(rig.media.getByClientUuid(mediaUuids.last())?.localUri)
-            .isEqualTo("photos/between-downloads.jpg")
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(
+            requireNotNull(rig.media.getByClientUuid(mediaUuids.first())).localUri,
+        )).readBytes()).isEqualTo(rig.backend.mediaBytes)
+        val relocated = requireNotNull(rig.media.getByClientUuid(replacementUuid))
+        assertThat(relocated.recordId).isEqualTo(recordId)
+        assertThat(relocated.updatedAt).isEqualTo(101)
+        assertThat(relocated.deletedAt).isNull()
+        assertThat(rig.mediaFiles.prepareUploadCounts["photos/between-downloads.jpg"]).isEqualTo(1)
+        assertThat(rig.media.getByClientUuid(mediaUuids.last())?.deletedAt).isEqualTo(101)
+        assertThat(rig.mediaFiles.inspected).contains("photos/between-downloads.jpg")
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(relocated.localUri)).readBytes())
+            .isEqualTo(replacementBytes)
     }
 
     @Test
     fun downloadedAvatarRefreshPreservesAProfileEditDuringFileSave() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
+        rig.backend.mediaBytes = ByteArray(12) { 1 } // Match the persisted published length.
         val mediaUuid = "44444444-4444-4444-4444-444444444444"
         val babyId = rig.babies.seed(
             localBaby().copy(
@@ -351,6 +393,8 @@ class RealSyncPortAtomicMediaTest {
         )
         rig.backend.remember("baby", "baby-local")
         rig.backend.remember("media", mediaUuid)
+        val replacementBytes = byteArrayOf(9, 8, 7)
+        rig.mediaFiles.preparedUploadBytes["baby_avatars/user-new.jpg"] = replacementBytes
         rig.mediaFiles.afterSaveDownloaded = {
             val current = requireNotNull(rig.babies.getIncludingDeleted(babyId))
             rig.babies.update(
@@ -368,10 +412,17 @@ class RealSyncPortAtomicMediaTest {
             hasMore = false,
         )
 
-        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        rig.port.sync(SyncTrigger.PullToRefresh).getOrThrow()
 
         val baby = requireNotNull(rig.babies.getIncludingDeleted(babyId))
-        assertThat(baby.avatarPath).isEqualTo("baby_avatars/user-new.jpg")
+        val replacement = requireNotNull(rig.media.getByClientUuid(requireNotNull(baby.avatarMediaUuid)))
+        assertThat(replacement.clientUuid).isNotEqualTo(mediaUuid)
+        assertThat(replacement.babyId).isEqualTo(babyId)
+        assertThat(replacement.kind).isEqualTo("avatar")
+        assertThat(baby.avatarPath).isEqualTo(replacement.localUri)
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(replacement.localUri)).readBytes())
+            .isEqualTo(replacementBytes)
+        assertThat(rig.mediaFiles.prepareUploadCounts["baby_avatars/user-new.jpg"]).isEqualTo(1)
         assertThat(baby.updatedAt).isEqualTo(101)
         assertThat(baby.syncDirty).isFalse()
         assertThat(rig.backend.causalCommittedUnits.flatten().map { it.clientUuid })
@@ -383,6 +434,7 @@ class RealSyncPortAtomicMediaTest {
     @Test
     fun noteOnlyEditAcceptsDownloadedPhotoAndNeverTombstonesItNextSync() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
+        rig.backend.mediaBytes = ByteArray(12) { 1 } // Match the persisted published length.
         val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
         val recordId = rig.records.seed(
             localRecord(babyId).copy(syncDirty = false),
@@ -416,13 +468,13 @@ class RealSyncPortAtomicMediaTest {
             )
         }
         rig.backend.nextPull = PullResult(
-            emptyList(),
+            listOf(authenticatedMedia(mediaUuid, "log", rig.backend.mediaBytes)),
             cursor = 1,
             generation = "current-generation",
             hasMore = false,
         )
 
-        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        rig.port.sync(SyncTrigger.PullToRefresh).getOrThrow()
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
 
         val record = requireNotNull(rig.records.getIncludingDeleted(recordId))
@@ -430,7 +482,8 @@ class RealSyncPortAtomicMediaTest {
         assertThat(record.payloadJson).isEqualTo("""{"amount_ml":120}""")
         val localMedia = requireNotNull(rig.media.getByClientUuid(mediaUuid))
         assertThat(localMedia.deletedAt).isNull()
-        assertThat(localMedia.localUri).isEqualTo("downloaded/$mediaUuid")
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(localMedia.localUri)).readBytes())
+            .isEqualTo(rig.backend.mediaBytes)
         // A live republished photo remains in the root's causal media manifest.
         val committedMedia = rig.backend.causalCommittedUnits.flatten()
             .flatMap { it.media }
@@ -441,6 +494,7 @@ class RealSyncPortAtomicMediaTest {
     @Test
     fun nicknameOnlyEditAcceptsDownloadedAvatarAndNeverTombstonesItNextSync() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
+        rig.backend.mediaBytes = ByteArray(12) { 1 } // Match the persisted published length.
         val mediaUuid = "46464646-4646-4646-4646-464646464646"
         val babyId = rig.babies.seed(
             localBaby().copy(
@@ -476,18 +530,20 @@ class RealSyncPortAtomicMediaTest {
             )
         }
         rig.backend.nextPull = PullResult(
-            emptyList(),
+            listOf(authenticatedMedia(mediaUuid, "avatar", rig.backend.mediaBytes)),
             cursor = 1,
             generation = "current-generation",
             hasMore = false,
         )
 
-        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        rig.port.sync(SyncTrigger.PullToRefresh).getOrThrow()
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
 
         val baby = requireNotNull(rig.babies.getIncludingDeleted(babyId))
         assertThat(baby.nickname).isEqualTo("只改昵称")
-        assertThat(baby.avatarPath).isEqualTo("downloaded/$mediaUuid")
+        assertThat(baby.avatarPath).isEqualTo(rig.media.getByClientUuid(mediaUuid)?.localUri)
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(requireNotNull(baby.avatarPath))).readBytes())
+            .isEqualTo(rig.backend.mediaBytes)
         assertThat(rig.media.getByClientUuid(mediaUuid)?.deletedAt).isNull()
         val babyMutation = rig.backend.causalCommittedUnits.flatten()
             .last { it.entityType == "baby" }
@@ -515,6 +571,8 @@ class RealSyncPortAtomicMediaTest {
             MediaAssetEntity(
                 clientUuid = selectedUuid,
                 kind = "avatar",
+                byteSize = 12,
+                mime = "image/jpeg",
                 babyId = babyId,
                 localUri = "avatars/selected.jpg",
                 remoteUri = rig.preferences.current().expectedMediaReceipt(selectedUuid),
@@ -527,6 +585,8 @@ class RealSyncPortAtomicMediaTest {
             MediaAssetEntity(
                 clientUuid = newerUuid,
                 kind = "avatar",
+                byteSize = 12,
+                mime = "image/jpeg",
                 babyId = babyId,
                 localUri = "avatars/newer.jpg",
                 remoteUri = rig.preferences.current().expectedMediaReceipt(newerUuid),
@@ -555,7 +615,7 @@ class RealSyncPortAtomicMediaTest {
             hasMore = false,
         )
 
-        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        rig.port.sync(SyncTrigger.PullToRefresh).getOrThrow()
 
         val baby = rig.babies.getByClientUuid("baby-remote")
         assertThat(baby?.avatarMediaUuid).isEqualTo(selectedUuid)
@@ -630,6 +690,7 @@ class RealSyncPortAtomicMediaTest {
     fun memberRejoiningSameFamilyPullsCanonicalAvatarWithoutRepublishingBaby() = runTest {
         val session = joinedSession("family-a").copy(role = FamilyRole.Member)
         val rig = SyncRig(session = session)
+        rig.awaitInitialReplicaBarrier()
         val avatarUuid = "11111111-1111-1111-1111-111111111111"
         val babyId = rig.babies.seed(
             localBaby().copy(
@@ -653,6 +714,7 @@ class RealSyncPortAtomicMediaTest {
         rig.backend.remember("media", avatarUuid)
 
         assertThat(rig.port.leave().isSuccess).isTrue()
+        assertThat(rig.media.getByClientUuid(avatarUuid)).isNull()
         rig.preferences.saveSession(session.copy(accessToken = "replacement-token"))
         rig.backend.nextPull = PullResult(
             entities = listOf(
@@ -669,6 +731,12 @@ class RealSyncPortAtomicMediaTest {
                     """.trimIndent(),
                     updatedAt = 200,
                 ),
+                SyncEntity(
+                    type = "media", clientUuid = avatarUuid, updatedAt = 200,
+                    mediaIdentity = com.lezi.babylog.sync.backend.PullMediaIdentity(avatarUuid, "avatar",
+                        com.lezi.babylog.core.common.MediaContentDigest.ofBytes(rig.backend.mediaBytes), 1),
+                    payloadJson = """{"kind":"avatar","record_client_uuid":null,"care_plan_client_uuid":null,"baby_client_uuid":"baby-local","mime":"image/jpeg","width":null,"height":null,"byte_size":1}""",
+                ),
             ),
             cursor = 1,
             generation = "current-generation",
@@ -681,8 +749,11 @@ class RealSyncPortAtomicMediaTest {
         assertThat(rig.backend.causalCommittedUnits).isEmpty()
         assertThat(rig.backend.causalMediaPreimageBytes).isEmpty()
         assertThat(rig.babies.getByClientUuid("baby-local")?.avatarMediaUuid).isEqualTo(avatarUuid)
-        assertThat(rig.babies.getByClientUuid("baby-local")?.avatarPath)
-            .isEqualTo("baby_avatars/remote.jpg")
+        val avatar = requireNotNull(rig.media.getByClientUuid(avatarUuid))
+        assertThat(rig.babies.getByClientUuid("baby-local")?.avatarPath).isEqualTo(avatar.localUri)
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(avatar.localUri)).readBytes())
+            .isEqualTo(rig.backend.mediaBytes)
+        assertThat(rig.backend.mediaGets).containsExactly(avatarUuid)
         assertThat(rig.babies.getByClientUuid("baby-local")?.familyAuthority).isTrue()
         assertThat(rig.media.getByClientUuid(avatarUuid)?.remoteUri)
             .isEqualTo(rig.preferences.current().expectedMediaReceipt(avatarUuid))
@@ -1114,5 +1185,12 @@ class RealSyncPortAtomicMediaTest {
         assertThat(rig.media.listMissingLocalBytes().map(MediaAssetEntity::clientUuid))
             .containsExactly(mediaUuid)
     }
+
+    private fun authenticatedMedia(uuid: String, kind: String, bytes: ByteArray) = SyncEntity(
+        type = "media", clientUuid = uuid, updatedAt = 100,
+        payloadJson = """{"kind":"$kind","record_client_uuid":${if (kind == "log") "\"record-local\"" else "null"},"care_plan_client_uuid":null,"baby_client_uuid":${if (kind == "avatar") "\"baby-local\"" else "null"},"mime":"image/jpeg","width":null,"height":null,"byte_size":${bytes.size}}""",
+        mediaIdentity = com.lezi.babylog.sync.backend.PullMediaIdentity(uuid, kind,
+            com.lezi.babylog.core.common.MediaContentDigest.ofBytes(bytes), bytes.size.toLong()),
+    )
 
 }

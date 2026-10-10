@@ -1,6 +1,6 @@
 # sync 层规格（`:sync` 模块）
 
-> 身份钉：当前 tree 0.5.3 / 协议代 0.4.0 conflict-v2 / 只协商 `causal_sync_v2`。
+> 发布身份以 [`platform.md`](../platform.md) 与兼容目录为准；协议代 0.4.0 conflict-v2 / 只协商 `causal_sync_v2`。
 > **权界**：本文权威 = `:sync` 模块的 seam、算法、交互与测试契约。**wire 字段、枚举与
 > 闭合键集的唯一权威是 [`contracts/causal-sync-wire.md`](../contracts/causal-sync-wire.md)**；
 > 可信端点行为合同见 [`contracts/sync-trusted-endpoint.md`](../contracts/sync-trusted-endpoint.md)；
@@ -191,3 +191,16 @@ server schema 13、同步 floor 21）不动。
 | §6 重试/预算 | `backend/retry/`、`backend/deadline/FamilyHttpBudget.kt`、`backend/RetryingSyncBackend.kt`、`backend/RefreshingSyncBackend.kt` |
 | §8 交互 | `session/`、`availability/`、`core:datastore`（目录缓存） |
 | §9 测试 | `sync/src/test/kotlin/com/lezi/babylog/sync/`（含 `RealSyncPortTestSupport.kt`、`IsolatedLeziSyncServer.kt`） |
+
+### 成员二维码：候选传输信任与会话激活
+
+二维码校验及用户确认后的领取请求直接使用二维码中的明确 HTTPS/SPKI profile；
+不为“尚未领取成功”预先写入可信 endpoint，也不在失败、取消或页面切换时调用用户级
+“忘记服务器”。既有信任及其它普通加入申请的本地结果未知记录保持不变。
+传输层在发送 grant 前安装该 profile 的 TLS 校验，不能降级为未确认的 TOFU。
+
+领取使用进程内操作身份与原本机身份/信任快照。只有操作和快照仍有效，才在既有
+凭据 owner 内激活服务器返回的会话及 QR endpoint，并保留既有副本重置门禁。
+显式忘记服务器、身份替换或另一条领取会撤销旧操作的激活权限；旧操作清理只释放
+自己的进程内身份，不恢复或删除任何 endpoint，不触碰其它加入申请。进程退出不会留下
+临时 trust journal；未完成的 grant 仍按既有精确领取回执协议由用户重新发起恢复。

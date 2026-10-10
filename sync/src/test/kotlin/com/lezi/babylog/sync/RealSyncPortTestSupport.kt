@@ -52,6 +52,8 @@ import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
@@ -144,6 +146,8 @@ import com.lezi.babylog.sync.session.PolicyClock
 import com.lezi.babylog.sync.session.SetupFamilyState
 import com.lezi.babylog.sync.session.SetupProbe
 import com.lezi.babylog.sync.session.SetupProbeResult
+import com.lezi.babylog.sync.session.TerminalRemovalKind
+import com.lezi.babylog.sync.session.hasSameCredentialGeneration
 import com.lezi.babylog.sync.session.SyncPreferences
 import com.lezi.babylog.sync.session.normalizeFamilyNameForWire
 import com.lezi.babylog.sync.session.SyncSession
@@ -266,7 +270,8 @@ internal class RecordingSyncBackend : SyncBackend {
         ((mediaUuid: String, uploaded: ByteArray, sha256: String) ->
             com.lezi.babylog.sync.backend.CausalMediaPreimageReceipt)? = null
     var nextCausalCommit: CausalCommitBatchResult? = null
-    var nextCausalCommitFailure: CausalCommitRejectedException? = null
+    // Preserve injected transport failures separately from protocol rejection types.
+    var nextCausalCommitFailure: Exception? = null
     val conflictSnapshotPages = ArrayDeque<FetchedConflictSnapshotPage>()
     val conflictSnapshotPageFailures = ArrayDeque<Throwable>()
     val conflictSnapshotPageRequests = mutableListOf<ConflictSnapshotPageRequest>()
@@ -294,6 +299,7 @@ internal class RecordingSyncBackend : SyncBackend {
     var membersFailure: Throwable? = null
     var nextMembers: List<FamilyMember>? = null
     var nextDirectoryGeneration = "directory-test"
+    var beforeMemberDirectoryReturn: suspend () -> Unit = {}
     var nextHandshake: AuthenticatedSyncHandshake? = null
     var handshakeFailure: Throwable? = null
     var handshakeCalls = 0
@@ -360,6 +366,7 @@ internal class RecordingSyncBackend : SyncBackend {
     val updatedDisplayNames = mutableListOf<String>()
     val renamedFamilyNames = mutableListOf<String?>()
     var renameFamilyFailure: Throwable? = null
+    var onRenameFamily: suspend () -> Unit = {}
     var nextCreateFamilyName: String? = null
     var nextCreateEntities: List<SyncEntity> = emptyList()
     var nextCreateReclaimed: Boolean = false
@@ -376,6 +383,8 @@ internal class RecordingSyncBackend : SyncBackend {
             "device_disaster_restore_v1",
             "validated_deferred_fulfillment_v1",
             "causal_sync_v2",
+            "nursing_plan_intent_v1",
+            "restore_authority_v1",
         ),
     )
     var anonymousReadyResult = AnonymousReadiness(version = "0.3.3")
@@ -395,13 +404,17 @@ internal class RecordingSyncBackend : SyncBackend {
     val disasterRestoreStartRootPasswords = mutableListOf<String>()
     val disasterRestoreManifestEntities = mutableListOf<List<SyncEntity>>()
     val disasterRestoreManifestMedia = mutableListOf<List<DisasterRestoreMediaSpec>>()
+    val disasterRestoreManifestRelations = mutableListOf<List<com.lezi.babylog.sync.backend.DisasterRestoreSourceRelation>>()
     val disasterRestoreMediaUuids = mutableListOf<String>()
+    val disasterRestoreMediaBodies = mutableListOf<Pair<String, ByteArray>>()
     val disasterRestoreCommitRootPasswords = mutableListOf<String>()
     var disasterRestoreStartFailure: Throwable? = null
+    var disasterRestoreStatusFailure: Throwable? = null
+    var disasterRestoreCommitFailure: Throwable? = null
     var beforePutDisasterRestoreMedia: (suspend () -> Unit)? = null
     var putDisasterRestoreMediaStarted: CompletableDeferred<Unit>? = null
     var disasterRestoreStatus = DisasterRestoreStatus(
-        batchId = "restore-batch-a",
+        batchId = "11111111-1111-4111-8111-111111111111",
         status = "ready_to_commit",
         expiresAtEpochSeconds = 1_753_591_200,
     )
@@ -495,10 +508,12 @@ internal class RecordingSyncBackend : SyncBackend {
         requestId: String,
         entities: List<SyncEntity>,
         media: List<DisasterRestoreMediaSpec>,
+        sourceRelations: List<com.lezi.babylog.sync.backend.DisasterRestoreSourceRelation>,
     ): DisasterRestoreStatus {
         require(recoveryToken == "recovery-token-secret")
         disasterRestoreManifestEntities += entities
         disasterRestoreManifestMedia += media
+        disasterRestoreManifestRelations += sourceRelations
         return disasterRestoreStatus.copy(status = "manifest_staged")
     }
 
@@ -514,6 +529,7 @@ internal class RecordingSyncBackend : SyncBackend {
         putDisasterRestoreMediaStarted?.complete(Unit)
         beforePutDisasterRestoreMedia?.invoke()
         disasterRestoreMediaUuids += clientUuid
+        disasterRestoreMediaBodies += clientUuid to source.openStream().use { it.readBytes() }
         return disasterRestoreStatus
     }
 
@@ -522,6 +538,7 @@ internal class RecordingSyncBackend : SyncBackend {
         batchId: String,
         recoveryToken: String,
     ): DisasterRestoreStatus {
+        disasterRestoreStatusFailure?.let { throw it }
         require(recoveryToken == "recovery-token-secret")
         return disasterRestoreStatus
     }
@@ -535,6 +552,7 @@ internal class RecordingSyncBackend : SyncBackend {
     ): SessionBootstrapResult {
         require(recoveryToken == "recovery-token-secret")
         disasterRestoreCommitRootPasswords += rootPassword
+        disasterRestoreCommitFailure?.let { throw it }
         return nextDisasterRestoreCommit
     }
 
@@ -613,12 +631,19 @@ internal class RecordingSyncBackend : SyncBackend {
         return ownerLogin(endpoint.origin, deviceName, loginRequestId, rootPassword, takeover)
     }
 
+    var memberLoginRequestFailure: Throwable? = null
+    var memberLoginRequestStarted: CompletableDeferred<Unit>? = null
+    var releaseMemberLoginRequest: CompletableDeferred<Unit>? = null
+
     override suspend fun requestMemberLogin(
         baseUrl: String,
         displayName: String,
         deviceName: String,
     ): MemberLoginReceipt {
         memberLoginRequests += Triple(baseUrl, displayName, deviceName)
+        memberLoginRequestStarted?.complete(Unit)
+        releaseMemberLoginRequest?.await()
+        memberLoginRequestFailure?.let { throw it }
         return nextMemberLoginReceipt
     }
 
@@ -696,12 +721,17 @@ internal class RecordingSyncBackend : SyncBackend {
         return nextMemberLoginGrant
     }
 
+    var memberLoginGrantClaimFailure: Throwable? = null
+    var beforeMemberLoginGrantClaimReturn: suspend () -> Unit = {}
+
     override suspend fun claimMemberLoginGrant(
         endpoint: TrustedEndpointProfile,
         grant: String,
         deviceName: String,
     ): SessionBootstrapResult {
         memberLoginGrantClaims += Triple(endpoint, grant, deviceName)
+        beforeMemberLoginGrantClaimReturn()
+        memberLoginGrantClaimFailure?.let { throw it }
         return nextMemberLoginClaim
     }
 
@@ -888,8 +918,11 @@ internal class RecordingSyncBackend : SyncBackend {
         )
     }
 
-    override suspend fun memberDirectory(session: SyncSession): FamilyMemberDirectorySnapshot =
-        FamilyMemberDirectorySnapshot(nextDirectoryGeneration, members(session))
+    override suspend fun memberDirectory(session: SyncSession): FamilyMemberDirectorySnapshot {
+        val snapshot = FamilyMemberDirectorySnapshot(nextDirectoryGeneration, members(session))
+        beforeMemberDirectoryReturn()
+        return snapshot
+    }
 
     override suspend fun updateMyDisplayName(
         session: SyncSession,
@@ -901,6 +934,7 @@ internal class RecordingSyncBackend : SyncBackend {
 
     override suspend fun renameFamily(session: SyncSession, familyName: String?) {
         renameFamilyFailure?.let { throw it }
+        onRenameFamily()
         renamedFamilyNames += familyName
     }
 
@@ -1046,6 +1080,7 @@ internal class MemorySyncPreferences(
     private var memberPendingSecret = ""
     private var disasterRestoreRecoveryToken = ""
     private var disasterRestoreRequestIds: DisasterRestoreRequestIds? = null
+    var nextDisasterRestoreRequestIds: DisasterRestoreRequestIds? = null
     private var createRequestId: String? = null
     private var ownerLoginRequestId: String? = null
     private var refreshRequestId: String? = null
@@ -1055,6 +1090,11 @@ internal class MemorySyncPreferences(
     var saveSessionCalls = 0
     var updatePullCheckpointCalls = 0
     var failSaveSessionAttempts = 0
+    var failPendingReplicaCredentialWriteAttempts = 0
+    var failCompleteRestoreSessionAttempts = 0
+    var failClearDisasterRestoreCheckpointAttempts = 0
+    var afterClearDisasterRestoreCheckpoint: (() -> Unit)? = null
+    private var pendingReplicaCredentialsReady = true
     var failUpdateCursorAttempts = 0
     var clearCreateRequestIdFailure: Throwable? = null
     var clearCreateRequestIdCalls = 0
@@ -1083,11 +1123,22 @@ internal class MemorySyncPreferences(
 
     override suspend fun rememberEndpoint(endpoint: TrustedEndpointProfile) {
         rememberEndpointError?.let { throw it }
+        activeMemberQrClaim = null
+        if (endpointState.value != endpoint) {
+            val pending = pendingMemberState.value ?: reconnectMemberAttempt
+            check(pending == null) { "已有加入申请，请先在这台设备放弃等待" }
+        }
         endpointState.value = endpoint
     }
 
-    override suspend fun forgetEndpoint() {
+    override suspend fun forgetEndpoint(retainMemberAttempts: Boolean) {
+        activeMemberQrClaim = null
         endpointState.value = null
+        if (!retainMemberAttempts) {
+            pendingMemberState.value = null
+            reconnectMemberAttempt = null
+            memberPendingSecret = ""
+        }
     }
 
     override suspend fun saveFamilyMemberDirectory(members: List<FamilyMember>) {
@@ -1170,7 +1221,62 @@ internal class MemorySyncPreferences(
         state.value = next
     }
 
+    override suspend fun updateFamilyName(expected: SyncSession, familyName: String): Boolean {
+        val current = current()
+        if (current.familyId != expected.familyId || current.membershipId != expected.membershipId ||
+            current.deviceId != expected.deviceId || current.baseUrl != expected.baseUrl ||
+            current.role != expected.role || current.reauthRequired
+        ) return false
+        saveSession(current.copy(familyName = familyName))
+        return true
+    }
+
+    override suspend fun stageTerminalRemovalIfCurrent(
+        expected: SyncSession,
+        kind: TerminalRemovalKind,
+        receipt: com.lezi.babylog.sync.DeviceRemovedCleanupReceipt?,
+    ): Boolean {
+        val current = state.value
+        if (!current.hasSameCredentialGeneration(expected)) return false
+        if (!state.compareAndSet(current, current.copy(reauthRequired = true))) return false
+        when (kind) {
+            TerminalRemovalKind.Device -> markPendingDeviceRemovalClear()
+            TerminalRemovalKind.Membership -> markPendingMembershipDeletionClear()
+            TerminalRemovalKind.Family -> markPendingFamilyDeletionClear()
+        }
+        if (receipt != null) saveDeviceRemovedReceipt(receipt)
+        return true
+    }
+
+    override suspend fun saveRefreshedSessionIfCurrent(expected: SyncSession, refreshed: SyncSession): Boolean {
+        val current = state.value
+        if (!current.hasSameCredentialGeneration(expected)) return false
+        saveSessionCalls++
+        if (failSaveSessionAttempts > 0) {
+            failSaveSessionAttempts--
+            error("session persistence interrupted")
+        }
+        val saved = state.compareAndSet(current, current.copy(
+            accessToken = refreshed.accessToken,
+            refreshToken = refreshed.refreshToken,
+            accessExpiresAtEpochSeconds = refreshed.accessExpiresAtEpochSeconds,
+            reauthRequired = false,
+        ))
+        if (saved) refreshRequestId = null
+        return saved
+    }
+
+    override suspend fun clearDeviceCredentialsForReauthIfCurrent(expected: SyncSession): Boolean {
+        val current = state.value
+        if (!current.hasSameCredentialGeneration(expected)) return false
+        return state.compareAndSet(current, current.copy(
+            accessToken = "", refreshToken = "", accessExpiresAtEpochSeconds = 0,
+            reauthRequired = true,
+        ))
+    }
+
     override suspend fun saveSession(session: SyncSession) {
+        activeMemberQrClaim = null
         saveSessionCalls += 1
         if (failSaveSessionAttempts > 0) {
             failSaveSessionAttempts--
@@ -1216,6 +1322,7 @@ internal class MemorySyncPreferences(
         refreshRequestId = null
         pendingMemberState.value = null
         memberPendingSecret = ""
+        activeMemberQrClaim = null
         pendingReplicaResetPrevious = previous
         pendingReplicaResetSession = session
         state.value = session.copy(
@@ -1224,7 +1331,15 @@ internal class MemorySyncPreferences(
             accessExpiresAtEpochSeconds = 0,
             reauthRequired = true,
         )
+        pendingReplicaCredentialsReady = false
+        if (failPendingReplicaCredentialWriteAttempts > 0) {
+            failPendingReplicaCredentialWriteAttempts--
+            error("secure restore credential write interrupted")
+        }
+        pendingReplicaCredentialsReady = true
     }
+
+    override suspend fun pendingReplicaResetCredentialsReady(): Boolean = pendingReplicaCredentialsReady
 
     override suspend fun pendingReplicaResetPrevious(): SyncSession? =
         pendingReplicaResetPrevious
@@ -1234,6 +1349,17 @@ internal class MemorySyncPreferences(
         pendingReplicaResetPrevious = null
         pendingReplicaResetSession = null
         state.value = session
+    }
+
+    override suspend fun completePendingRestoreSession(endpoint: TrustedEndpointProfile) {
+        if (failCompleteRestoreSessionAttempts > 0) {
+            failCompleteRestoreSessionAttempts--
+            error("restore session publication interrupted")
+        }
+        check(pendingReplicaCredentialsReady)
+        completePendingReplicaReset()
+        endpointState.value = endpoint
+        memberDirectoryState.value = emptyList()
     }
 
     override suspend fun recoverPendingCredentialClear() {
@@ -1309,18 +1435,97 @@ internal class MemorySyncPreferences(
             refreshRequestId = it
         }
 
+    private var activeMemberQrClaim: String? = null
+    override suspend fun beginMemberQrClaim(operationId: String, owner: com.lezi.babylog.sync.session.MemberReconnectOwner): Boolean {
+        if (state.value.isJoined || memberReconnectOwner() != owner) return false
+        activeMemberQrClaim = operationId
+        return true
+    }
+    override suspend fun endMemberQrClaim(operationId: String) {
+        if (activeMemberQrClaim == operationId) activeMemberQrClaim = null
+    }
+    override suspend fun activateMemberQrClaimIfCurrent(
+        operationId: String, owner: com.lezi.babylog.sync.session.MemberReconnectOwner, session: SyncSession,
+        endpoint: TrustedEndpointProfile, pendingReplicaResetPrevious: SyncSession?,
+    ): Boolean {
+        if (activeMemberQrClaim != operationId || memberReconnectOwner() != owner) return false
+        endpointState.value = endpoint
+        if (pendingReplicaResetPrevious == null) saveSession(session)
+        else saveSessionPendingReplicaReset(session, pendingReplicaResetPrevious)
+        return true
+    }
+
+    override suspend fun beginReconnectMemberAttempt(
+        attempt: PendingMemberLogin, owner: com.lezi.babylog.sync.session.MemberReconnectOwner,
+    ): Boolean {
+        if (memberReconnectOwner() != owner) return false
+        saveMemberLoginAttempt(attempt, reconnect = true)
+        return true
+    }
+    override suspend fun isReconnectMemberAttemptCurrent(
+        operationId: String, owner: com.lezi.babylog.sync.session.MemberReconnectOwner,
+    ): Boolean = memberReconnectOwner() == owner && reconnectMemberAttempt?.operationId == operationId
+
+    override suspend fun activateReconnectMemberIfCurrent(
+        operationId: String, owner: com.lezi.babylog.sync.session.MemberReconnectOwner,
+        session: SyncSession, endpoint: TrustedEndpointProfile,
+    ): Boolean {
+        if (!isReconnectMemberAttemptCurrent(operationId, owner)) return false
+        saveReconnectedSession(session, endpoint)
+        reconnectMemberAttempt = null
+        return true
+    }
+
+    private var reconnectMemberAttempt: PendingMemberLogin? = null
+    override suspend fun saveMemberLoginAttempt(attempt: PendingMemberLogin, reconnect: Boolean) {
+        if (reconnect) reconnectMemberAttempt = attempt else pendingMemberState.value = attempt
+    }
+    override suspend fun memberLoginAttempt(reconnect: Boolean): PendingMemberLogin? =
+        if (reconnect) reconnectMemberAttempt else pendingMemberState.value?.takeIf { it.remoteOutcomeUnknown }
+    override suspend fun clearMemberLoginAttempt(reconnect: Boolean, expectedOperationId: String?) {
+        if (expectedOperationId != null && memberLoginAttempt(reconnect)?.operationId != expectedOperationId) return
+        if (reconnect) reconnectMemberAttempt = null
+        else if (pendingMemberState.value?.remoteOutcomeUnknown == true) pendingMemberState.value = null
+    }
+
     override suspend fun savePendingMemberLogin(
         receipt: MemberLoginReceipt,
         displayName: String,
         deviceName: String,
+        expectedOperationId: String?,
     ) {
+        check(expectedOperationId == null || pendingMemberState.value?.operationId == expectedOperationId) {
+            "原加入申请已放弃"
+        }
+        val originalAttempt = pendingMemberState.value?.takeIf { it.remoteOutcomeUnknown }
         memberPendingSecret = receipt.pendingSecret
         pendingMemberState.value = PendingMemberLogin(
             requestId = receipt.requestId,
             displayName = displayName,
             deviceName = deviceName,
             expiresAtEpochSeconds = receipt.expiresAtEpochSeconds,
+            operationId = originalAttempt?.operationId ?: receipt.requestId,
+            endpointOrigin = originalAttempt?.endpointOrigin.orEmpty(),
         )
+    }
+
+    override suspend fun pendingMemberSecretIfCurrent(
+        requestId: String, owner: com.lezi.babylog.sync.session.MemberReconnectOwner,
+    ): String? = if (isPendingMemberLoginCurrent(requestId, owner)) memberPendingSecret else null
+
+    override suspend fun isPendingMemberLoginCurrent(
+        requestId: String, owner: com.lezi.babylog.sync.session.MemberReconnectOwner,
+    ): Boolean = pendingMemberState.value?.requestId == requestId &&
+        pendingMemberState.value?.remoteOutcomeUnknown == false && memberReconnectOwner() == owner
+
+    override suspend fun activatePendingMemberIfCurrent(
+        requestId: String, owner: com.lezi.babylog.sync.session.MemberReconnectOwner,
+        session: SyncSession, pendingReplicaResetPrevious: SyncSession?,
+    ): Boolean {
+        if (!isPendingMemberLoginCurrent(requestId, owner)) return false
+        if (pendingReplicaResetPrevious == null) saveSession(session)
+        else saveSessionPendingReplicaReset(session, pendingReplicaResetPrevious)
+        return true
     }
 
     override suspend fun pendingMemberSecret(): String = memberPendingSecret
@@ -1329,7 +1534,8 @@ internal class MemorySyncPreferences(
         memberPendingSecret = ""
     }
 
-    override suspend fun clearPendingMemberLogin() {
+    override suspend fun clearPendingMemberLogin(expectedOperationId: String?) {
+        if (expectedOperationId != null && pendingMemberState.value?.operationId != expectedOperationId) return
         pendingMemberState.value = null
         memberPendingSecret = ""
     }
@@ -1347,20 +1553,27 @@ internal class MemorySyncPreferences(
         )
     }
 
+    override suspend fun pendingDisasterRestoreRequestIds(): DisasterRestoreRequestIds? = disasterRestoreRequestIds
+
     override suspend fun ensureDisasterRestoreRequestIds(): DisasterRestoreRequestIds =
-        disasterRestoreRequestIds ?: DisasterRestoreRequestIds(
+        disasterRestoreRequestIds ?: (nextDisasterRestoreRequestIds ?: DisasterRestoreRequestIds(
             start = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             manifest = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
             commit = "cccccccc-cccc-cccc-cccc-cccccccccccc",
-        ).also { disasterRestoreRequestIds = it }
+        )).also { disasterRestoreRequestIds = it; nextDisasterRestoreRequestIds = null }
 
     override suspend fun disasterRestoreToken(): String = disasterRestoreRecoveryToken
 
     override suspend fun clearDisasterRestoreCheckpoint() {
+        if (failClearDisasterRestoreCheckpointAttempts > 0) {
+            failClearDisasterRestoreCheckpointAttempts--
+            throw IOException("injected restore checkpoint clear failure")
+        }
         disasterRestoreState.value = null
         disasterRestoreRecoveryToken = ""
         disasterRestoreRequestIds = null
         refreshRequestId = null
+        afterClearDisasterRestoreCheckpoint?.invoke()
     }
 
     override suspend fun clearCreateRequestId() {
@@ -1457,13 +1670,10 @@ internal class MutablePolicyClock(var now: Long = 1_000) : PolicyClock {
 }
 
 internal class TestForegroundState(
-    private var foreground: Boolean = true,
-) : ForegroundState {
-    override fun isForeground(): Boolean = foreground
-    override fun setForeground(value: Boolean) {
-        foreground = value
-    }
-}
+    foreground: Boolean = true,
+) : ForegroundState by (com.lezi.babylog.sync.session.ProcessForegroundState().apply {
+    setForeground(foreground)
+})
 
 internal class TestRemovedDeviceLocalClearGate : RemovedDeviceLocalClearGate {
     var calls = 0
@@ -1471,11 +1681,12 @@ internal class TestRemovedDeviceLocalClearGate : RemovedDeviceLocalClearGate {
     val firstCall = CompletableDeferred<Unit>()
     var release: CompletableDeferred<Unit>? = null
 
-    override suspend fun clearAllLocalFamilyData() {
+    override suspend fun localClearWorkflow(): LocalClearWorkflow {
         calls++
         firstCall.complete(Unit)
         release?.await()
         failures.removeFirstOrNull()?.let { throw it }
+        return NoOpRemovedDeviceLocalClearGate().localClearWorkflow()
     }
 }
 
@@ -1484,6 +1695,21 @@ internal open class TestMediaFileStore : SyncMediaFileStore {
     var readableFileCalls = 0
     val deleted = mutableListOf<String>()
     val existing = linkedSetOf<String>()
+    private val downloadedByteLengths = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val syntheticFiles = java.util.concurrent.ConcurrentHashMap<String, File>()
+
+    private fun storeSyntheticFile(localUri: String, bytes: ByteArray) {
+        val target = syntheticFiles.computeIfAbsent(localUri) {
+            File.createTempFile("synthetic-media-", ".jpg").apply { deleteOnExit() }
+        }
+        target.writeBytes(bytes)
+    }
+    /** Explicit local-source fixture, separate from codec output configuration. */
+    fun seedReadableSource(localUri: String, bytes: ByteArray) {
+        storeSyntheticFile(localUri, bytes)
+        preparedUploadBytes[localUri] = bytes.copyOf()
+        existing += localUri
+    }
     val missing = linkedSetOf<String>()
     val sweepCalls = mutableListOf<Pair<LocalDataClearScope, Set<String>>>()
     val deleteFailures = ArrayDeque<Throwable>()
@@ -1492,12 +1718,24 @@ internal open class TestMediaFileStore : SyncMediaFileStore {
     var afterSaveDownloaded: (suspend () -> Unit)? = null
     val saveDownloadedFailures = mutableSetOf<String>()
     val prepareUploadCounts = mutableMapOf<String, Int>()
-    val preparedUploadBytes = mutableMapOf<String, ByteArray>()
+    val preparedUploadBytes = object : java.util.concurrent.ConcurrentHashMap<String, ByteArray>() {
+        override fun put(key: String, value: ByteArray): ByteArray? {
+            // Mutating a fixture URI changes its backing bytes too; never let a stale
+            // readable-file mirror hide the very source-edit race a test schedules.
+            syntheticFiles[key]?.writeBytes(value)
+            return super.put(key, value)
+        }
+    }
     val prepareUploadFailures = mutableSetOf<String>()
 
     override fun readableFile(localUri: String): File? {
         readableFileCalls += 1
+        return backingFile(localUri)
+    }
+
+    private fun backingFile(localUri: String): File? {
         if (localUri.isBlank() || localUri in missing) return null
+        syntheticFiles[localUri]?.takeIf { it.isFile }?.let { return it }
         val raw = File(localUri)
         val candidate = if (raw.isAbsolute || filesRoot == null) {
             raw
@@ -1509,19 +1747,17 @@ internal open class TestMediaFileStore : SyncMediaFileStore {
 
     val inspected = mutableListOf<String>()
 
-    /**
-     * JVM fake has no backing files: every fake file's length is the same
-     * constant [inspect] reports, so rows whose byteSize matches stay clean
-     * under the repair pre-filter exactly like on-device files.
-     */
+    /** Real files and explicit synthetic byte bodies outrank the legacy 12-byte fixture default. */
     override fun statLength(localUri: String): Long? =
-        if (localUri.isBlank() || localUri in missing) null else 12L
+        if (localUri.isBlank() || localUri in missing) null
+        else backingFile(localUri)?.length() ?: downloadedByteLengths[localUri]
+            ?: preparedUploadBytes[localUri]?.size?.toLong() ?: 12L
 
     override suspend fun inspect(localUri: String): LocalMediaInfo? {
         inspected += localUri
         afterInspect?.also { afterInspect = null }?.invoke()
-        if (localUri in missing) return null
-        return LocalMediaInfo(byteSize = 12, mime = "image/jpeg", width = 10, height = 10)
+        val length = statLength(localUri) ?: return null
+        return LocalMediaInfo(byteSize = length, mime = "image/jpeg", width = 10, height = 10)
     }
 
     override suspend fun prepareUpload(localUri: String): PreparedMedia {
@@ -1529,6 +1765,35 @@ internal open class TestMediaFileStore : SyncMediaFileStore {
         check(localUri !in prepareUploadFailures) { "injected media source loss" }
         afterPrepareUpload?.also { afterPrepareUpload = null }?.invoke()
         return testPreparedMedia(preparedUploadBytes[localUri] ?: byteArrayOf(1))
+    }
+
+    override suspend fun preparePublishedUpload(
+        localUri: String,
+        identity: com.lezi.babylog.sync.media.PublishedMediaIdentity,
+    ): PreparedMedia {
+        check(localUri !in missing && localUri !in prepareUploadFailures) {
+            "published source bytes unavailable"
+        }
+        // Existing synthetic fixtures model their filesystem in preparedUploadBytes.
+        // Real-file seam tests use the production verified-copy default.
+        if (!syntheticFiles.containsKey(localUri) && readableFile(localUri) != null) {
+            return super<SyncMediaFileStore>.preparePublishedUpload(localUri, identity)
+        }
+        val bytes = preparedUploadBytes[localUri] ?: ByteArray(12) { 1 }
+        require(bytes.size.toLong() == identity.byteSize) { "synthetic published length does not match its bytes" }
+        identity.sha256?.let { expected ->
+            require(java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+                .joinToString("") { "%02x".format(it) } == expected) { "synthetic published digest does not match its bytes" }
+        }
+        storeSyntheticFile(localUri, bytes)
+        return testPreparedMedia(bytes, identity.mime, identity.width, identity.height)
+    }
+
+    override suspend fun saveDownloadedOwned(clientUuid: String, kind: String, bytes: ByteArray,
+        mime: String?, reserve: suspend (String) -> Unit): String {
+        val path = saveDownloaded(clientUuid, kind, bytes, mime)
+        reserve(path)
+        return path
     }
 
     override suspend fun saveDownloaded(
@@ -1540,13 +1805,18 @@ internal open class TestMediaFileStore : SyncMediaFileStore {
         require(bytes.isNotEmpty()) { "downloaded media must not be empty" }
         check(clientUuid !in saveDownloadedFailures) { "injected local save failure" }
         afterSaveDownloaded?.also { afterSaveDownloaded = null }?.invoke()
-        return "downloaded/$clientUuid"
+        val localUri = "downloaded/$clientUuid"
+        downloadedByteLengths[localUri] = bytes.size.toLong()
+        preparedUploadBytes[localUri] = bytes.copyOf()
+        storeSyntheticFile(localUri, bytes)
+        return localUri
     }
 
     override open suspend fun delete(localUri: String) {
         deleted += localUri
         deleteFailures.removeFirstOrNull()?.let { throw it }
         existing -= localUri
+        syntheticFiles.remove(localUri)?.delete()
     }
 
     override suspend fun sweepUnreferenced(
@@ -1587,7 +1857,16 @@ internal class TestImmutableMediaSpool(
         sources.sortedBy(ImmutableMediaSpoolSource::mediaUuid).forEachIndexed { slot, source ->
             val item = existing[source.mediaUuid]?.also { item ->
                 require(item.slot == slot && item.role == source.role)
-            } ?: mediaFiles.prepareUpload(source.localUri).use { prepared ->
+            } ?: (source.retainedSource?.let { donor ->
+                val identity = requireNotNull(source.publishedIdentity)
+                require(groups[donor.mutationId]?.items?.singleOrNull { it.mediaUuid == source.mediaUuid } == donor.item)
+                val content = requireNotNull(bytes[donor.mutationId to source.mediaUuid])
+                require(com.lezi.babylog.core.common.MediaContentDigest.ofBytes(content) == identity.sha256 &&
+                    content.size.toLong() == identity.byteSize)
+                testPreparedMedia(content, identity.mime, identity.width, identity.height)
+            } ?: source.publishedIdentity?.let { identity ->
+                mediaFiles.preparePublishedUpload(source.localUri, identity)
+            } ?: mediaFiles.prepareUpload(source.localUri)).use { prepared ->
                 val content = prepared.file.readBytes()
                 bytes[mutationId to source.mediaUuid] = content
                 ImmutableMediaSpoolItem(
@@ -1732,8 +2011,13 @@ internal class SyncRig(
     clientAppVersion: ClientAppVersion = ClientAppVersion.FALLBACK,
     appUpdateInstaller: AppUpdateInstaller = NoOpAppUpdateInstaller,
     apkIdentityReader: AppUpdateApkIdentityReader = FakeAppUpdateApkIdentityReader(),
-    appUpdateCacheDir: java.io.File = createTempDir(prefix = "lezi-app-update-rig"),
+    val appUpdateCacheDir: java.io.File = createTempDir(prefix = "lezi-app-update-rig"),
     awaitPiggybackAppUpdateDiscovery: Boolean = true,
+    mediaFileStore: TestMediaFileStore = TestMediaFileStore(),
+    immutableMediaSpoolOverride: ImmutableMediaSpool? = null,
+    ownedPreferences: SyncPreferences? = null,
+    conflictDetailsOverride: MemoryConflictSnapshotCacheDao? = null,
+    sourceRelationsOverride: MemorySourceRelationDao? = null,
 ) {
     val backend = RecordingSyncBackend()
     val preferences = (syncPreferences ?: MemorySyncPreferences(session)).also {
@@ -1745,7 +2029,8 @@ internal class SyncRig(
     val babies = MemoryBabyDao()
     val media = MemoryMediaDao()
     val customItems = MemoryCustomItemDao()
-    val conflictDetails = MemoryConflictSnapshotCacheDao()
+    val conflictDetails = conflictDetailsOverride ?: MemoryConflictSnapshotCacheDao()
+    val sourceRelations = sourceRelationsOverride ?: MemorySourceRelationDao()
     val pendingPublish = TestPendingPublishDao(
         count = {
             val receipts = conflictDetails.listTerminalReceipts()
@@ -1768,7 +2053,7 @@ internal class SyncRig(
                 customItems.listPendingSync().size
         },
     )
-    val mediaFiles = TestMediaFileStore()
+    val mediaFiles = mediaFileStore
     val immutableMediaSpool = TestImmutableMediaSpool(mediaFiles)
     val transactions = RecordingTransactionRunner()
     val fulfillmentAuthoritySettlement =
@@ -1795,7 +2080,7 @@ internal class SyncRig(
     val foreground = TestForegroundState()
     val port = RealSyncPort(
         backend = syncBackend ?: backend,
-        preferences = preferences,
+        preferences = ownedPreferences ?: preferences,
         setupProbe = setupProbe,
         foregroundSyncGate = ForegroundSyncGate(),
         pendingPublishDao = pendingPublish,
@@ -1808,7 +2093,7 @@ internal class SyncRig(
         clock = clock,
         foregroundState = foreground,
         mediaFiles = mediaFiles,
-        immutableMediaSpool = immutableMediaSpool,
+        immutableMediaSpool = immutableMediaSpoolOverride ?: immutableMediaSpool,
         mediaFileCleanup = mediaFileCleanup,
         transactionRunner = transactions,
         pendingReplicaCleanupStore = pendingReplicaCleanup,
@@ -1820,6 +2105,7 @@ internal class SyncRig(
         wakeObservationDao = wakeObservations,
         conflictSummaryDao = conflictSummaries,
         conflictSnapshotCacheDao = conflictDetails,
+        sourceRelationDao = sourceRelations,
         clientAppVersion = clientAppVersion,
         appUpdateInstaller = appUpdateInstaller,
         apkIdentityReader = apkIdentityReader,
@@ -1830,6 +2116,29 @@ internal class SyncRig(
 
     suspend fun awaitStartupRecovery() {
         pendingReplicaCleanup.firstLoad.await()
+    }
+
+    /**
+     * Opt-in precondition for ordinary-operation tests. Call before the fixture's
+     * first port operation, signal, or policy-clock advance, with no terminal
+     * cleanup staged. Do not use for tests of startup recovery or contention.
+     *
+     * With that precondition, constructor recovery is the only load caller:
+     * init owns syncMutex -> recoverPendingLocalClearLocked ->
+     * recoverPendingLocked -> load completes firstLoad while still holding it.
+     * Acquiring this SAME mutex after that signal therefore fences its release.
+     * It does not await/shut down session collectors or all processScope jobs.
+     */
+    suspend fun awaitInitialReplicaBarrier() {
+        val field = RealSyncPort::class.java.getDeclaredField("syncMutex")
+        check(field.type == Mutex::class.java) { "syncMutex fixture contract changed" }
+        field.isAccessible = true // Ordinary host-JVM reflection; any denial propagates.
+        check(field.isAccessible) { "Cannot inspect the fixture's replica barrier" }
+        val barrier = checkNotNull(field.get(port) as? Mutex) {
+            "Missing fixture replica barrier"
+        }
+        pendingReplicaCleanup.firstLoad.await()
+        barrier.withLock { }
     }
 }
 
@@ -2810,6 +3119,12 @@ internal class MemoryMediaDao : MediaAssetDao {
         return before - rows.size
     }
 
+    var canonicalAuditRowsRead = 0
+    var canonicalAuditQueries = 0
+    override suspend fun listCanonicalAuditPage(afterUuid: String, limit: Int): List<MediaAssetEntity> =
+        rows.filter { it.clientUuid > afterUuid }.sortedBy(MediaAssetEntity::clientUuid).take(limit)
+            .also { canonicalAuditRowsRead += it.size; canonicalAuditQueries++ }
+
     override suspend fun listMissingLocalBytes(): List<MediaAssetEntity> {
         listMissingLocalBytesCalls += 1
         return rows.filter {
@@ -2969,6 +3284,9 @@ internal class MemoryMediaReferenceDao : com.lezi.babylog.core.database.causal.M
         }
     }
 
+    override suspend fun listAllHolders(): List<com.lezi.babylog.core.database.causal.MediaReferenceEntity> =
+        items.sortedWith(compareBy({ it.mediaUuid }, { it.holderKind }, { it.holderId }))
+
     override suspend fun listForMedia(
         mediaUuid: String,
     ): List<com.lezi.babylog.core.database.causal.MediaReferenceEntity> =
@@ -3126,6 +3444,12 @@ internal class MemoryConflictSnapshotCacheDao :
         mutableListOf<com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity>()
     private val transport =        CopyOnWriteArrayList<com.lezi.babylog.core.database.causal.CausalTransportJournalEntity>()
     var deleteFailure: Throwable? = null
+    var trackJournalWork = false
+    val journalPointReads = CopyOnWriteArrayList<String>()
+    val journalPointDeletes = CopyOnWriteArrayList<String>()
+    val journalPointPuts = CopyOnWriteArrayList<String>()
+    fun journalPayloadBytesForTest(key: String): Int =
+        transport.find { it.journalKey == key }?.payloadJson?.toByteArray()?.size ?: 0
 
     override suspend fun get(
         conflictId: String,
@@ -3150,14 +3474,32 @@ internal class MemoryConflictSnapshotCacheDao :
 
     override suspend fun getTransportJournal(
         journalKey: String,
-    ): com.lezi.babylog.core.database.causal.CausalTransportJournalEntity? =
-        transport.find { it.journalKey == journalKey }
+    ): com.lezi.babylog.core.database.causal.CausalTransportJournalEntity? {
+        if (trackJournalWork) journalPointReads += journalKey
+        return transport.find { it.journalKey == journalKey }
+    }
+
+    var failNextFrozenManifestWrite: Throwable? = null
+    // Final file-snapshot pointer persistence only; capture has already completed on disk.
+    var restorePointerWriteFailuresRemaining = 0
+    var restorePointerWriteFailure: Throwable = IOException("injected restore pointer write failure")
 
     override suspend fun putTransportJournal(
         journalKey: String,
         payloadJson: String,
         contentEpoch: Long,
     ) {
+        if (trackJournalWork) journalPointPuts += journalKey
+        if (journalKey.startsWith("frozen-media-spool:")) {
+            failNextFrozenManifestWrite?.also { failNextFrozenManifestWrite = null }?.let { throw it }
+        }
+        if (restorePointerWriteFailuresRemaining > 0 && journalKey.startsWith("restore-authority-v1:")) {
+            val value = Json.parseToJsonElement(payloadJson).jsonObject
+            if (value["format"] == JsonPrimitive(2) && value["phase"] == JsonPrimitive("prepared")) {
+                restorePointerWriteFailuresRemaining -= 1
+                throw restorePointerWriteFailure
+            }
+        }
         transport.removeAll { it.journalKey == journalKey }
         transport += com.lezi.babylog.core.database.causal.CausalTransportJournalEntity(
             journalKey = journalKey,
@@ -3167,6 +3509,7 @@ internal class MemoryConflictSnapshotCacheDao :
     }
 
     override suspend fun deleteTransportJournal(journalKey: String) {
+        if (trackJournalWork) journalPointDeletes += journalKey
         deleteFailure?.let { throw it }
         transport.removeAll { it.journalKey == journalKey }
     }
@@ -3190,6 +3533,12 @@ internal class MemoryConflictSnapshotCacheDao :
             )
         }
     }
+
+    override suspend fun listRestoreTerminalSpoolSeals(): List<com.lezi.babylog.core.database.causal.CausalTransportJournalEntity> =
+        transport.filter { it.journalKey.startsWith("restore-terminal-spool-cleanup-v1:") }.sortedBy { it.journalKey }
+
+    override suspend fun listRestoreFileOwners(): List<com.lezi.babylog.core.database.causal.CausalTransportJournalEntity> =
+        transport.filter { it.journalKey.startsWith("restore-file-owner-v1:") }.sortedBy { it.journalKey }
 
     override suspend fun listFrozenMediaSpoolManifests(): List<
         com.lezi.babylog.core.database.causal.CausalTransportJournalEntity
@@ -3243,6 +3592,7 @@ internal class MemoryConflictSnapshotCacheDao :
 }
 
 internal class MemorySourceRelationDao : SourceRelationDao() {
+    var beforeCanonicalRelationWrite: (suspend () -> Unit)? = null
     private val relations = linkedMapOf<String, SourceRelationEntity>()
     private val members = linkedMapOf<Pair<String, String>, SourceRelationMemberEntity>()
     private val declarations = linkedMapOf<String, SourceRelationDeclarationEntity>()
@@ -3296,6 +3646,7 @@ internal class MemorySourceRelationDao : SourceRelationDao() {
     override suspend fun upsertRelationRow(
         entity: SourceRelationEntity,
     ) {
+        beforeCanonicalRelationWrite?.invoke()
         relations[entity.relationId] = entity
         publishRelations()
     }
@@ -3317,6 +3668,14 @@ internal class MemorySourceRelationDao : SourceRelationDao() {
 
     override suspend fun listMembersForRecord(recordClientUuid: String) =
         members.values.filter { it.recordClientUuid == recordClientUuid }
+
+    override suspend fun listMembersForRecords(recordClientUuids: List<String>) =
+        members.values.filter { it.recordClientUuid in recordClientUuids }
+
+    override suspend fun deleteMembershipsForRecords(recordClientUuids: List<String>) {
+        members.entries.removeAll { it.value.recordClientUuid in recordClientUuids }
+        publishMembers()
+    }
 
     override suspend fun deleteOtherMemberships(
         relationId: String,
@@ -3348,6 +3707,9 @@ internal class MemorySourceRelationDao : SourceRelationDao() {
 
     override suspend fun listPendingDeclarations() =
         declarations.values.filter { it.status == "pending" }
+
+    override suspend fun listUnsettledDeclarations(): List<SourceRelationDeclarationEntity> =
+        declarations.values.filter { it.status == "pending" || it.status == "failed" }
 
     override suspend fun deleteAllMembers() {
         members.clear()

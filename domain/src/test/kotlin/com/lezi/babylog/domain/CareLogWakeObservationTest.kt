@@ -79,7 +79,7 @@ class CareLogWakeObservationTest {
         val after = care.listWakeObservations(sleep.clientUuid).single()
         assertThat(after.clientUuid).isEqualTo(wake.clientUuid)
         assertThat(after.wakeTimestamp).isEqualTo(editedEnd)
-        assertThat(after.note).isEqualTo("改醒")
+        assertThat(after.note).isEqualTo(wake.note)
     }
 
     @Test
@@ -429,7 +429,7 @@ class CareLogWakeObservationTest {
     }
 
     @Test
-    fun withdrawEffectiveObservation_clearsEffectiveOnSleep() = runTest {
+    fun withdrawEffectiveObservation_invalidatesEffectiveProjectionWithoutChangingSelection() = runTest {
         val fakes = Fakes()
         val care = fakes.careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
@@ -450,7 +450,7 @@ class CareLogWakeObservationTest {
         care.withdrawWakeObservation("wake-self")
 
         assertThat(care.getWakeObservation("wake-self")!!.withdrawn).isTrue()
-        assertThat(fakes.records.get(openId)!!.effectiveWakeObservationClientUuid).isNull()
+        assertThat(care.getRecord(openId)!!.effectiveWakeObservationClientUuid).isEqualTo("wake-self")
         val projection = care.projectSleepRecord(openId)!!
         assertThat(projection.interval.isOpen || projection.interval.isProvisional).isTrue()
         assertThat(projection.interval.endSource).isNotEqualTo(SleepEndSource.EFFECTIVE)

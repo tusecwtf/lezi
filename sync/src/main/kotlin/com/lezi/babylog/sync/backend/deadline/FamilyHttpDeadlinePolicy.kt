@@ -32,12 +32,17 @@ internal class FamilyHttpDeadlinePolicy(
                 throw FamilyHttpException(parent?.kind ?: operation.elapsedKind)
             }
             try {
-                return withContext(attemptContext) { request() }
+                val result = withContext(attemptContext) { request() }
+                if (attemptContext.remainingMillis() <= 0) {
+                    throw FamilyHttpException(parent?.kind ?: operation.elapsedKind)
+                }
+                return result
             } catch (failure: Throwable) {
                 failure.cancellationCauseOrNull()?.let { throw it }
                 if (failure !is IOException || failure.isFamilyTrustFailure()) throw failure
                 val classified = classifyFamilyHttpFailure(failure, operation)
                 if (
+                    operation.replay == FamilyHttpReplay.Never ||
                     attempts >= operation.budget.maxAttempts ||
                     !classified.kind.isImmediateRetryable
                 ) {

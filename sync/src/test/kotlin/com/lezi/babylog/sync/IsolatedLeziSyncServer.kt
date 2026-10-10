@@ -94,35 +94,31 @@ internal class IsolatedLeziSyncServer private constructor(
         }
 
         private fun resolveLeziSyncBinary(): File {
-            val override = System.getenv("LEZI_SYNC_BIN")?.trim().orEmpty()
-            if (override.isNotEmpty()) {
-                val file = File(override)
-                require(file.isFile && file.canExecute()) {
-                    "LEZI_SYNC_BIN is not an executable file: $override"
-                }
-                return file
+            val path = requireNotNull(System.getenv("LEZI_SYNC_BIN")) {
+                "Required integration artifact missing; run tools/testing/run-isolated-integration.sh"
             }
-            val repoRoot = resolveRepoRoot()
-            val cargoTarget = System.getenv("CARGO_TARGET_DIR")?.trim()?.takeIf { it.isNotEmpty() }
-                ?.let(::File)
-            val homeCache = File(System.getProperty("user.home"), ".cache/cargo-target")
-            val candidates = buildList {
-                if (cargoTarget != null) {
-                    add(File(cargoTarget, "debug/lezi-sync"))
-                    add(File(cargoTarget, "release/lezi-sync"))
-                }
-                add(File(homeCache, "debug/lezi-sync"))
-                add(File(homeCache, "release/lezi-sync"))
-                add(repoRoot.resolve("tools/lezi-sync/target/debug/lezi-sync"))
-                add(repoRoot.resolve("tools/lezi-sync/target/release/lezi-sync"))
+            val binary = File(path).canonicalFile
+            require(binary.isFile && binary.canExecute()) { "LEZI_SYNC_BIN is not executable: $path" }
+            val expectedHash = requireNotNull(System.getenv("LEZI_SYNC_BIN_SHA256")) {
+                "Missing current-build artifact digest; use run-isolated-integration.sh"
             }
-            val binary = candidates
-                .filter { it.isFile && it.canExecute() && it.length() > 10_000_000L }
-                .maxByOrNull { it.lastModified() }
-            requireNotNull(binary) {
-                "lezi-sync binary missing. Build with " +
-                    "`cargo build -p lezi-sync` under tools/lezi-sync, or set LEZI_SYNC_BIN. " +
-                    "Looked in: ${candidates.joinToString()}"
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            binary.inputStream().use { input ->
+                val buffer = ByteArray(65536)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    digest.update(buffer, 0, count)
+                }
+            }
+            require(digest.digest().joinToString("") { "%02x".format(it) } == expectedHash) {
+                "Integration server artifact digest mismatch"
+            }
+            val revision = ProcessBuilder("git", "rev-parse", "HEAD")
+                .directory(resolveRepoRoot()).start()
+            val currentRevision = revision.inputStream.bufferedReader().readText().trim()
+            require(revision.waitFor() == 0 && currentRevision == System.getenv("LEZI_SYNC_SOURCE_REVISION")) {
+                "Integration server was not built for the current checkout revision"
             }
             return binary
         }
@@ -180,9 +176,9 @@ internal class IsolatedLeziSyncServer private constructor(
                 """
                 {
                   "package_name": "com.lezi.babylog",
-                  "version_code": 21,
-                  "version_name": "0.4.0",
-                  "min_supported_version_code": 21,
+                  "version_code": 35,
+                  "version_name": "0.5.5",
+                  "min_supported_version_code": 35,
                   "sha256": "$sha",
                   "release_notes": "H44 isolated real-server media receipt fault seam"
                 }

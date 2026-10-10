@@ -306,6 +306,7 @@ interface BabyDao {
         expectedMutationId: String,
         expectedContentEpoch: Long,
         newBaseVersion: String,
+        matchesBoundContent: Boolean = true,
     ): CommitFirstSettlementEpoch? {
         val current = getByClientUuid(clientUuid) ?: return null
         val settled = com.lezi.babylog.core.database.causal.settleCommitFirstAcceptedOrMerged(
@@ -313,6 +314,7 @@ interface BabyDao {
             expectedMutationId = expectedMutationId,
             expectedContentEpoch = expectedContentEpoch,
             newBaseVersion = newBaseVersion,
+            matchesBoundContent = matchesBoundContent,
         ) ?: return null
         val cols = settled.state.toAppliedColumns()
         update(
@@ -336,6 +338,7 @@ interface BabyDao {
         conflictId: String,
         branchVersionId: String,
         stableBaseVersion: String,
+        matchesBoundContent: Boolean = true,
     ): CommitFirstSettlementEpoch? {
         val current = getByClientUuid(clientUuid) ?: return null
         val settled = com.lezi.babylog.core.database.causal.settleCommitFirstBranched(
@@ -345,6 +348,7 @@ interface BabyDao {
             conflictId = conflictId,
             branchVersionId = branchVersionId,
             stableBaseVersion = stableBaseVersion,
+            matchesBoundContent = matchesBoundContent,
         ) ?: return null
         val cols = settled.state.toAppliedColumns()
         update(
@@ -921,6 +925,7 @@ interface RecordDao {
         expectedMutationId: String,
         expectedContentEpoch: Long,
         newBaseVersion: String,
+        matchesBoundContent: Boolean = true,
     ): CommitFirstSettlementEpoch? {
         val current = getByClientUuid(clientUuid) ?: return null
         val settled = com.lezi.babylog.core.database.causal.settleCommitFirstAcceptedOrMerged(
@@ -928,6 +933,7 @@ interface RecordDao {
             expectedMutationId = expectedMutationId,
             expectedContentEpoch = expectedContentEpoch,
             newBaseVersion = newBaseVersion,
+            matchesBoundContent = matchesBoundContent,
         ) ?: return null
         val cols = settled.state.toAppliedColumns()
         update(
@@ -937,7 +943,7 @@ interface RecordDao {
                 syncDirty = cols.syncDirty,
                 openConflictId = cols.openConflictId,
                 localBranchVersionId = cols.localBranchVersionId,
-                familyPublishedUpdatedAt = expectedContentEpoch,
+                familyPublishedUpdatedAt = if (matchesBoundContent) expectedContentEpoch else current.familyPublishedUpdatedAt,
             ),
         )
         return settled.epoch
@@ -952,6 +958,7 @@ interface RecordDao {
         conflictId: String,
         branchVersionId: String,
         stableBaseVersion: String,
+        matchesBoundContent: Boolean = true,
     ): CommitFirstSettlementEpoch? {
         val current = getByClientUuid(clientUuid) ?: return null
         val settled = com.lezi.babylog.core.database.causal.settleCommitFirstBranched(
@@ -961,6 +968,7 @@ interface RecordDao {
             conflictId = conflictId,
             branchVersionId = branchVersionId,
             stableBaseVersion = stableBaseVersion,
+            matchesBoundContent = matchesBoundContent,
         ) ?: return null
         val cols = settled.state.toAppliedColumns()
         update(
@@ -1404,6 +1412,7 @@ interface CarePlanDao {
         expectedMutationId: String,
         expectedContentEpoch: Long,
         newBaseVersion: String,
+        matchesBoundContent: Boolean = true,
     ): CommitFirstSettlementEpoch? {
         val current = getByClientUuid(clientUuid) ?: return null
         val settled = com.lezi.babylog.core.database.causal.settleCommitFirstAcceptedOrMerged(
@@ -1411,6 +1420,7 @@ interface CarePlanDao {
             expectedMutationId = expectedMutationId,
             expectedContentEpoch = expectedContentEpoch,
             newBaseVersion = newBaseVersion,
+            matchesBoundContent = matchesBoundContent,
         ) ?: return null
         val cols = settled.state.toAppliedColumns()
         update(
@@ -1420,7 +1430,7 @@ interface CarePlanDao {
                 syncDirty = cols.syncDirty,
                 openConflictId = cols.openConflictId,
                 localBranchVersionId = cols.localBranchVersionId,
-                familyPublishedUpdatedAt = expectedContentEpoch,
+                familyPublishedUpdatedAt = if (matchesBoundContent) expectedContentEpoch else current.familyPublishedUpdatedAt,
             ),
         )
         return settled.epoch
@@ -1435,6 +1445,7 @@ interface CarePlanDao {
         conflictId: String,
         branchVersionId: String,
         stableBaseVersion: String,
+        matchesBoundContent: Boolean = true,
     ): CommitFirstSettlementEpoch? {
         val current = getByClientUuid(clientUuid) ?: return null
         val settled = com.lezi.babylog.core.database.causal.settleCommitFirstBranched(
@@ -1444,6 +1455,7 @@ interface CarePlanDao {
             conflictId = conflictId,
             branchVersionId = branchVersionId,
             stableBaseVersion = stableBaseVersion,
+            matchesBoundContent = matchesBoundContent,
         ) ?: return null
         val cols = settled.state.toAppliedColumns()
         update(
@@ -1796,6 +1808,10 @@ interface MediaAssetDao {
         """,
     )
     suspend fun listMissingLocalBytes(): List<MediaAssetEntity>
+
+    /** Keyset maintenance page: the unique clientUuid index bounds rows visited, not just returned. */
+    @Query("SELECT * FROM media_assets WHERE clientUuid > :afterUuid ORDER BY clientUuid LIMIT :limit")
+    suspend fun listCanonicalAuditPage(afterUuid: String, limit: Int): List<MediaAssetEntity>
 
     @Query("SELECT * FROM media_assets WHERE clientUuid = :uuid LIMIT 1")
     suspend fun getByClientUuid(uuid: String): MediaAssetEntity?

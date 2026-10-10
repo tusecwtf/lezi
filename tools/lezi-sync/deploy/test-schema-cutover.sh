@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Public-seam contract and failure-injection tests for the dedicated schema cutover.
 set -euo pipefail
+# Explicit synthetic transport identity for mocked production phases.
+export NAS_SSH=fixture@example.invalid NAS_SSH_PORT=10000 LEZI_LAN_HOST=192.168.77.10
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CUTOVER="${SCRIPT_DIR}/schema-cutover.sh"

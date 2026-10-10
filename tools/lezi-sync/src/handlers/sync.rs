@@ -221,6 +221,7 @@ pub(crate) async fn heartbeat(
     }
     let family_lock = state.family_lock(&principal.family_id).await;
     let guard = family_lock.lock().await;
+    let principal = authenticate(&state, &headers).await?;
     let blocking_state = state.clone();
     let family_id = principal.family_id.clone();
     let (head_rev, directory_generation) = run_blocking(move || {
@@ -589,6 +590,7 @@ pub(crate) async fn causal_commit(
     let units = parse_causal_units(request)?;
     let family_lock = state.family_lock(&principal.family_id).await;
     let guard = family_lock.lock().await;
+    let principal = authenticate(&state, &headers).await?;
     let blocking_state = state.clone();
     let generation = state.generation.clone();
     let family_id = principal.family_id.clone();
@@ -693,6 +695,7 @@ pub(crate) async fn conflict_detail(
     };
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
+    let principal = authenticate(&state, &headers).await?;
     let blocking_state = state.clone();
     let detail = run_blocking(move || {
         blocking_state
@@ -754,6 +757,7 @@ pub(crate) async fn resolve_conflict(
     };
     let family_lock = state.family_lock(&principal.family_id).await;
     let guard = family_lock.lock().await;
+    let principal = authenticate(&state, &headers).await?;
     let family_id = principal.family_id.clone();
     let blocking_state = state.clone();
     let result = run_blocking(move || {
@@ -900,6 +904,7 @@ pub(crate) async fn withdraw_conflict_branches(
     };
     let family_lock = state.family_lock(&principal.family_id).await;
     let guard = family_lock.lock().await;
+    let principal = authenticate(&state, &headers).await?;
     let family_id = principal.family_id.clone();
     let blocking_state = state.clone();
     let result = run_blocking(move || {
@@ -973,6 +978,7 @@ pub(crate) async fn declare_source_relation(
     };
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
+    let principal = authenticate(&state, &headers).await?;
     let blocking_state = state.clone();
     let result = run_blocking(move || {
         blocking_state
@@ -1008,6 +1014,7 @@ pub(crate) async fn resolve_source_relation_group(
     };
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
+    let principal = authenticate(&state, &headers).await?;
     let blocking_state = state.clone();
     let result = run_blocking(move || {
         blocking_state
@@ -1244,8 +1251,22 @@ pub(crate) async fn pull_entities(
         ));
     }
     let response_encoding = negotiated_pull_response_encoding(&headers)?;
+    let identity_values = headers
+        .get_all("x-lezi-media-identity")
+        .iter()
+        .collect::<Vec<_>>();
+    let include_media_identity = match identity_values.as_slice() {
+        [] => false,
+        [value] if value.as_bytes() == b"v1" => true,
+        _ => {
+            return Err(ApiError::unprocessable(
+                "X-Lezi-Media-Identity must be one exact v1 value",
+            ))
+        }
+    };
     let family_lock = state.family_lock(&principal.family_id).await;
     let guard = family_lock.lock().await;
+    let principal = authenticate(&state, &headers).await?;
     let blocking_state = state.clone();
     let family_id = principal.family_id.clone();
     let cursor = query.cursor;
@@ -1262,12 +1283,13 @@ pub(crate) async fn pull_entities(
             } else {
                 std::collections::BTreeSet::new()
             };
-            let mut page = match blocking_state.store.pull_with_final_envelope_size_on(
+            let mut page = match blocking_state.store.pull_with_media_identity_on(
                 connection,
                 &family_id,
                 cursor,
                 include_live_census,
                 &key_types,
+                include_media_identity,
                 |serialized_entity_bytes, entity_count, current, family_name| {
                     pull_response_size(
                         serialized_entity_bytes,
@@ -1421,9 +1443,10 @@ pub(crate) async fn pull_entities(
         CONTENT_TYPE,
         HeaderValue::from_static("application/json; charset=utf-8"),
     );
-    response
-        .headers_mut()
-        .insert(VARY, HeaderValue::from_static("Accept-Encoding"));
+    response.headers_mut().insert(
+        VARY,
+        HeaderValue::from_static("Accept-Encoding, X-Lezi-Media-Identity"),
+    );
     if is_gzip {
         response
             .headers_mut()
@@ -1463,6 +1486,7 @@ mod pull_assembly_tests {
         payload.insert("kind".to_owned(), serde_json::json!("log"));
         payload.insert("name".to_owned(), serde_json::json!(format!("名字-{uuid}")));
         PulledEntity {
+            media_identity: None,
             entity_type: entity_type.to_owned(),
             client_uuid: uuid.to_owned(),
             updated_at: 1_000,

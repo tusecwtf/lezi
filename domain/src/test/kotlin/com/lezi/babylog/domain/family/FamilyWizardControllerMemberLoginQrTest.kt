@@ -1,4 +1,5 @@
 package com.lezi.babylog.domain.family
+import com.lezi.babylog.sync.session.toPresentation
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.sync.CreateFamilyResult
 import com.lezi.babylog.sync.session.CertificateTrustCandidate
@@ -54,13 +55,12 @@ class FamilyWizardControllerMemberLoginQrTest {
         val completed = controller.state.value as FamilyWizardState.Completed
         assertThat(completed.outcome).isEqualTo(
             FamilyWizardOutcome.MemberLoginQrClaimed(
-                memberSession(),
+                memberSession().toPresentation(),
                 InitialFamilyDataRecovery.Complete,
             ),
         )
         assertThat(gateway.events).containsExactly(
             "verify-member-login-qr",
-            "remember",
             "claim-member-login-qr",
         ).inOrder()
         assertThat(gateway.lastMemberLoginQrDeviceName).isEqualTo("Pixel Tablet")
@@ -142,7 +142,7 @@ class FamilyWizardControllerMemberLoginQrTest {
         controller.claimMemberLoginQr(payload, "Pixel")
         assertThat((controller.state.value as FamilyWizardState.Completed).outcome).isEqualTo(
             FamilyWizardOutcome.MemberLoginQrClaimed(
-                memberSession(),
+                memberSession().toPresentation(),
                 InitialFamilyDataRecovery.RetryRequired(),
             ),
         )
@@ -150,14 +150,14 @@ class FamilyWizardControllerMemberLoginQrTest {
         controller.retryReclaimedDataRecovery()
         assertThat((controller.state.value as FamilyWizardState.Completed).outcome).isEqualTo(
             FamilyWizardOutcome.MemberLoginQrClaimed(
-                memberSession(),
+                memberSession().toPresentation(),
                 InitialFamilyDataRecovery.NotRequired,
             ),
         )
     }
 
     @Test
-    fun memberLoginQrCancelDuringVerifyDropsLateResultAndLocalTrustFailureIsProductCopy() =
+    fun memberLoginQrCancelDuringVerifyDropsLateResultAndClaimFailureIsProductCopy() =
         runTest {
             val endpoint = TrustedEndpointProfile.systemPki("https://nas.home")
             val payload = memberLoginQrPayload(endpoint)
@@ -190,13 +190,13 @@ class FamilyWizardControllerMemberLoginQrTest {
             gateway.memberLoginQrVerifyStarted = null
             gateway.memberLoginQrVerifyRelease = null
             controller.verifyMemberLoginQr(FamilyWizardEntry.Account, payload)
-            gateway.rememberEndpointResult = Result.failure(IllegalStateException("disk full"))
+            gateway.memberLoginQrClaimResult = Result.failure(MemberLoginQrUnavailableException())
             controller.claimMemberLoginQr(payload, "Pixel")
             val ready = controller.state.value as FamilyWizardState.MemberLoginQrReady
             assertThat(ready.feedback).isEmpty()
             assertThat(ready.failureKind)
-                .isEqualTo(com.lezi.babylog.core.common.failure.FailureKind.InvalidInput)
-            assertThat(gateway.memberLoginQrClaimCalls).isEqualTo(0)
+                .isEqualTo(com.lezi.babylog.core.common.failure.FailureKind.QrExpired)
+            assertThat(gateway.memberLoginQrClaimCalls).isEqualTo(1)
         }
 
     @Test
@@ -224,7 +224,70 @@ class FamilyWizardControllerMemberLoginQrTest {
     }
 
     @Test
-    fun memberLoginQrClaimFailureThenCancelForgetsHalfTrustedEndpoint() = runTest {
+    fun failedQrClaimPreservesAbsentOrExplicitPriorTrustAcrossCancelAndNextEntry() = runTest {
+        val endpoint = TrustedEndpointProfile.systemPki("https://nas.home")
+        val priorProfiles = listOf(
+            null,
+            TrustedEndpointProfile.systemPki("https://previous.home"),
+            TrustedEndpointProfile.tofuSpki("https://nas.home", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
+        )
+        for (priorTrust in priorProfiles) {
+            val gateway = RecordingFamilyWizardGateway(
+                memberLoginQrVerifyResult = SetupProbeResult.Ready(endpoint, SetupFamilyState.Configured),
+                memberLoginQrClaimResult = Result.failure(MemberLoginQrUnavailableException()),
+            ).apply { verifiedEndpoint = priorTrust }
+            val controller = FamilyWizardController(gateway)
+            val payload = memberLoginQrPayload(endpoint)
+            controller.verifyMemberLoginQr(FamilyWizardEntry.Account, payload)
+            controller.claimMemberLoginQr(payload, "Pixel")
+
+            assertThat(controller.state.value).isInstanceOf(FamilyWizardState.MemberLoginQrReady::class.java)
+            assertThat(gateway.verifiedEndpoint).isEqualTo(priorTrust)
+            controller.cancelMemberLoginQr()
+            controller.begin(FamilyWizardSnapshot.empty(FamilyWizardEntry.Account))
+            controller.verifyMemberLoginQr(FamilyWizardEntry.Account, payload)
+
+            assertThat(gateway.verifiedEndpoint).isEqualTo(priorTrust)
+            assertThat(gateway.events).doesNotContain("remember")
+            assertThat(gateway.events).doesNotContain("forget")
+            assertThat(gateway.memberLoginQrClaimCalls).isEqualTo(1)
+        }
+    }
+
+    @Test
+    fun cancellingAnOldQrClaimPreservesTheExactNewerTrustInstalledWhileItWasBlocked() = runTest {
+        val endpoint = TrustedEndpointProfile.systemPki("https://nas.home")
+        val newerTrust = TrustedEndpointProfile.tofuSpki(
+            "https://replacement.home", "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        )
+        val gateway = RecordingFamilyWizardGateway(
+            memberLoginQrVerifyResult = SetupProbeResult.Ready(endpoint, SetupFamilyState.Configured),
+        ).apply {
+            memberLoginQrClaimStarted = CompletableDeferred()
+            memberLoginQrClaimRelease = CompletableDeferred()
+        }
+        val priorTrust = gateway.verifiedEndpoint
+        val controller = FamilyWizardController(gateway)
+        val payload = memberLoginQrPayload(endpoint)
+        controller.verifyMemberLoginQr(FamilyWizardEntry.Onboarding, payload)
+        val claim = launch { controller.claimMemberLoginQr(payload, "Pixel") }
+        gateway.memberLoginQrClaimStarted!!.await()
+        assertThat(gateway.verifiedEndpoint).isEqualTo(priorTrust)
+        gateway.verifiedEndpoint = newerTrust // Another owner completed a trust change.
+
+        controller.cancelMemberLoginQr()
+        gateway.memberLoginQrClaimRelease!!.complete(Unit)
+        claim.join()
+        controller.begin(FamilyWizardSnapshot.empty(FamilyWizardEntry.Onboarding))
+        controller.verifyMemberLoginQr(FamilyWizardEntry.Onboarding, payload)
+
+        assertThat(gateway.verifiedEndpoint).isEqualTo(newerTrust)
+        assertThat(gateway.events).doesNotContain("remember")
+        assertThat(gateway.events).doesNotContain("forget")
+    }
+
+    @Test
+    fun memberLoginQrClaimFailureThenCancelDoesNotWriteOrForgetTrust() = runTest {
         val endpoint = TrustedEndpointProfile.systemPki("https://nas.home")
         val payload = memberLoginQrPayload(endpoint)
         val gateway = RecordingFamilyWizardGateway(
@@ -234,6 +297,9 @@ class FamilyWizardControllerMemberLoginQrTest {
             ),
             memberLoginQrClaimResult = Result.failure(MemberLoginQrUnavailableException()),
         )
+        // This shared fixture starts with an already-trusted System PKI endpoint.
+        val priorTrust = gateway.verifiedEndpoint
+        assertThat(priorTrust).isEqualTo(endpoint)
         val controller = FamilyWizardController(gateway)
         controller.verifyMemberLoginQr(FamilyWizardEntry.Account, payload)
         controller.claimMemberLoginQr(payload, "Pixel")
@@ -242,20 +308,20 @@ class FamilyWizardControllerMemberLoginQrTest {
         assertThat(ready.feedback).isEmpty()
         assertThat(ready.failureKind)
             .isEqualTo(com.lezi.babylog.core.common.failure.FailureKind.QrExpired)
-        assertThat(gateway.events).contains("remember")
-        assertThat(gateway.verifiedEndpoint).isEqualTo(endpoint)
+        assertThat(gateway.events).doesNotContain("remember")
+        assertThat(gateway.verifiedEndpoint).isEqualTo(priorTrust)
 
         controller.cancelMemberLoginQr()
 
         assertThat(controller.state.value).isEqualTo(
             FamilyWizardState.Editing(FamilyWizardSnapshot.empty(FamilyWizardEntry.Account)),
         )
-        assertThat(gateway.events).contains("forget")
-        assertThat(gateway.verifiedEndpoint).isNull()
+        assertThat(gateway.events).doesNotContain("forget")
+        assertThat(gateway.verifiedEndpoint).isEqualTo(priorTrust)
     }
 
     @Test
-    fun memberLoginQrCancelDuringClaimAfterRememberForgetsAndDropsJob() = runTest {
+    fun memberLoginQrCancelDuringClaimDropsJobWithoutTrustWrites() = runTest {
         val endpoint = TrustedEndpointProfile.systemPki("https://nas.home")
         val payload = memberLoginQrPayload(endpoint)
         val gateway = RecordingFamilyWizardGateway(
@@ -266,6 +332,9 @@ class FamilyWizardControllerMemberLoginQrTest {
         )
         gateway.memberLoginQrClaimStarted = CompletableDeferred()
         gateway.memberLoginQrClaimRelease = CompletableDeferred()
+        // This shared fixture starts with an already-trusted System PKI endpoint.
+        val priorTrust = gateway.verifiedEndpoint
+        assertThat(priorTrust).isEqualTo(endpoint)
         val controller = FamilyWizardController(gateway)
         controller.verifyMemberLoginQr(FamilyWizardEntry.Onboarding, payload)
 
@@ -275,7 +344,7 @@ class FamilyWizardControllerMemberLoginQrTest {
         gateway.memberLoginQrClaimStarted!!.await()
         assertThat(controller.state.value)
             .isInstanceOf(FamilyWizardState.ClaimingMemberLoginQr::class.java)
-        assertThat(gateway.verifiedEndpoint).isEqualTo(endpoint)
+        assertThat(gateway.verifiedEndpoint).isEqualTo(priorTrust)
 
         controller.cancelMemberLoginQr()
         gateway.memberLoginQrClaimRelease!!.complete(Unit)
@@ -285,12 +354,13 @@ class FamilyWizardControllerMemberLoginQrTest {
         assertThat(controller.state.value).isEqualTo(
             FamilyWizardState.Editing(FamilyWizardSnapshot.empty(FamilyWizardEntry.Onboarding)),
         )
-        assertThat(gateway.events).contains("forget")
-        assertThat(gateway.verifiedEndpoint).isNull()
+        assertThat(gateway.events).doesNotContain("remember")
+        assertThat(gateway.events).doesNotContain("forget")
+        assertThat(gateway.verifiedEndpoint).isEqualTo(priorTrust)
     }
 
     @Test
-    fun memberLoginQrSuccessDoesNotForgetRememberedEndpoint() = runTest {
+    fun memberLoginQrSuccessDoesNotRunTrustCleanup() = runTest {
         val endpoint = TrustedEndpointProfile.systemPki("https://nas.home")
         val payload = memberLoginQrPayload(endpoint)
         val gateway = RecordingFamilyWizardGateway(
@@ -302,13 +372,17 @@ class FamilyWizardControllerMemberLoginQrTest {
                 MemberLoginQrResult(memberSession(), InitialFamilyDataRecovery.Complete),
             ),
         )
+        // This shared fixture starts with an already-trusted System PKI endpoint.
+        val priorTrust = gateway.verifiedEndpoint
+        assertThat(priorTrust).isEqualTo(endpoint)
         val controller = FamilyWizardController(gateway)
         controller.verifyMemberLoginQr(FamilyWizardEntry.Account, payload)
         controller.claimMemberLoginQr(payload, "Pixel")
 
         assertThat(controller.state.value).isInstanceOf(FamilyWizardState.Completed::class.java)
+        assertThat(gateway.events).doesNotContain("remember")
         assertThat(gateway.events).doesNotContain("forget")
-        assertThat(gateway.verifiedEndpoint).isEqualTo(endpoint)
+        assertThat(gateway.verifiedEndpoint).isEqualTo(priorTrust)
     }
 
     @Test
@@ -333,7 +407,7 @@ class FamilyWizardControllerMemberLoginQrTest {
     }
 
     @Test
-    fun memberLoginQrClaimTransportFailureLeavesReadySoCancelForgetsHalfTrust() = runTest {
+    fun memberLoginQrClaimTransportFailureLeavesExistingTrustUntouched() = runTest {
         val endpoint = TrustedEndpointProfile.systemPki("https://nas.home")
         val payload = memberLoginQrPayload(endpoint)
         val gateway = RecordingFamilyWizardGateway(
@@ -347,6 +421,9 @@ class FamilyWizardControllerMemberLoginQrTest {
                 ),
             ),
         )
+        // This shared fixture starts with an already-trusted System PKI endpoint.
+        val priorTrust = gateway.verifiedEndpoint
+        assertThat(priorTrust).isEqualTo(endpoint)
         val controller = FamilyWizardController(gateway)
         controller.verifyMemberLoginQr(FamilyWizardEntry.Account, payload)
         controller.claimMemberLoginQr(payload, "Pixel")
@@ -355,14 +432,15 @@ class FamilyWizardControllerMemberLoginQrTest {
         assertThat(ready.failureKind)
             .isEqualTo(com.lezi.babylog.core.common.failure.FailureKind.ResponseTimedOut)
         assertThat(ready.isBusy).isFalse()
-        assertThat(gateway.verifiedEndpoint).isEqualTo(endpoint)
+        assertThat(gateway.verifiedEndpoint).isEqualTo(priorTrust)
 
         controller.cancelMemberLoginQr()
         assertThat(controller.state.value).isEqualTo(
             FamilyWizardState.Editing(FamilyWizardSnapshot.empty(FamilyWizardEntry.Account)),
         )
-        assertThat(gateway.events).contains("forget")
-        assertThat(gateway.verifiedEndpoint).isNull()
+        assertThat(gateway.events).doesNotContain("remember")
+        assertThat(gateway.events).doesNotContain("forget")
+        assertThat(gateway.verifiedEndpoint).isEqualTo(priorTrust)
     }
 
     @Test
@@ -389,7 +467,7 @@ class FamilyWizardControllerMemberLoginQrTest {
     }
 
     @Test
-    fun memberLoginQrClaimFailureThenDeviceNameFailureKeepsForgetOnCancel() = runTest {
+    fun memberLoginQrClaimAndDeviceNameFailuresDoNotCreateCleanupOwnership() = runTest {
         val endpoint = TrustedEndpointProfile.systemPki("https://nas.home")
         val payload = memberLoginQrPayload(endpoint)
         val gateway = RecordingFamilyWizardGateway(
@@ -399,18 +477,22 @@ class FamilyWizardControllerMemberLoginQrTest {
             ),
             memberLoginQrClaimResult = Result.failure(MemberLoginQrUnavailableException()),
         )
+        // This shared fixture starts with an already-trusted System PKI endpoint.
+        val priorTrust = gateway.verifiedEndpoint
+        assertThat(priorTrust).isEqualTo(endpoint)
         val controller = FamilyWizardController(gateway)
         controller.verifyMemberLoginQr(FamilyWizardEntry.Account, payload)
         controller.claimMemberLoginQr(payload, "Pixel")
-        assertThat(gateway.verifiedEndpoint).isEqualTo(endpoint)
+        assertThat(gateway.verifiedEndpoint).isEqualTo(priorTrust)
 
-        // Second claim fails device-name validation; prior half-trust must still be forgettable.
+        // Invalid retry has no temporary trust to clean up.
         controller.claimMemberLoginQr(payload, "")
         val ready = controller.state.value as FamilyWizardState.MemberLoginQrReady
         assertThat(ready.feedback).isEqualTo("请填写设备称呼")
 
         controller.cancelMemberLoginQr()
-        assertThat(gateway.events).contains("forget")
-        assertThat(gateway.verifiedEndpoint).isNull()
+        assertThat(gateway.events).doesNotContain("remember")
+        assertThat(gateway.events).doesNotContain("forget")
+        assertThat(gateway.verifiedEndpoint).isEqualTo(priorTrust)
     }
 }

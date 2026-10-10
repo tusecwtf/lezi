@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.family
 
+import com.lezi.babylog.sync.session.toPresentation
 import com.lezi.babylog.feature.family.components.*
 
 import com.lezi.babylog.domain.family.FamilyWizardEntry
@@ -74,13 +75,13 @@ class AccountFamilyWizardAdapterTest {
     fun accountUsesOneOutcomeProjectionForCreatedReclaimedAndCurrentLogins() {
         assertEquals(
             "家庭已创建",
-            familyWizardOutcomeCopy(FamilyWizardOutcome.Created(ownerSession())),
+            familyWizardOutcomeCopy(FamilyWizardOutcome.Created(ownerSession().toPresentation())),
         )
         assertEquals(
             "已重新连上家庭，数据恢复完成",
             familyWizardOutcomeCopy(
                 FamilyWizardOutcome.Reclaimed(
-                    ownerSession(),
+                    ownerSession().toPresentation(),
                     InitialFamilyDataRecovery.Complete,
                 ),
             ),
@@ -89,7 +90,7 @@ class AccountFamilyWizardAdapterTest {
             "管理员已确认，家庭数据同步完成",
             familyWizardOutcomeCopy(
                 FamilyWizardOutcome.MemberApproved(
-                    memberSession(),
+                    memberSession().toPresentation(),
                     InitialFamilyDataRecovery.Complete,
                 ),
             ),
@@ -98,7 +99,7 @@ class AccountFamilyWizardAdapterTest {
             "已在这台设备登录家庭",
             familyWizardOutcomeCopy(
                 FamilyWizardOutcome.MemberLoginQrClaimed(
-                    memberSession(),
+                    memberSession().toPresentation(),
                     InitialFamilyDataRecovery.Complete,
                 ),
             ),
@@ -107,7 +108,7 @@ class AccountFamilyWizardAdapterTest {
             "已登录；首次同步失败，可稍后重试",
             familyWizardOutcomeCopy(
                 FamilyWizardOutcome.MemberLoginQrClaimed(
-                    memberSession(),
+                    memberSession().toPresentation(),
                     InitialFamilyDataRecovery.RetryRequired(),
                 ),
             ),

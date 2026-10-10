@@ -1638,8 +1638,9 @@ class CareLogCarePlanTest {
             endTimestamp = now - 10 * 60_000L,
             nowMillis = now + 4,
         )
-        val closed = fakes.records.get(closedId)!!
+        val closed = care.getRecord(closedId)!!
         assertThat(closed.endTimestamp).isEqualTo(now - 10 * 60_000L)
+        assertThat(care.projectSleepRecord(closedId)!!.observations).hasSize(1)
         assertThat(care.getCarePlan(plan2)!!.status).isEqualTo(CarePlanStatus.COMPLETED)
     }
     @Test

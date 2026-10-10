@@ -19,10 +19,11 @@
 #   LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID exact attested image config digest from its manifest
 #   LEZI_NAS_BACKUP_PATH             remote path to NAS-side v3 snapshot (non-dry-run)
 #
-# Optional env (defaults match AGENTS.md / measured family control plane):
-#   NAS_SSH              default nas-account@192.168.77.4
-#   NAS_SSH_PORT         default 10000
-#   LEZI_DATA_HOST_PATH  default /tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data
+# Explicit operator inputs (required; no personal defaults):
+#   NAS_SSH              required explicit approved user@host
+#   NAS_SSH_PORT         required explicit approved port
+#   LEZI_DATA_HOST_PATH  required explicit approved absolute data path
+# Optional behavior/runtime inputs:
 #   LEZI_CONTAINER_NAME  default lezi-sync
 #   LEZI_COPY_BACK_DRY_RUN=1  local gates + plan only; no SSH write
 #   LEZI_SYNC_BIN        path to lezi-sync binary (for offline-migrate validate)
@@ -50,9 +51,9 @@ SHIPPED_USER_VERSION=12
 SHIPPED_MIN_SECRET_BYTES=32
 # END shipped constants
 
-NAS_SSH="${NAS_SSH:-nas-account@192.168.77.4}"
-NAS_SSH_PORT="${NAS_SSH_PORT:-10000}"
-LEZI_DATA_HOST_PATH="${LEZI_DATA_HOST_PATH:-/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data}"
+NAS_SSH="${NAS_SSH:?Set NAS_SSH to the explicitly approved user@NAS host}"
+NAS_SSH_PORT="${NAS_SSH_PORT:?Set NAS_SSH_PORT to the explicitly approved NAS port}"
+LEZI_DATA_HOST_PATH="${LEZI_DATA_HOST_PATH:?Set LEZI_DATA_HOST_PATH to the explicitly approved absolute NAS data path}"
 LEZI_CONTAINER_NAME="${LEZI_CONTAINER_NAME:-lezi-sync}"
 LEZI_COPY_BACK_DRY_RUN="${LEZI_COPY_BACK_DRY_RUN:-0}"
 LEZI_COPY_BACK_SKIP_VALIDATE="${LEZI_COPY_BACK_SKIP_VALIDATE:-0}"

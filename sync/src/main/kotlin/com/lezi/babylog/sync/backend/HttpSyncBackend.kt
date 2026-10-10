@@ -1,4 +1,8 @@
 package com.lezi.babylog.sync.backend
+
+import com.lezi.babylog.core.common.validation.StartupBoundaryObservation
+import com.lezi.babylog.sync.media.parseCanonicalMediaMime
+import com.lezi.babylog.sync.media.requireCanonicalMediaMime
 import com.lezi.babylog.core.common.MediaContentDigest
 import com.lezi.babylog.core.model.RecordPhotoResourcePolicy
 import com.lezi.babylog.sync.conflict.ConflictSnapshotPageRequest
@@ -22,6 +26,7 @@ import java.util.zip.GZIPInputStream
 import javax.inject.Inject
 import javax.net.ssl.HttpsURLConnection
 import kotlinx.coroutines.Dispatchers
+import com.lezi.babylog.sync.backend.deadline.cancelActiveIo
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -163,8 +168,8 @@ class HttpSyncBackend internal constructor(
     private val undetachedKeepAliveHandles = mutableListOf<HttpURLConnection>()
     private var undetachedKeepAliveIdentity: AuthenticatedKeepAliveIdentity? = null
     /**
-     * Monotonic elapsed baseline of the current idle-TTL window; null while the
-     * handles are in-round (a round that has not ended yet never expires them).
+     * Monotonic elapsed baseline of completed exchanges, refreshed at round end.
+     * Active exchanges are owned separately and are never retained in this list.
      */
     private var undetachedKeepAliveIdleSinceElapsedMillis: Long? = null
 
@@ -197,9 +202,7 @@ class HttpSyncBackend internal constructor(
             // Round-end (0.5 W3): keep the handles connected for the next round
             // and only start the idle clock. Nothing disconnects here; expiry is
             // enforced lazily by [prepareKeepAlive] before the next request.
-            if (undetachedKeepAliveHandles.isNotEmpty() &&
-                undetachedKeepAliveIdleSinceElapsedMillis == null
-            ) {
+            if (undetachedKeepAliveHandles.isNotEmpty()) {
                 undetachedKeepAliveIdleSinceElapsedMillis =
                     keepAliveClock.snapshot().elapsedRealtimeMillis
             }
@@ -246,6 +249,7 @@ class HttpSyncBackend internal constructor(
             token = null,
             body = buildJsonObject {
                 put("request_id", requestId)
+                put("restore_authority", "v1")
                 put("family_id", familyId)
                 put("family_name", requireNotNull(normalizeFamilyNameForWire(familyName)))
                 put("owner_display_name", requireMemberDisplayName(ownerDisplayName))
@@ -277,6 +281,7 @@ class HttpSyncBackend internal constructor(
         requestId: String,
         entities: List<SyncEntity>,
         media: List<DisasterRestoreMediaSpec>,
+        sourceRelations: List<DisasterRestoreSourceRelation>,
     ): DisasterRestoreStatus = requestJson(
         base = endpoint.origin,
         path = "/v1/disaster-restore/batches/$batchId/manifest",
@@ -284,7 +289,20 @@ class HttpSyncBackend internal constructor(
         token = recoveryToken.requireRestoreCredential(),
         body = buildJsonObject {
             put("request_id", requestId)
+            put("restore_authority", "v1")
             put("entities", buildJsonArray { entities.forEach { add(it.toJson()) } })
+            put("source_relations", buildJsonArray {
+                sourceRelations.forEach { relation ->
+                    add(buildJsonObject {
+                        put("relation_id", relation.relationId)
+                        put("display_client_uuid", relation.displayClientUuid)
+                        put("source_client_uuids", buildJsonArray {
+                            relation.sourceClientUuids.forEach { add(JsonPrimitive(it)) }
+                        })
+                        put("auto_aligned", relation.autoAligned)
+                    })
+                }
+            })
             put("media", buildJsonArray {
                 media.forEach { spec ->
                     add(buildJsonObject {
@@ -340,10 +358,14 @@ class HttpSyncBackend internal constructor(
             path = "/v1/disaster-restore/batches/$batchId/commit",
             method = "POST",
             token = recoveryToken.requireRestoreCredential(),
-            body = buildJsonObject { put("request_id", requestId) },
+            body = buildJsonObject { put("request_id", requestId); put("restore_authority", "v1") },
             extraHeaders = mapOf(BOOTSTRAP_SECRET_HEADER to rootPassword),
             trustedEndpoint = endpoint,
+            familyOperation = FamilyHttpOperation.Session,
         )
+        require((json["restore_authority"] as? JsonPrimitive)?.contentOrNull == "v1") {
+            "恢复响应未证明新的家庭权威，原恢复信息已保留"
+        }
         require(json.requiredLong("protocol_version", "disaster restore commit") == 1L) {
             "家庭恢复协议版本不兼容"
         }
@@ -410,7 +432,7 @@ class HttpSyncBackend internal constructor(
             bootstrapSecret?.takeIf(String::isNotBlank)?.let {
                 put(BOOTSTRAP_SECRET_HEADER, it)
             }
-        }).toCreateResult()
+        }, familyOperation = FamilyHttpOperation.Session).toCreateResult()
 
     override suspend fun refresh(baseUrl: String, refreshToken: String): SessionRefreshResult {
         val token = refreshToken.trim()
@@ -436,6 +458,7 @@ class HttpSyncBackend internal constructor(
             null,
             buildJsonObject { put("refresh_token", token) },
             extraHeaders = refreshRequestHeaders(refreshRequestId),
+            familyOperation = FamilyHttpOperation.Session,
         ).toSessionRefreshResult()
     }
 
@@ -466,6 +489,7 @@ class HttpSyncBackend internal constructor(
             token = null,
             body = buildJsonObject { put("refresh_token", token) },
             extraHeaders = refreshRequestHeaders(refreshRequestId),
+            familyOperation = FamilyHttpOperation.Session,
         ).toSessionRefreshResult()
     }
 
@@ -495,6 +519,7 @@ class HttpSyncBackend internal constructor(
                 put("device_name", requireDeviceName(deviceName))
             },
             extraHeaders = mapOf(BOOTSTRAP_SECRET_HEADER to secret),
+            familyOperation = FamilyHttpOperation.Session,
         ).toOwnerLoginResult()
     }
 
@@ -515,6 +540,7 @@ class HttpSyncBackend internal constructor(
                 put("device_name", requireDeviceName(deviceName))
             },
             extraHeaders = mapOf(BOOTSTRAP_SECRET_HEADER to rootPassword),
+            familyOperation = FamilyHttpOperation.Session,
         ).toOwnerLoginResult()
     }
 
@@ -523,7 +549,7 @@ class HttpSyncBackend internal constructor(
         displayName: String,
         deviceName: String,
     ): MemberLoginReceipt {
-        val json = post(
+        val json = postMemberLoginRequest(
             baseUrl,
             "/v1/member/requests",
             null,
@@ -547,7 +573,7 @@ class HttpSyncBackend internal constructor(
         displayName: String,
         deviceName: String,
     ): MemberLoginReceipt {
-        val json = post(
+        val json = postMemberLoginRequest(
             endpoint = endpoint,
             path = "/v1/member/requests",
             token = null,
@@ -566,6 +592,41 @@ class HttpSyncBackend internal constructor(
         )
     }
 
+    private suspend fun postMemberLoginRequest(
+        base: String,
+        path: String,
+        token: String?,
+        body: JsonObject,
+    ): JsonObject = postMemberLoginRequestOnce(base, null, path, token, body)
+
+    private suspend fun postMemberLoginRequest(
+        endpoint: TrustedEndpointProfile,
+        path: String,
+        token: String?,
+        body: JsonObject,
+    ): JsonObject = postMemberLoginRequestOnce(endpoint.origin, endpoint, path, token, body)
+
+    private suspend fun postMemberLoginRequestOnce(
+        base: String,
+        endpoint: TrustedEndpointProfile?,
+        path: String,
+        token: String?,
+        body: JsonObject,
+    ): JsonObject {
+        val started = AtomicBoolean(false)
+        return try {
+            requestJson(base, path, "POST", token, body,
+                trustedEndpoint = endpoint,
+                familyOperation = FamilyHttpOperation.SessionWrite,
+                onRequestBodyStarted = { started.set(true) })
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            if (!started.get()) throw MemberLoginRequestNotSentException(failure)
+            throw failure
+        }
+    }
+
     override suspend fun memberLoginStatus(
         baseUrl: String,
         pendingSecret: String,
@@ -574,6 +635,7 @@ class HttpSyncBackend internal constructor(
         "/v1/member/requests/status",
         null,
         pendingSecretBody(pendingSecret),
+        familyOperation = FamilyHttpOperation.SessionRead,
     ).requiredMemberLoginStatus("member request status")
 
     override suspend fun memberLoginStatus(
@@ -584,6 +646,7 @@ class HttpSyncBackend internal constructor(
         path = "/v1/member/requests/status",
         token = null,
         body = pendingSecretBody(pendingSecret),
+        familyOperation = FamilyHttpOperation.SessionRead,
     ).requiredMemberLoginStatus("member request status")
 
     override suspend fun cancelMemberLogin(baseUrl: String, pendingSecret: String) {
@@ -615,6 +678,7 @@ class HttpSyncBackend internal constructor(
         "/v1/member/requests/claim",
         null,
         pendingSecretBody(pendingSecret),
+        familyOperation = FamilyHttpOperation.Session,
     ).toMemberClaimResult()
 
     override suspend fun claimMemberLogin(
@@ -625,6 +689,7 @@ class HttpSyncBackend internal constructor(
         path = "/v1/member/requests/claim",
         token = null,
         body = pendingSecretBody(pendingSecret),
+        familyOperation = FamilyHttpOperation.Session,
     ).toMemberClaimResult()
 
     override suspend fun pendingMemberLogins(
@@ -724,6 +789,7 @@ class HttpSyncBackend internal constructor(
             put("grant", requireUrlSafeCapability(grant))
             put("device_name", requireDeviceName(deviceName))
         },
+        familyOperation = FamilyHttpOperation.Session,
     ).toMemberClaimResult()
 
     override suspend fun pull(session: SyncSession, page: PullPageRequest): PullResult {
@@ -805,6 +871,9 @@ class HttpSyncBackend internal constructor(
                 SyncRetryOperation.Commit,
             )
         } catch (failure: SyncHttpException) {
+            // Authentication belongs to the credential decorator, even when the
+            // server uses the closed commit rejection envelope.
+            if (failure.statusCode == 401) throw failure
             val terminal = runCatching {
                 Json.parseToJsonElement(failure.responseBody).jsonObject
             }.getOrNull() ?: throw failure
@@ -1210,6 +1279,29 @@ class HttpSyncBackend internal constructor(
         )
     }
 
+    override suspend fun readCurrentSourceRelations(
+        session: SyncSession,
+        request: CurrentSourceRelationsRequest,
+    ): CurrentSourceRelationsSnapshot {
+        session.requireCurrentReplicaTransport()
+        require(request.familyId == session.familyId && request.generation == session.pullGeneration)
+        val body = request.toCurrentSourceRelationsJson()
+        val json = familyHttpDeadlines.execute(FamilyHttpOperation.SessionRead) {
+            requestJsonWithEvidence(
+                base = session.baseUrl,
+                path = "/v1/source-relations/current",
+                method = "POST",
+                token = session.accessToken,
+                body = body,
+                successLimitBytes = MAX_CURRENT_SOURCE_RELATION_RESPONSE_BYTES,
+                successResponseKind = "current source relations JSON",
+            ).json
+        }
+        return json.toCurrentSourceRelationsSnapshot(request).also {
+            it.validateFor(request, session.pullCursor)
+        }
+    }
+
     override suspend fun memberDirectory(session: SyncSession): FamilyMemberDirectorySnapshot {
         val json = get(session.baseUrl, "/v1/family/members", session.accessToken)
         json.requireExactKeys(setOf("directory_generation", "members"), "members")
@@ -1447,13 +1539,14 @@ class HttpSyncBackend internal constructor(
         )
     }
 
+    // Writes are single-attempt unless the caller names an exact server receipt.
     private suspend fun post(
         base: String,
         path: String,
         token: String?,
         body: JsonObject,
         extraHeaders: Map<String, String> = emptyMap(),
-        familyOperation: FamilyHttpOperation = FamilyHttpOperation.Session,
+        familyOperation: FamilyHttpOperation = FamilyHttpOperation.SessionWrite,
     ): JsonObject = requestJson(
         base,
         path,
@@ -1470,7 +1563,7 @@ class HttpSyncBackend internal constructor(
         token: String?,
         body: JsonObject,
         extraHeaders: Map<String, String> = emptyMap(),
-        familyOperation: FamilyHttpOperation = FamilyHttpOperation.Session,
+        familyOperation: FamilyHttpOperation = FamilyHttpOperation.SessionWrite,
     ): JsonObject = requestJson(
         endpoint.origin,
         path,
@@ -1487,7 +1580,7 @@ class HttpSyncBackend internal constructor(
         path: String,
         token: String?,
         extraHeaders: Map<String, String> = emptyMap(),
-        familyOperation: FamilyHttpOperation = FamilyHttpOperation.Session,
+        familyOperation: FamilyHttpOperation = FamilyHttpOperation.SessionRead,
     ): JsonObject = requestJson(
         base,
         path,
@@ -1521,7 +1614,8 @@ class HttpSyncBackend internal constructor(
         extraHeaders: Map<String, String> = emptyMap(),
         trustedEndpoint: TrustedEndpointProfile? = null,
         retryOperation: SyncRetryOperation? = null,
-        familyOperation: FamilyHttpOperation = FamilyHttpOperation.Session,
+        familyOperation: FamilyHttpOperation = FamilyHttpOperation.SessionWrite,
+        onRequestBodyStarted: () -> Unit = {},
     ): JsonObject {
         val send = suspend {
             requestJsonWithEvidence(
@@ -1533,6 +1627,7 @@ class HttpSyncBackend internal constructor(
                 extraHeaders = extraHeaders,
                 trustedEndpoint = trustedEndpoint,
                 retryOperation = retryOperation,
+                onRequestBodyStarted = onRequestBodyStarted,
             ).json
         }
         return if (retryOperation != null) {
@@ -1553,7 +1648,10 @@ class HttpSyncBackend internal constructor(
         method = "GET",
         token = token,
         body = null,
-        extraHeaders = mapOf("Accept-Encoding" to page.encoding.wireName),
+        extraHeaders = mapOf(
+            "Accept-Encoding" to page.encoding.wireName,
+            "X-Lezi-Media-Identity" to "v1",
+        ),
         successLimitBytes = page.budget.maxEncodedBytes,
         successResponseKind = "pull encoded JSON",
         retryOperation = SyncRetryOperation.Pull,
@@ -1572,6 +1670,7 @@ class HttpSyncBackend internal constructor(
         successResponseKind: String = "JSON",
         retryOperation: SyncRetryOperation? = null,
         pullPage: PullPageRequest? = null,
+        onRequestBodyStarted: () -> Unit = {},
     ): JsonTransportResponse = withKeepAlive(
         base = base,
         path = path,
@@ -1591,6 +1690,7 @@ class HttpSyncBackend internal constructor(
         },
     ) { exchange ->
         if (body != null) {
+            onRequestBodyStarted()
             val familyWrite = currentCoroutineContext()[FamilyHttpAttemptContext]
             if (familyWrite == null) {
                 OutputStreamWriter(exchange.connection.outputStream, Charsets.UTF_8).use {
@@ -1839,7 +1939,8 @@ class HttpSyncBackend internal constructor(
                 connection.doOutput = true
                 connection.setRequestProperty(
                     "Content-Type",
-                    source.mime ?: "application/octet-stream",
+                    // Canonical MIME is exact nullable user metadata, not a safe HTTP header.
+                    "application/octet-stream",
                 )
                 connection.setFixedLengthStreamingMode(source.contentLength)
             },
@@ -1905,6 +2006,7 @@ class HttpSyncBackend internal constructor(
         prepareConnection: (HttpURLConnection) -> Unit = {},
         exchange: suspend (KeepAliveExchange) -> T,
     ): T {
+        StartupBoundaryObservation.record("network:business-request")
         val resolvedEndpoint = trustedEndpoint ?: trustedEndpointResolver?.resolve(base)
         val identity = keepAliveIdentity(base, resolvedEndpoint)
         return withContext(Dispatchers.IO) {
@@ -1912,6 +2014,9 @@ class HttpSyncBackend internal constructor(
                 ?.takeIf { it.operation == retryOperation }
             val familyAttempt = currentCoroutineContext()[FamilyHttpAttemptContext]
             val cycleBudget = currentCoroutineContext()[ElapsedBudgetContext]
+            if (familyAttempt != null) {
+                resolveFamilyHostIfNeeded(base, familyAttempt)
+            }
             val remainingMillis = listOfNotNull(
                 retryAttempt?.remainingMillis(),
                 familyAttempt?.remainingMillis(),
@@ -1928,9 +2033,6 @@ class HttpSyncBackend internal constructor(
                         else -> throw FamilyHttpException(FamilyHttpFailureKind.ResponseTimedOut)
                     }
                 }
-            }
-            if (familyAttempt != null) {
-                resolveFamilyHostIfNeeded(base, familyAttempt)
             }
             prepareKeepAlive(token, identity)
             val connection = open(
@@ -1953,11 +2055,7 @@ class HttpSyncBackend internal constructor(
                     connection.disconnect()
                 }
             }
-            val cancelHandle = currentCoroutineContext()[Job]?.invokeOnCompletion { cause ->
-                if (cause != null) {
-                    runCatching { connection.disconnect() }
-                }
-            }
+            val cancelHandle = currentCoroutineContext()[Job]?.cancelActiveIo { connection.disconnect() }
             val scope = KeepAliveExchange(connection, token)
             try {
                 if (familyAttempt != null) {
@@ -2093,7 +2191,7 @@ class HttpSyncBackend internal constructor(
         }
     }
 
-    /** Caller holds [keepAliveLock]. A null baseline means the handles are in-round. */
+    /** Caller holds [keepAliveLock]. A null baseline means no completed exchange. */
     private fun idleKeepAliveTtlExpiredLocked(): Boolean {
         val idleSince = undetachedKeepAliveIdleSinceElapsedMillis ?: return false
         val idleMillis = keepAliveClock.snapshot().elapsedRealtimeMillis - idleSince
@@ -2111,10 +2209,14 @@ class HttpSyncBackend internal constructor(
                     evictUndetachedHandlesLocked()
                 }
                 undetachedKeepAliveIdentity = identity
-                // A fresh 2xx means a round is in flight: stop the idle clock so
-                // mid-round touches never expire handles from this round.
-                undetachedKeepAliveIdleSinceElapsedMillis = null
+                // Only completed exchanges enter this collection. A heartbeat is
+                // not a data-round lease; age and bound its retained handles too.
+                undetachedKeepAliveIdleSinceElapsedMillis =
+                    keepAliveClock.snapshot().elapsedRealtimeMillis
                 undetachedKeepAliveHandles += connection
+                while (undetachedKeepAliveHandles.size > 16) {
+                    undetachedKeepAliveHandles.removeAt(0).disconnect()
+                }
             }
             return
         }
@@ -2198,6 +2300,8 @@ class HttpSyncBackend internal constructor(
             clientVersionCode?.takeIf { it > 0 }?.let { code ->
                 setRequestProperty(CLIENT_VERSION_CODE_HEADER, code.toString())
             }
+            setRequestProperty("X-Lezi-Sync-Capabilities", if (path.startsWith("/v1/disaster-restore/"))
+                "nursing_plan_intent_v1,restore_authority_v1" else "nursing_plan_intent_v1")
             extraHeaders.forEach(::setRequestProperty)
         }
 
@@ -2376,6 +2480,7 @@ private fun JsonObject.toSyncEntity(context: String): SyncEntity = SyncEntity(
     conflictSummary = optionalConflictSummary(context),
     sourceRelationSummary = optionalSourceRelationSummary(context),
     media = optionalCausalMedia(context),
+    mediaIdentity = optionalPullMediaIdentity(context),
 )
 
 private fun JsonObject.entities(context: String): List<SyncEntity> =
@@ -2395,6 +2500,7 @@ private fun JsonObject.entities(context: String): List<SyncEntity> =
             conflictSummary = value.optionalConflictSummary(entityContext),
             sourceRelationSummary = value.optionalSourceRelationSummary(entityContext),
             media = value.optionalCausalMedia(entityContext),
+            mediaIdentity = value.optionalPullMediaIdentity(entityContext),
         )
     }
 
@@ -2429,7 +2535,7 @@ private fun CausalMediaItem.toJson(): JsonObject = buildJsonObject {
     put("role", role)
     put("sha256", sha256)
     put("byte_size", byteSize)
-    put("mime", mime)
+    put("mime", requireCanonicalMediaMime(mime))
     if (width == null) put("width", JsonNull) else put("width", width)
     if (height == null) put("height", JsonNull) else put("height", height)
 }
@@ -2593,7 +2699,7 @@ private fun JsonObject.toCausalMediaItem(context: String): CausalMediaItem = Cau
     role = requiredNonBlankString("role", context),
     sha256 = requiredNonBlankString("sha256", context),
     byteSize = requiredLong("byte_size", context),
-    mime = requiredNonBlankString("mime", context),
+    mime = parseCanonicalMediaMime(get("mime")),
     width = requiredNullableLong("width", context),
     height = requiredNullableLong("height", context),
 )
@@ -2625,6 +2731,27 @@ private fun JsonObject.toCausalMediaPreimageReceipt(
     require(receipt.sha256 == expectedSha256) { "$context.sha256 与请求不一致" }
     require(receipt.expiresAtEpochSeconds > 0L) { "$context.expires_at 无效" }
     return receipt
+}
+
+private fun JsonObject.optionalPullMediaIdentity(context: String): PullMediaIdentity? {
+    val raw = get("media_identity") ?: return null
+    val identity = raw as? JsonObject
+        ?: throw IllegalArgumentException("$context.media_identity 必须是对象")
+    val identityContext = "$context.media_identity"
+    identity.requireExactKeys(setOf("media_uuid", "role", "sha256", "byte_size"), identityContext)
+    require(requiredNonBlankString("type", context) == "media" &&
+        requiredNullableLong("deleted_at", context) == null
+    ) { "$identityContext 只能属于 live media" }
+    val uuid = identity.requiredNonBlankString("media_uuid", identityContext)
+    require(runCatching { java.util.UUID.fromString(uuid).toString() }.getOrNull() == uuid &&
+        uuid == requiredNonBlankString("client_uuid", context)
+    ) { "$identityContext.media_uuid 与媒体不一致" }
+    val role = identity.requiredNonBlankString("role", identityContext)
+    require(role in setOf("avatar", "log", "plan", "wake")) { "$identityContext.role 无效" }
+    val digest = MediaContentDigest.requireValid(identity.requiredNonBlankString("sha256", identityContext))
+    val byteSize = identity.requiredLong("byte_size", identityContext)
+    require(byteSize > 0L) { "$identityContext.byte_size 无效" }
+    return PullMediaIdentity(uuid, role, digest, byteSize)
 }
 
 private fun JsonObject.optionalCausalMedia(context: String): List<CausalMediaItem> {

@@ -1,7 +1,7 @@
 //! Copy-back + TLS cutover runbook contract (ticket 06).
 //!
 //! **Private ops only.** Does not execute the live maintenance window (ticket 07).
-//! Encodes the fixed step order, default control-plane paths, rollback notes, and
+//! Encodes the fixed step order, explicit control-plane inputs with fictional examples, rollback notes, and
 //! family re-auth checklist so CLI help and shell scripts stay aligned.
 //!
 //! Public seams (crate-internal, observed without reaching into helpers):
@@ -20,19 +20,18 @@ pub(crate) const COPY_BACK_RUNBOOK: &str =
 /// Copy-back step script (repo-relative). Implements step 3 only; TLS start is CD.
 pub(crate) const COPY_BACK_SCRIPT: &str = "tools/lezi-sync/deploy/copy-back-nas-data.sh";
 
-/// Default SSH target (AGENTS.md / measured family control plane).
-pub(crate) const DEFAULT_NAS_SSH: &str = "nas-account@192.168.77.4";
-/// Default SSH port on the family NAS.
-pub(crate) const DEFAULT_NAS_SSH_PORT: &str = "10000";
-/// Default host bind for `/data`.
-pub(crate) const DEFAULT_DATA_HOST_PATH: &str =
-    "/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data";
-/// Default LAN HTTPS endpoint after TLS cutover.
-pub(crate) const DEFAULT_LAN_HTTPS_ENDPOINT: &str = "https://192.168.77.4:8765";
+/// Fictional SSH example for help only; scripts require NAS_SSH explicitly.
+pub(crate) const EXAMPLE_NAS_SSH: &str = "nas-operator@192.168.77.10";
+/// Fictional SSH port example; scripts require NAS_SSH_PORT explicitly.
+pub(crate) const EXAMPLE_NAS_SSH_PORT: &str = "10000";
+/// Fictional host-bind example; scripts require LEZI_DATA_HOST_PATH explicitly.
+pub(crate) const EXAMPLE_DATA_HOST_PATH: &str = "/srv/lezi-example/data";
+/// Fictional LAN HTTPS example, not an operator default.
+pub(crate) const EXAMPLE_LAN_HTTPS_ENDPOINT: &str = "https://192.168.77.10:8765";
 /// Container-internal HTTP readiness base (not published on host; use docker exec healthcheck).
 pub(crate) const DEFAULT_LOOPBACK_HTTP_READY: &str = "http://127.0.0.1:8766";
-/// Pre-TLS measured live surface (protocol drift probe).
-pub(crate) const PRE_TLS_HTTP_PROBE: &str = "http://192.168.77.4:8765";
+/// Fictional pre-TLS surface showing the protocol drift probe.
+pub(crate) const EXAMPLE_PRE_TLS_HTTP_PROBE: &str = "http://192.168.77.10:8765";
 
 /// Fixed maintenance-window steps (ticket 06 acceptance). Order is contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,13 +91,13 @@ pub(crate) fn cutover_help_text() -> String {
 #   {step3}
 #   {step4}
 #
-# Default control plane (override only via env; matches AGENTS.md):
-#   NAS_SSH              {DEFAULT_NAS_SSH}
-#   NAS_SSH_PORT         {DEFAULT_NAS_SSH_PORT}
-#   LEZI_DATA_HOST_PATH  {DEFAULT_DATA_HOST_PATH}
-#   LAN HTTPS endpoint   {DEFAULT_LAN_HTTPS_ENDPOINT}
+# Fictional examples only: explicitly configure the approved real target via env first:
+#   NAS_SSH              {EXAMPLE_NAS_SSH}
+#   NAS_SSH_PORT         {EXAMPLE_NAS_SSH_PORT}
+#   LEZI_DATA_HOST_PATH  {EXAMPLE_DATA_HOST_PATH}
+#   LAN HTTPS endpoint   {EXAMPLE_LAN_HTTPS_ENDPOINT}
 #   Container ready      docker exec lezi-sync lezi-sync healthcheck ({DEFAULT_LOOPBACK_HTTP_READY}/ready inside container; not published on host)
-#   Pre-TLS drift probe  {PRE_TLS_HTTP_PROBE}/health (plaintext still possible until cutover)
+#   Pre-TLS drift probe  {EXAMPLE_PRE_TLS_HTTP_PROBE}/health (plaintext still possible until cutover)
 #   Expected legacy out/ schema user_version={legacy_target_version}
 #   server.secret min bytes={SERVER_SECRET_BYTES}
 #   data bind uid        10001:10001 (required after copy-back)
@@ -113,7 +112,7 @@ pub(crate) fn cutover_help_text() -> String {
 #   - Step 0: docker inspect image id + docker save pre-cutover image tar BEFORE stop/rm
 #
 # Step 1 — stop live container (on NAS, data bind kept):
-#   ssh -p {DEFAULT_NAS_SSH_PORT} {DEFAULT_NAS_SSH} \\
+#   ssh -p {EXAMPLE_NAS_SSH_PORT} {EXAMPLE_NAS_SSH} \\
 #     'docker stop lezi-sync && docker rm lezi-sync'   # data dir NOT deleted; fail if still present
 #
 # Step 2 — dual backup confirmation:
@@ -158,13 +157,13 @@ pub(crate) fn cutover_help_text() -> String {
 #
 # Step 5 — health/ready (probe actual protocol; do not assume):
 #   Client-facing success = LAN HTTPS (required for APK TOFU):
-#     curl --cacert <data-bind>/tls/server.crt -fsS {DEFAULT_LAN_HTTPS_ENDPOINT}/health
-#     curl --cacert <data-bind>/tls/server.crt -fsS {DEFAULT_LAN_HTTPS_ENDPOINT}/ready
+#     curl --cacert <data-bind>/tls/server.crt -fsS {EXAMPLE_LAN_HTTPS_ENDPOINT}/health
+#     curl --cacert <data-bind>/tls/server.crt -fsS {EXAMPLE_LAN_HTTPS_ENDPOINT}/ready
 #     # mode-700 data bind: cert may be unreadable on host → curl -k to same URLs
 #   Container-internal readiness (optional corroboration; 8766 NOT published on host):
 #     ssh … 'docker exec lezi-sync lezi-sync healthcheck'   # hits {DEFAULT_LOOPBACK_HTTP_READY}/ready inside container
 #   Do NOT: ssh … 'curl http://127.0.0.1:8766/…' on the NAS host (compose publishes only 8765).
-#   If HTTPS fails with TLS wrong-version and HTTP {PRE_TLS_HTTP_PROBE} still answers → protocol drift
+#   If HTTPS fails with TLS wrong-version and HTTP {EXAMPLE_PRE_TLS_HTTP_PROBE} still answers → protocol drift
 #     (live image is not the TLS stack). Report drift; do not claim cutover success.
 #   Ticket 07 probe script: tools/lezi-sync/deploy/live-cutover-probe.sh
 #
@@ -173,14 +172,14 @@ pub(crate) fn cutover_help_text() -> String {
 #   1. docker stop/rm lezi-sync (keep host data path parent)
 #   2. restore NAS data bind contents from the **copy-out v3 backup** (not out/)
 #   3. docker load pre-cutover tar; re-start pre-cutover image / old start method that served
-#      {PRE_TLS_HTTP_PROBE}
-#   4. probe {PRE_TLS_HTTP_PROBE}/health and /ready until usable
+#      {EXAMPLE_PRE_TLS_HTTP_PROBE}
+#   4. probe {EXAMPLE_PRE_TLS_HTTP_PROBE}/health and /ready until usable
 #   Do not leave a half-written out/ as the live data bind after a failed open.
 #
 # Family notify checklist (before declaring the window done for humans):
 #   - Root password rotated: owner uses the migration-time new password (LEZI_BOOTSTRAP_SECRET)
 #   - Old APK / old plaintext HTTP clients are not supported after TLS + schema cutover
-#   - Endpoint is {DEFAULT_LAN_HTTPS_ENDPOINT}; TOFU / SPKI trust required on trusted-HTTPS path
+#   - Endpoint is {EXAMPLE_LAN_HTTPS_ENDPOINT}; TOFU / SPKI trust required on trusted-HTTPS path
 #   - All members re-login via current request/approve or login-grant flows (no silent restore)
 #
 {REAUTH_OPS_NOTE}
@@ -227,12 +226,12 @@ mod tests {
         // Paths / control plane
         assert!(text.contains(COPY_BACK_RUNBOOK), "{text}");
         assert!(text.contains(COPY_BACK_SCRIPT), "{text}");
-        assert!(text.contains(DEFAULT_NAS_SSH), "{text}");
-        assert!(text.contains(DEFAULT_NAS_SSH_PORT), "{text}");
-        assert!(text.contains(DEFAULT_DATA_HOST_PATH), "{text}");
-        assert!(text.contains(DEFAULT_LAN_HTTPS_ENDPOINT), "{text}");
+        assert!(text.contains(EXAMPLE_NAS_SSH), "{text}");
+        assert!(text.contains(EXAMPLE_NAS_SSH_PORT), "{text}");
+        assert!(text.contains(EXAMPLE_DATA_HOST_PATH), "{text}");
+        assert!(text.contains(EXAMPLE_LAN_HTTPS_ENDPOINT), "{text}");
         assert!(
-            text.contains("https://192.168.77.4:8765"),
+            text.contains("https://192.168.77.10:8765"),
             "LAN https endpoint required: {text}"
         );
         // Fixed order present

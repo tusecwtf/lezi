@@ -1,4 +1,6 @@
 package com.lezi.babylog.sync.session
+
+import com.lezi.babylog.core.common.validation.StartupBoundaryObservation
 import com.lezi.babylog.sync.backend.deadline.FamilyHttpAttemptContext
 import com.lezi.babylog.sync.backend.deadline.FamilyHttpDeadlinePolicy
 import com.lezi.babylog.sync.backend.deadline.FamilyHttpDisconnectWatchdog
@@ -36,6 +38,7 @@ import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.X509TrustManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import com.lezi.babylog.sync.backend.deadline.cancelActiveIo
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -58,6 +61,8 @@ const val CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT =
     "validated_deferred_fulfillment_v1"
 /** Complete 0.4.0 commit-first/conflict-v2 generation. */
 const val CAPABILITY_CAUSAL_SYNC_V2 = "causal_sync_v2"
+/** Ordinary nursing plans may represent zero-duration intent; actual facts stay positive. */
+const val CAPABILITY_NURSING_PLAN_INTENT_V1 = "nursing_plan_intent_v1"
 
 /**
  * 0.4.8 foreground heartbeat probe (wire §1.5). Broadcast ONLY through the
@@ -146,7 +151,11 @@ internal fun normalizeHttpsOrigin(rawOrigin: String): String {
     require(uri.port == -1 || uri.port in 1..65535) {
         "服务器端口需为 1–65535"
     }
-    val renderedHost = if (host.contains(':')) "[$host]" else host.lowercase()
+    val renderedHost = if (host.contains(':')) {
+        "[${host.removePrefix("[").removeSuffix("]")}]"
+    } else {
+        host.lowercase()
+    }
     val port = uri.port.takeUnless { it == -1 || it == 443 }?.let { ":$it" }.orEmpty()
     return "https://$renderedHost$port"
 }
@@ -270,7 +279,11 @@ internal class DefaultSetupHttpTransport internal constructor(
 
     private suspend fun getOnce(request: SetupHttpRequest): SetupHttpResponse =
         withContext(Dispatchers.IO) {
+            StartupBoundaryObservation.record("network:setup-request")
             val family = currentCoroutineContext()[FamilyHttpAttemptContext]
+            val dnsTimeout = family?.boundedConnectTimeoutMillis()
+                ?: FamilyHttpOperation.Probe.budget.connectTimeoutMillis
+            resolveFamilyHttpHost(request.endpoint.host, dnsTimeout, nameResolver)
             val remaining = family?.remainingMillis()
                 ?: FamilyHttpOperation.Probe.budget.maxElapsedMillis
             if (remaining <= 0) {
@@ -278,7 +291,6 @@ internal class DefaultSetupHttpTransport internal constructor(
             }
             val connectTimeout = family?.boundedConnectTimeoutMillis()
                 ?: FamilyHttpOperation.Probe.budget.connectTimeoutMillis
-            resolveFamilyHttpHost(request.endpoint.host, connectTimeout, nameResolver)
             val connection = URL(request.endpoint.origin + request.path)
                 .openConnection() as HttpsURLConnection
             request.endpoint.spkiSha256?.let { pin ->
@@ -290,11 +302,7 @@ internal class DefaultSetupHttpTransport internal constructor(
                 ?: FamilyHttpOperation.Probe.budget.responseTimeoutMillis
             connection.useCaches = false
             connection.instanceFollowRedirects = false
-            val cancelHandle = currentCoroutineContext()[Job]?.invokeOnCompletion { cause ->
-                if (cause != null) {
-                    runCatching { connection.disconnect() }
-                }
-            }
+            val cancelHandle = currentCoroutineContext()[Job]?.cancelActiveIo { connection.disconnect() }
             val deadlineWatchdog = FamilyHttpDisconnectWatchdog(remaining) {
                 connection.disconnect()
             }
@@ -364,6 +372,9 @@ internal class DefaultTlsPeerInspector internal constructor(
             try {
                 require(endpoint.trustMode == EndpointTrustMode.SystemPki)
                 val family = currentCoroutineContext()[FamilyHttpAttemptContext]
+                val dnsTimeout = family?.boundedConnectTimeoutMillis()
+                    ?: FamilyHttpOperation.Probe.budget.connectTimeoutMillis
+                val addresses = resolveFamilyHttpHost(endpoint.host, dnsTimeout, nameResolver)
                 val remaining = family?.remainingMillis()
                     ?: FamilyHttpOperation.Probe.budget.maxElapsedMillis
                 if (remaining <= 0) {
@@ -371,18 +382,13 @@ internal class DefaultTlsPeerInspector internal constructor(
                 }
                 val connectTimeout = family?.boundedConnectTimeoutMillis()
                     ?: FamilyHttpOperation.Probe.budget.connectTimeoutMillis
-                val addresses = resolveFamilyHttpHost(endpoint.host, connectTimeout, nameResolver)
                 val context = SSLContext.getInstance("TLS")
                 context.init(null, arrayOf(InspectionTrustManager), SecureRandom())
                 Socket().use { rawSocket ->
                     val deadlineWatchdog = FamilyHttpDisconnectWatchdog(remaining) {
                         runCatching { rawSocket.close() }
                     }
-                    val cancelHandle = currentCoroutineContext()[Job]?.invokeOnCompletion { cause ->
-                        if (cause != null) {
-                            runCatching { rawSocket.close() }
-                        }
-                    }
+                    val cancelHandle = currentCoroutineContext()[Job]?.cancelActiveIo { rawSocket.close() }
                     try {
                         try {
                             rawSocket.connect(
@@ -589,6 +595,7 @@ private const val SHA_256_BYTES = 32
 private const val MAX_SETUP_RESPONSE_BYTES = 64 * 1024
 private val SETUP_STATUS_FIELDS = setOf("protocol_version", "capabilities", "family_state")
 private val REQUIRED_SETUP_CAPABILITIES = setOf(
+    CAPABILITY_NURSING_PLAN_INTENT_V1,
     CAPABILITY_TRUSTED_HTTPS_ENDPOINT,
     CAPABILITY_DEVICE_SESSIONS,
     CAPABILITY_MEMBERSHIP_DEVICES,

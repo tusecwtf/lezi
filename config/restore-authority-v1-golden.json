@@ -1,0 +1,80 @@
+{
+  "contract": "lezi.restore-authority-v1",
+  "wire": "0.5.0",
+  "status": "unreleased_source_contract",
+  "baseline_namespace": "300c6a8b-5aab-51b6-bef0-53a13885188b",
+  "operation_namespace": "b823b4c7-7ccf-5ded-b7f7-d190cbb05d69",
+  "framing": "decimal UTF8 byte length + colon + value; tuple batch/type/entity; canonical lowercase UUID inputs",
+  "vectors": [
+    {
+      "batch": "11111111-1111-4111-8111-111111111111",
+      "type": "baby",
+      "entity": "22222222-2222-4222-8222-222222222222",
+      "baseline": "0c33af56-af8c-5aee-b4a7-fe79a602dea4",
+      "operation": "b22604b2-e9af-566f-93da-4e3de46d6ed6"
+    },
+    {
+      "batch": "11111111-1111-4111-8111-111111111111",
+      "type": "record",
+      "entity": "22222222-2222-4222-8222-222222222222",
+      "baseline": "e0bec011-0509-5e15-98e1-0f7e7a49ee87",
+      "operation": "048708c5-d2e5-5e67-bab6-de063addc130"
+    },
+    {
+      "batch": "11111111-1111-4111-8111-111111111111",
+      "type": "care_plan",
+      "entity": "22222222-2222-4222-8222-222222222222",
+      "baseline": "a8143daf-311a-5288-90b0-60b269d8c819",
+      "operation": "b81eaea1-ac85-5595-90c6-3f02c61cdb8d"
+    },
+    {
+      "batch": "11111111-1111-4111-8111-111111111111",
+      "type": "custom_item",
+      "entity": "22222222-2222-4222-8222-222222222222",
+      "baseline": "2e84d1ec-3192-5497-a667-01911af0519a",
+      "operation": "4aebab18-aaff-5075-ab63-0aa22715ba46"
+    },
+    {
+      "batch": "11111111-1111-4111-8111-111111111111",
+      "type": "wake_observation",
+      "entity": "22222222-2222-4222-8222-222222222222",
+      "baseline": "9c589dc7-71a2-53da-81dc-c80796190ec4",
+      "operation": "c165968e-25e6-5683-842d-f6edbb00df57"
+    },
+    {
+      "batch": "99999999-9999-4999-8999-999999999999",
+      "type": "baby",
+      "entity": "22222222-2222-4222-8222-222222222222",
+      "baseline": "0274b52b-ded6-55e0-9809-252aa29bc442",
+      "operation": "108714e9-b34e-5a06-a126-50c2bc110de8"
+    },
+    {
+      "batch": "99999999-9999-4999-8999-999999999999",
+      "type": "record",
+      "entity": "22222222-2222-4222-8222-222222222222",
+      "baseline": "4c2591f8-45ef-5bf7-a720-14bd0a84de0d",
+      "operation": "8dd94727-1b9a-5088-a7aa-90bba17d6886"
+    },
+    {
+      "batch": "99999999-9999-4999-8999-999999999999",
+      "type": "care_plan",
+      "entity": "22222222-2222-4222-8222-222222222222",
+      "baseline": "ce93f376-c71f-5343-a100-483850b44a54",
+      "operation": "bef2e06e-310b-535a-93bf-e90c64252fab"
+    },
+    {
+      "batch": "99999999-9999-4999-8999-999999999999",
+      "type": "custom_item",
+      "entity": "22222222-2222-4222-8222-222222222222",
+      "baseline": "a8852392-760c-5918-ae97-4e738bfedd1a",
+      "operation": "2ad269b6-e1df-5d59-a27c-323455fa6874"
+    },
+    {
+      "batch": "99999999-9999-4999-8999-999999999999",
+      "type": "wake_observation",
+      "entity": "22222222-2222-4222-8222-222222222222",
+      "baseline": "83665d5c-d3ae-5690-ab6f-214fa084b5d8",
+      "operation": "443987d4-b325-58be-977c-cedd27d6dc63"
+    }
+  ]
+}

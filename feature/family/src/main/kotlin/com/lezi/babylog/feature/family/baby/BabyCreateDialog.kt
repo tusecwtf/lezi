@@ -31,6 +31,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -77,6 +78,7 @@ internal fun BabyCreateDialog(
         avatarJpeg: ByteArray?,
         onFinished: (String?) -> Unit,
     ) -> Unit,
+    error: String? = null,
     cameraCaptureLauncherFactory: @Composable (
         ownershipKey: Any?,
         onOutcome: (CameraCaptureOutcome) -> Unit,
@@ -84,18 +86,17 @@ internal fun BabyCreateDialog(
         rememberCameraCaptureLauncher(key, onOutcome)
     },
 ) {
-    var nickname by remember { mutableStateOf("") }
-    var sex by remember { mutableStateOf<String?>(null) }
-    var birthday by remember { mutableLongStateOf(LocalDate.now().toEpochDay()) }
-    var weightText by remember { mutableStateOf("") }
-    var themeIndex by remember { mutableIntStateOf(0) }
+    var nickname by rememberSaveable { mutableStateOf("") }
+    var sex by rememberSaveable { mutableStateOf<String?>(null) }
+    var birthday by rememberSaveable { mutableLongStateOf(LocalDate.now().toEpochDay()) }
+    var weightText by rememberSaveable { mutableStateOf("") }
+    var themeIndex by rememberSaveable { mutableIntStateOf(0) }
     var showDate by remember { mutableStateOf(false) }
     var localError by remember { mutableStateOf<String?>(null) }
     var pickedAvatarUri by remember { mutableStateOf<Uri?>(null) }
     var ownedAvatarCapture by remember { mutableStateOf<OwnedCameraCapture?>(null) }
     var croppedAvatar by remember { mutableStateOf<CroppedAvatar?>(null) }
     var avatarError by remember { mutableStateOf<String?>(null) }
-    var submitting by remember { mutableStateOf(false) }
     fun releaseOwnedAvatarCapture() {
         ownedAvatarCapture?.release()
         ownedAvatarCapture = null
@@ -128,7 +129,7 @@ internal fun BabyCreateDialog(
     }
     val previewBitmap = remember(croppedAvatar) { croppedAvatar?.bitmap?.asImageBitmap() }
     val hasAvatar = croppedAvatar != null
-    val blocked = busy || submitting
+    val blocked = busy
 
     LeziAlertDialog(
         onDismissRequest = {
@@ -209,7 +210,7 @@ internal fun BabyCreateDialog(
                         nickname = it
                         localError = null
                     },
-                    nicknameError = localError,
+                    nicknameError = localError ?: error,
                     sex = sex,
                     onSexChange = { sex = it },
                     birthdayEpochDay = birthday,
@@ -280,7 +281,6 @@ internal fun BabyCreateDialog(
                         localError = it
                         return@LeziTextButton
                     }
-                    submitting = true
                     onCreate(
                         nickname.trim(),
                         sex,
@@ -289,7 +289,6 @@ internal fun BabyCreateDialog(
                         themeArgb,
                         croppedAvatar?.jpegBytes,
                     ) { err ->
-                        submitting = false
                         if (err != null) localError = err
                     }
                 },

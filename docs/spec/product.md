@@ -15,7 +15,7 @@
 | 定位 | 家庭育儿日志：低摩擦记录 + 日/周回顾 + 成长曲线 + 家庭同步 |
 | 语言 | **简体中文** |
 | 商业 | **无**广告 / 会员 / IAP / 付费主题墙 |
-| 数据 | Room 为本地真相源；Android 自本地数据契约 v1 永久支持原地升级保留，家庭服务器与 wire 仍只支持 fresh-current；历史 NAS v3 仅允许已授权 `offline-migrate` 离线准备 + 维护窗切割（[ADR-0013](../adr/0013-offline-migrate-is-maintenance-window-cutover.md)；权威 runbook [`copy-back-tls-cutover-runbook.md`](../../tools/lezi-sync/deploy/copy-back-tls-cutover-runbook.md)），非启动自动迁移 |
+| 数据 | Room 为本地真相源；Android 自本地数据契约 v1 永久支持原地升级保留，家庭服务器与 wire 仍只支持 fresh-current；NAS schema 11/12 → 13 仅允许已授权 `offline-migrate` 离线准备 + 维护窗切割；更早 schema（含 v3）不属于当前 CLI 支持输入（[ADR-0013](../adr/0013-offline-migrate-is-maintenance-window-cutover.md)；权威 runbook [`copy-back-tls-cutover-runbook.md`](../../tools/lezi-sync/deploy/copy-back-tls-cutover-runbook.md)），非启动自动迁移 |
 
 当前发布线以 [sync-trusted-endpoint.md](./contracts/sync-trusted-endpoint.md) 为唯一家庭同步合同：
 用户确认可信 HTTPS endpoint，管理员根密码只用于建家/管理员登录，普通成员经审批或管理员

@@ -17,6 +17,8 @@ push would publish full history. Real operator values never live in tracked
 files — they sit in untracked `tools/lezi-sync/deploy/env.local`. Local
 history and the private Gitea remote keep full fidelity.
 
+Privacy note: private LAN addresses, SSH accounts, and personal host paths below are synthetic examples, not production defaults or authorization. Historical results do not describe the example hosts; the owner must separately confirm the actual target and maintenance window.
+
 ## Project Structure & Module Organization
 
 Lezi is a Kotlin/Jetpack Compose Android app with a Rust home-LAN sync service. `app/` owns application wiring; `core/` contains shared models, storage, and UI infrastructure; `domain/` exposes use cases; `designsystem/` holds reusable Compose tokens and components; and product screens live under `feature/<name>/`. Android sync code is in `sync/`; the Axum/SQLite NAS service is in `tools/lezi-sync/`. Keep unit tests beside each module in `src/test/` and device/Compose tests in `src/androidTest/`.
@@ -36,7 +38,7 @@ Use JDK 21 and configure the Android SDK in gitignored `local.properties`.
 - `./gradlew connectedDebugAndroidTest` runs instrumentation tests with a device available.
 - `cd tools/lezi-sync && cargo fmt --all -- --check` checks Rust formatting.
 - In that directory, `cargo test --locked` and `cargo clippy --all-targets --all-features -- -D warnings` are the server gates.
-- Dual-side live proof (loopback, not NAS): `cd tools/lezi-sync && cargo build -p lezi-sync` then `LEZI_SYNC_BIN="$PWD/target/debug/lezi-sync"` and the two Gradle `--tests` lines from the replacement section. Requires openssl, curl, sqlite3.
+- Dual-side live proof (loopback, not NAS): `bash tools/testing/run-isolated-integration.sh` builds this checkout and pins the artifact digest and revision. Requires openssl, curl, sqlite3.
 
 ## lezi-sync server release
 
@@ -48,12 +50,19 @@ local-only (untracked; see `.gitignore`); neither is authorization to resume
 that path.
 
 **NAS rollback and maintenance:** [`tools/lezi-sync/deploy/DEPLOY.md`](tools/lezi-sync/deploy/DEPLOY.md).
-Real target values live in untracked `tools/lezi-sync/deploy/env.local`
-(`NAS_SSH`, `NAS_SSH_PORT`, `LEZI_DATA_HOST_PATH`, `LEZI_TLS_HOST`) — source it
-before NAS commands; tracked files carry only synthetic examples
-(`nas-operator@192.168.77.10:10000`). Keep NAS scripts on the real family
-target. Permission repair is operator-executed; container replacement
-still requires a separately confirmed window.
+There is no checked-in production target or personal deployment default. Supply
+`NAS_SSH` and `NAS_SSH_PORT` explicitly for SSH commands, `LEZI_DATA_HOST_PATH`
+for commands that use the data bind, and `LEZI_TLS_HOST` / `LEZI_LAN_HOST` for
+commands that use the TLS / LAN endpoint. Resolve each value from the owner's
+separately approved deployment configuration; an example is never authorization
+to change hosts. Keep NAS work on that approved target. Permission repair is
+operator-executed; container replacement still requires a separately confirmed window.
+
+These are deployment inputs, not ordinary build prerequisites. Android/Gradle and
+Cargo builds do not need NAS settings. Isolated fixtures and app-update check-only
+packaging may use clearly synthetic values and must not contact a real NAS. Real
+NAS packages and deployment commands require the explicit approved configuration;
+container replacement additionally requires the confirmed maintenance window.
 
 **Do not** build the server on remote hosts (`cargo` / `docker build`).
 **Do not** install system `docker compose` on the NAS for this product path.
@@ -82,14 +91,15 @@ pre/post-CD certificate SHA-256 plus SPKI comparison only.
 1. **Dev machine**: Rust gates → `./build-image.sh` → `linux/amd64` image `lezi-sync:<Cargo.toml version>`.
 2. **Package**: `tools/lezi-sync/deploy/package-nas.sh` requires the locally inspectable linux/amd64 `lezi-sync:<ver>` image and writes gitignored `dist/lezi-sync-<ver>-nas/` with its complete image id, one manifest-selected tar, zdocker-friendly compose, current guarded helpers, and a closed inventory/checksum set. Never reuse an unattested old tar merely because it exists in `dist/`.
 3. **Ship + protect + replace**: `tools/lezi-sync/deploy/push-and-deploy.sh` validates the exact package, pinned APK signer, and measured linux/amd64 image; acquires one data-bind-derived NAS owner-token lease; uploads to a fresh mode-`700` staging directory; streams the live root secret + TLS pair into developer-machine off-repo `age`; then replaces and promotes the validated package to the stable remote path. Ordinary CD aborts before stop/rm when backup fails; signer/image/platform/running-container drift, stale/extra artifacts, health-version drift, or a competing lease are fatal. Production `remote-deploy.sh` requires this outer token and must not be run directly.
-4. **NAS engine**: prefer Zspace **zdocker** binary  
-   `/zspace/applications/services/zdocker/bin/docker-compose` (Compose v2.33.x). Fallback is plain `docker run` if that binary is missing.
+4. **NAS engine**: set `ZDOCKER_COMPOSE` explicitly to an operator-verified vendor
+   Compose v2 binary when required. No vendor path is assumed; unset or unavailable
+   Compose uses the existing plain `docker run` fallback.
 5. **Secret**: during ordinary CD the live `LEZI_BOOTSTRAP_SECRET` is authoritative and must byte-match the persistent NAS sibling file `config/lezi-sync.env` (directory `700`, file `600`); seed a missing file atomically before replace. Compose and docker-run receive the exact validated value only through process-environment pass-through—never dotenv/YAML interpolation or a secret-bearing argv. No live container means fail unless explicit persistent-file recovery or explicit fresh/cutover secret flow is authorized; never silently overwrite or rotate.
-6. **Data**: bind-mount host path (default  
-   `/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data`) → `/data`. Stop/rm container must **not** delete that directory. Container user `10001:10001`; host dir must be writable by that uid.
+6. **Data**: explicitly configured `LEZI_DATA_HOST_PATH` → `/data`.
+   `/srv/lezi-example/data` is a synthetic example only. Stop/rm container must **not** delete that directory. Container user `10001:10001`; host dir must be writable by that uid.
 7. **Publish**: host `0.0.0.0:8765` for LAN HTTPS sync and `0.0.0.0:8767` for isolated LAN HTTP invite-install; never map either port to the public internet without a deliberate firewall exception. Container-internal HTTP 8766 is not published.
 8. **Remote package dir**: default  
-   `/tmp/lezi-sync-releases/lezi-sync-<ver>-nas` because Zspace SSH `HOME` is often `/home/` (not writable). Prefer a persistent path via `NAS_REMOTE_DIR` when available.
+   `/tmp/lezi-sync-releases/lezi-sync-<ver>-nas`; this is disposable staging. Prefer a persistent path via `NAS_REMOTE_DIR` when available.
 
 ### Commands agents should use
 
@@ -106,18 +116,21 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 
 ```bash
-# Real host comes from tools/lezi-sync/deploy/env.local; synthetic example below.
-# Pre-TLS / still-HTTP live (worked on measured NAS):
-curl -fsS http://192.168.77.10:8765/health
-curl -fsS http://192.168.77.10:8765/ready
-ssh -p 10000 nas-operator@192.168.77.10 'curl -fsS http://127.0.0.1:8765/health'
+# Set these from the separately approved target; do not substitute example values.
+: "${NAS_SSH:?explicit approved NAS SSH target required}"
+: "${NAS_SSH_PORT:?explicit approved NAS SSH port required}"
+: "${LEZI_LAN_HOST:?explicit approved NAS LAN host required}"
+# Pre-TLS / still-HTTP probe only when that protocol is expected:
+curl -fsS "http://${LEZI_LAN_HOST}:8765/health"
+curl -fsS "http://${LEZI_LAN_HOST}:8765/ready"
+ssh -p "${NAS_SSH_PORT}" "${NAS_SSH}" 'curl -fsS http://127.0.0.1:8765/health'
 
 # Post-TLS client-facing (required for APK TOFU):
-# curl --cacert <data-bind>/tls/server.crt -fsS https://192.168.77.10:8765/health
+# curl --cacert <data-bind>/tls/server.crt -fsS "https://${LEZI_LAN_HOST}:8765/health"
 # mode-700 bind: docker exec lezi-sync cat /data/tls/server.crt > /tmp/lezi.crt
-# or curl -k -fsS https://192.168.77.10:8765/health
+# or curl -k -fsS "https://${LEZI_LAN_HOST}:8765/health"
 # Container-internal readiness only (optional; image has no curl):
-# ssh -p 10000 nas-operator@192.168.77.10 'docker exec lezi-sync lezi-sync healthcheck'
+# ssh -p "${NAS_SSH_PORT}" "${NAS_SSH}" 'docker exec lezi-sync lezi-sync healthcheck'
 # Do NOT: ssh … 'curl http://127.0.0.1:8766/health' — nothing listens on host:8766.
 # HTTPS against a plaintext 8765 yields TLS "wrong version number" — treat as drift, not success.
 # Ticket 07 probe: tools/lezi-sync/deploy/live-cutover-probe.sh
@@ -125,14 +138,16 @@ ssh -p 10000 nas-operator@192.168.77.10 'curl -fsS http://127.0.0.1:8765/health'
 
 | Variable | Role |
 |---|---|
-| `NAS_SSH` / `NAS_SSH_PORT` | SSH target and port; real values only via untracked `tools/lezi-sync/deploy/env.local` (synthetic example `nas-operator@192.168.77.10`, port `10000`) |
+| `NAS_SSH` / `NAS_SSH_PORT` | Explicit approved SSH target and port; no default. Synthetic example: `nas-operator@192.168.77.10`, port `10000` |
 | `NAS_REMOTE_DIR` | Unpack + deploy directory on NAS |
-| `LEZI_DATA_HOST_PATH` | Host bind for `/data` when packaging |
+| `LEZI_DATA_HOST_PATH` | Explicit approved host bind for `/data` when packaging / accessing data; no default |
 | `LEZI_SECRET_FILE` | NAS-side persistent bootstrap file; defaults to data bind sibling `../config/lezi-sync.env`; overrides use a normalized portable absolute-path character set |
 | `LEZI_ALLOW_SECRET_RECOVERY=1` | Explicit incident authorization to use the persistent file when no live container exists; ordinary CD leaves unset |
 | `LEZI_ALLOW_SECRET_RESEED=1` | Explicit maintenance-only replacement of a conflicting file; live container must be absent and a new secret explicitly forwarded |
 | `LEZI_FORWARD_BOOTSTRAP_SECRET=1` | Explicit fresh/cutover-only SSH-stdin forwarding of `LEZI_BOOTSTRAP_SECRET`; ordinary CD leaves unset |
-| `LEZI_TLS_HOST` | Certificate SAN host (default `192.168.77.10`) |
+| `LEZI_TLS_HOST` | Explicit approved certificate SAN host when packaging / deploying; no default |
+| `LEZI_LAN_HOST` | Explicit approved LAN host for endpoint probes; no default |
+| `ZDOCKER_COMPOSE` | Optional explicit vendor Compose executable path; unset uses `docker run` |
 | `LEZI_ALLOW_TLS_BOOTSTRAP=1` | One-time TLS generation on an operator-verified fresh data root only; ordinary CD/rollback/tests must leave unset |
 | `LEZI_SKIP_PACKAGE=1` | Explicitly reuse an existing local package; default push repackages. Reuse still requires matching local image config digest/OS/architecture and re-attests data/TLS/origin, helpers/inventory/hashes, plus APK signer, application/version, metadata, and local-data contract. |
 | `LEZI_PACKAGE_BUILD_IMAGE=1` | `package-nas.sh` builds image if missing |
@@ -166,38 +181,37 @@ Classify the diff with the **first matching** row. Run only that row’s proof. 
 Prereqs on the dev machine: openssl, curl, sqlite3, JDK 21. Never set `NAS_SSH`, `NAS_REMOTE_DIR`, `LEZI_DATA_HOST_PATH` on this child. Always build **this tree** and pin `LEZI_SYNC_BIN`; do not rely on `~/.cache/cargo-target` newest-mtime.
 
 ```bash
-cd tools/lezi-sync
-cargo build -p lezi-sync
-export LEZI_SYNC_BIN="$PWD/target/debug/lezi-sync"
-cd ../..
-./gradlew :sync:testDebugUnitTest --tests com.lezi.babylog.sync.RealServerQuietRoundSmokeTest --tests com.lezi.babylog.sync.media.RealServerMediaReceiptFaultSeamTest
-./gradlew :domain:testDebugUnitTest --tests 'com.lezi.babylog.domain.CareLogRealServerSeam*'
+bash tools/testing/run-isolated-integration.sh
 ```
 
 Row E additionally runs the golden commands in the table **before** this block. Row D runs Rust three-gates **before** this block (`cargo build` is then incremental).
 
-Missing binary, `openssl`/`curl` skip, or IsolatedLeziSyncServer failure → `cargo build -p lezi-sync`, export `LEZI_SYNC_BIN`, retry. Do **not** propose NAS to recover. `capability_mismatch`, `requireExactKeys` / “字段不完整或包含未知字段”, or schema `user_version` fail-closed → fix the matching side locally; NAS will not teach a different contract.
+Missing binary or required tools is a hard failure, never a skip. Install prerequisites, then retry `bash tools/testing/run-isolated-integration.sh`. Do **not** propose NAS to recover. `capability_mismatch`, `requireExactKeys` / “字段不完整或包含未知字段”, or schema `user_version` fail-closed → fix the matching side locally; NAS will not teach a different contract.
 
 #### Propose NAS — only when the table says so
 
 Confirm `age` plus the public recipients file before requesting the window. NAS `push-and-deploy.sh` remains the guarded entry. Explain that it will build a `linux/amd64` image, scp to the family NAS, age-backup secret+TLS, and **stop/rm + replace** container `lezi-sync`. **Do not** run it until the user confirms; do not retarget it to another host.
 
-NAS control plane (override only via env; defaults stay on the family NAS):
+NAS control plane (synthetic examples only; supply the approved values via environment):
 
-| Role | Address / value |
+| Role | Example address / value |
 |---|---|
 | SSH | `ssh -p 10000 nas-operator@192.168.77.10` |
 | Remote package dir | `/tmp/lezi-sync-releases/lezi-sync-<ver>-nas` |
-| Pre-TLS live health (measured) | `http://192.168.77.10:8765/health` and `/ready` (SSH: `http://127.0.0.1:8765/...`) |
+| Pre-TLS health example | `http://192.168.77.10:8765/health` and `/ready` (SSH: `http://127.0.0.1:8765/...`) |
 | Post-TLS LAN endpoint / health | `https://192.168.77.10:8765` (cert under data-bind `tls/`) |
 | Post-TLS client health | `https://192.168.77.10:8765/health` and `/ready` (required) |
 | Post-TLS container readiness | `docker exec lezi-sync lezi-sync healthcheck` (internal :8766; not published on host) |
 | TLS SAN host | `LEZI_TLS_HOST=192.168.77.10` |
-| Data bind | default `LEZI_DATA_HOST_PATH` → `/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data` |
+| Data bind | explicit `LEZI_DATA_HOST_PATH`; example `/srv/lezi-example/data` |
 
 After NAS confirmation only:
 
 ```bash
+: "${NAS_SSH:?explicit approved NAS SSH target required}"
+: "${NAS_SSH_PORT:?explicit approved NAS SSH port required}"
+: "${LEZI_DATA_HOST_PATH:?explicit approved NAS data path required}"
+: "${LEZI_TLS_HOST:?explicit approved NAS TLS host required}"
 ./build-image.sh
 ./deploy/push-and-deploy.sh
 ```
@@ -206,9 +220,9 @@ NAS still requires pre/post certificate SHA-256 and SPKI equality. If the live N
 
 Packaging is fail-closed: a signed `app/build/outputs/apk/release/app-release.apk` must match `tools/lezi-sync/deploy/app-update.json` `sha256` and tracked public signer digest `config/release-apk-signer-sha256.txt`. Never invent `LEZI_BOOTSTRAP_SECRET`. Never print bootstrap secrets or private keys. Never commit signing keys, secrets, NAS `.env`, age identity/ciphertext backups, or `dist/` tarballs.
 
-After replacement: LAN HTTPS `https://192.168.77.10:8765` (data-bind cert or `curl -k`) `/health` and `/ready`. Do **not** SSH-curl host `http://127.0.0.1:8766`. Client smoke only paths touched by the change, pointed at the origin that health proved. Report gates, deployed version/package, protocol, and client smoke (or the blocker).
+After replacement: probe the explicitly configured LAN HTTPS origin (`https://<approved-host>:8765`, data-bind cert or `curl -k`) `/health` and `/ready`. Do **not** SSH-curl host `http://127.0.0.1:8766`. Client smoke only paths touched by the change, pointed at the origin that health proved. Report gates, deployed version/package, protocol, and client smoke (or the blocker).
 
-NAS `push-and-deploy.sh` remains gated by propose-then-confirm and takes its target from `NAS_SSH` / `env.local` (no tracked real default); VPS deployment is removed.
+NAS `push-and-deploy.sh` remains gated by propose-then-confirm on the explicitly approved target; there is no default SSH identity, and VPS deployment is removed.
 
 Schema is fresh-only / current `user_version`; mismatched DBs fail closed—do not invent migrations in deploy scripts.
 

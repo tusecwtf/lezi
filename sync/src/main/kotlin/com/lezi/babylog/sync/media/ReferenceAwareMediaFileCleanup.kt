@@ -65,6 +65,31 @@ class ReferenceAwareMediaFileCleanup @Inject constructor(
             }
     }
 
+    internal suspend fun <T> withOwnedPaths(paths: Collection<String>, block: suspend () -> T): T =
+        pathGate.withLocks(paths, block)
+
+    /** Restore owner has durably recorded pending deletion; reference/path guards still own unlink. */
+    internal suspend fun reclaimOwnedPath(
+        path: String,
+        replacementPath: String?,
+        logicalDeletionOfMediaUuid: String?,
+        verifyReplacement: suspend () -> Boolean,
+        unlink: suspend () -> Unit,
+    ): Boolean {
+        val paths = listOfNotNull(path, replacementPath?.takeIf(String::isNotBlank)).distinct().sorted()
+        suspend fun locked(index: Int): Boolean = if (index < paths.size) {
+            pathGate.withLock(paths[index]) { locked(index + 1) }
+        } else {
+            if (!transactionRunner.run {
+                    bytesEligibleForCleanup(path) && (logicalDeletionOfMediaUuid == null ||
+                        mediaReferenceDao.countHoldersForMedia(logicalDeletionOfMediaUuid) == 0)
+                }) false
+            else if (!verifyReplacement()) false
+            else { unlink(); true }
+        }
+        return locked(0)
+    }
+
     private suspend fun cleanupOne(clientUuid: String) {
         // Peek may race a path rebinding; under lock we re-resolve and retry once so a
         // single cleanupTombstones(uuid) call still converges without waiting for a sweep.

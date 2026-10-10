@@ -356,15 +356,13 @@ fn hard_link_without_copy(source: &Path, destination: &Path) -> Result<(), Store
     Ok(())
 }
 
-fn reserve_writing_staging_row(
+fn require_staging_capacity(
     tx: &Transaction<'_>,
     principal: &Principal,
-    media_uuid: &str,
-    sha256: &str,
     byte_size: usize,
     now: i64,
     limits: CausalMediaStagingLimits,
-) -> Result<i64, StoreError> {
+) -> Result<(), StoreError> {
     let (membership_count, family_count, family_bytes): (i64, i64, i64) = tx.query_row(
         "SELECT
             COALESCE(SUM(CASE WHEN membership_id = ?2 THEN 1 ELSE 0 END), 0),
@@ -383,6 +381,19 @@ fn reserve_writing_staging_row(
     if family_bytes.saturating_add(byte_size as i64) > limits.max_family_bytes as i64 {
         return Err(StoreError::CausalMediaStagingQuota("family_bytes"));
     }
+    Ok(())
+}
+
+fn reserve_writing_staging_row(
+    tx: &Transaction<'_>,
+    principal: &Principal,
+    media_uuid: &str,
+    sha256: &str,
+    byte_size: usize,
+    now: i64,
+    limits: CausalMediaStagingLimits,
+) -> Result<i64, StoreError> {
+    require_staging_capacity(tx, principal, byte_size, now, limits)?;
     let expires_at = now.saturating_add(limits.ttl_seconds);
     tx.execute(
         "INSERT INTO causal_media_staging(
@@ -403,27 +414,32 @@ fn reserve_writing_staging_row(
 }
 
 fn promote_writing_row_to_staged(
-    connection: &rusqlite::Connection,
+    connection: &mut rusqlite::Connection,
     principal: &Principal,
     media_uuid: &str,
     sha256: &str,
     byte_size: usize,
+    expires_at: i64,
 ) -> Result<(), StoreError> {
-    let updated = connection.execute(
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    super::causal::require_current_principal(&tx, principal)?;
+    let updated = tx.execute(
         "UPDATE causal_media_staging SET status = 'staged'
-         WHERE family_id = ?1 AND media_uuid = ?2 AND status = 'writing'
-           AND membership_id = ?3 AND sha256 = ?4 AND byte_size = ?5",
+         WHERE family_id = ?1 AND media_uuid = ?2 AND status IN ('writing', 'staged')
+           AND membership_id = ?3 AND sha256 = ?4 AND byte_size = ?5 AND expires_at = ?6",
         params![
             principal.family_id,
             media_uuid,
             principal.membership_id,
             sha256,
             byte_size,
+            expires_at,
         ],
     )?;
     if updated != 1 {
         return Err(StoreError::InvalidCausalMediaStaging);
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -1038,6 +1054,7 @@ impl Store {
         Uuid::parse_str(media_uuid).map_err(|_| StoreError::InvalidCausalMediaStaging)?;
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::causal::require_current_principal(&tx, principal)?;
         tx.execute(
             "INSERT OR IGNORE INTO causal_media_gc_state(family_id) VALUES (?1)",
             params![principal.family_id],
@@ -1139,10 +1156,9 @@ impl Store {
 
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(row) = load_row(&tx, &principal.family_id, media_uuid)? {
-            if row.status == StagingStatus::GcPending
-                || (row.expires_at <= now && row.status != StagingStatus::Consumed)
-            {
+        super::causal::require_current_principal(&tx, principal)?;
+        if let Some(mut row) = load_row(&tx, &principal.family_id, media_uuid)? {
+            if row.status == StagingStatus::GcPending {
                 return Err(StoreError::InvalidCausalMediaStaging);
             }
             if row.sha256 != incoming.sha256 || row.byte_size != incoming.byte_size {
@@ -1151,13 +1167,42 @@ impl Store {
             if row.membership_id != principal.membership_id {
                 return Err(StoreError::CausalMediaMembershipMismatch);
             }
+            if row.expires_at <= now && row.status != StagingStatus::Consumed {
+                let references = load_gc_row(&tx, &principal.family_id, media_uuid)?
+                    .ok_or(StoreError::InvalidCausalMediaStaging)?;
+                if references.consumed_at.is_some()
+                    || references.live
+                    || references.published
+                    || references.version_referenced
+                {
+                    return Err(StoreError::InvalidCausalMediaStaging);
+                }
+                // Expiry released this slot from quota, so renewal must acquire
+                // it again under the same transaction as the GC/state check.
+                // Keep UUID ownership and creation evidence; only verified full
+                // bytes can renew. A fresh writing journal prevents commit from
+                // consuming a missing/corrupt old file before install + fsync.
+                require_staging_capacity(&tx, principal, row.byte_size, now, limits)?;
+                row.expires_at = now.saturating_add(limits.ttl_seconds);
+                tx.execute(
+                    "UPDATE causal_media_staging SET status = 'writing', expires_at = ?3
+                     WHERE family_id = ?1 AND media_uuid = ?2",
+                    params![principal.family_id, media_uuid, row.expires_at],
+                )?;
+                row.status = StagingStatus::Writing;
+            }
             tx.commit()?;
             let current = load_row(&self.connect()?, &principal.family_id, media_uuid)?
                 .ok_or(StoreError::InvalidCausalMediaStaging)?;
-            if current.status != row.status
+            // A concurrent exact PUT may already have completed this writing
+            // journal. Its staged completion is idempotent, never a new slot.
+            if (current.status != row.status
+                && !(row.status == StagingStatus::Writing
+                    && current.status == StagingStatus::Staged))
                 || current.membership_id != row.membership_id
                 || current.sha256 != row.sha256
                 || current.byte_size != row.byte_size
+                || current.expires_at != row.expires_at
             {
                 return Err(StoreError::InvalidCausalMediaStaging);
             }
@@ -1167,14 +1212,25 @@ impl Store {
                 staging_path(&self.database_path, &principal.family_id, media_uuid)
             };
             install_staged_file(&path, incoming)?;
+            #[cfg(test)]
+            test_hook::after_stage_file(&principal.family_id);
             if row.status == StagingStatus::Writing {
                 promote_writing_row_to_staged(
-                    &self.connect()?,
+                    &mut self.connect()?,
                     principal,
                     media_uuid,
                     &incoming.sha256,
                     incoming.byte_size,
+                    row.expires_at,
                 )?;
+            } else {
+                // File installation happens outside the admission transaction.
+                // Recheck the identity at completion too; keep verified bytes
+                // when removal won the race, rather than deleting a valid copy.
+                let mut connection = self.connect()?;
+                let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                super::causal::require_current_principal(&tx, principal)?;
+                tx.commit()?;
             }
             return Ok(CausalMediaStageStatus {
                 media_uuid: media_uuid.to_owned(),
@@ -1214,12 +1270,15 @@ impl Store {
 
         let path = staging_path(&self.database_path, &principal.family_id, media_uuid);
         install_staged_file(&path, incoming)?;
+        #[cfg(test)]
+        test_hook::after_stage_file(&principal.family_id);
         promote_writing_row_to_staged(
-            &self.connect()?,
+            &mut self.connect()?,
             principal,
             media_uuid,
             &incoming.sha256,
             incoming.byte_size,
+            expires_at,
         )?;
         Ok(CausalMediaStageStatus {
             media_uuid: media_uuid.to_owned(),
@@ -1248,6 +1307,7 @@ impl Store {
 
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::causal::require_current_principal(&tx, principal)?;
         if let Some(row) = load_row(&tx, &principal.family_id, media_uuid)? {
             let receipt = replay_empty_existing_row(
                 &self.database_path,
@@ -1309,17 +1369,25 @@ impl Store {
             let connection = self.connect()?;
             let _ = connection.execute(
                 "DELETE FROM causal_media_staging
-                  WHERE family_id = ?1 AND media_uuid = ?2 AND status = 'writing'",
-                params![principal.family_id, media_uuid],
+                  WHERE family_id = ?1 AND media_uuid = ?2 AND status = 'writing'
+                    AND membership_id = ?3 AND sha256 = ?4 AND byte_size = ?5",
+                params![
+                    principal.family_id,
+                    media_uuid,
+                    principal.membership_id,
+                    expected_sha256,
+                    donor_size
+                ],
             );
             return Err(error);
         }
         promote_writing_row_to_staged(
-            &self.connect()?,
+            &mut self.connect()?,
             principal,
             media_uuid,
             expected_sha256,
             donor_size,
+            expires_at,
         )?;
         Ok(CausalMediaStageStatus {
             media_uuid: media_uuid.to_owned(),
@@ -1747,6 +1815,27 @@ impl Store {
 pub(in crate::store) mod test_hook {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
+
+    type StageCallback = Box<dyn FnOnce() + Send>;
+
+    fn stage_callbacks() -> &'static Mutex<HashMap<String, StageCallback>> {
+        static CALLBACKS: OnceLock<Mutex<HashMap<String, StageCallback>>> = OnceLock::new();
+        CALLBACKS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub fn after_stage_file_once(family_id: &str, callback: impl FnOnce() + Send + 'static) {
+        stage_callbacks()
+            .lock()
+            .unwrap()
+            .insert(family_id.to_owned(), Box::new(callback));
+    }
+
+    pub(super) fn after_stage_file(family_id: &str) {
+        let callback = stage_callbacks().lock().unwrap().remove(family_id);
+        if let Some(callback) = callback {
+            callback();
+        }
+    }
 
     fn fail_family() -> &'static Mutex<Option<String>> {
         static FAIL_FAMILY: OnceLock<Mutex<Option<String>>> = OnceLock::new();

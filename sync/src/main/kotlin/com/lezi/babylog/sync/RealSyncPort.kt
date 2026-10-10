@@ -1,5 +1,18 @@
 package com.lezi.babylog.sync
 
+import com.lezi.babylog.core.common.validation.StartupBoundaryObservation
+
+import java.util.UUID
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.longOrNull
+
 import com.lezi.babylog.core.common.cancellation.cancellationCauseOrNull
 import com.lezi.babylog.core.common.failure.FailureKind
 import com.lezi.babylog.core.common.failure.LocalPersistException
@@ -137,6 +150,7 @@ import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.session.CertificateTrustCandidate
 import com.lezi.babylog.sync.session.CAPABILITY_ATOMIC_BUNDLE
 import com.lezi.babylog.sync.session.CAPABILITY_CAUSAL_SYNC_V2
+import com.lezi.babylog.sync.session.CAPABILITY_NURSING_PLAN_INTENT_V1
 import com.lezi.babylog.sync.session.CAPABILITY_DISASTER_RESTORE
 import com.lezi.babylog.sync.session.CAPABILITY_RECORD_MEMBERSHIP_AUTHOR
 import com.lezi.babylog.sync.session.CAPABILITY_SYNC_HEARTBEAT_V1
@@ -146,13 +160,21 @@ import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.FamilySessionCommand
 import com.lezi.babylog.sync.session.FamilySessionCoordinator
 import com.lezi.babylog.sync.session.FamilySessionOutcome
+import com.lezi.babylog.sync.session.CAPABILITY_CAUSAL_MEDIA_IDENTITY_V1
+import com.lezi.babylog.sync.session.ServerUpdateRequiredException
+import com.lezi.babylog.sync.session.MediaIdentityProtocolException
+import com.lezi.babylog.sync.engine.MissingTrustedMediaIdentityException
+import com.lezi.babylog.sync.session.TerminalRemovalKind
 import com.lezi.babylog.sync.session.ForegroundState
+import com.lezi.babylog.sync.session.ForegroundSessionEnded
 import com.lezi.babylog.sync.session.PolicyClock
 import com.lezi.babylog.sync.session.SetupProbe
 import com.lezi.babylog.sync.session.SetupProbeResult
 import com.lezi.babylog.sync.session.SpkiPinMismatchException
 import com.lezi.babylog.sync.session.SyncPreferences
 import com.lezi.babylog.sync.session.SyncSession
+import com.lezi.babylog.sync.session.SyncSessionPresentation
+import com.lezi.babylog.sync.session.toPresentation
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 import com.lezi.babylog.sync.session.DisasterRestoreCheckpoint
 import com.lezi.babylog.sync.session.matchesOrigin
@@ -229,6 +251,9 @@ class RealSyncPort @Inject constructor(
         UnreadableAppUpdateApkIdentityReader,
     @Named("appUpdateCacheDir") private val appUpdateCacheDir: File =
         File(System.getProperty("java.io.tmpdir"), "lezi-app-update-test"),
+    @Named("restoreSnapshotsDir") private val restoreSnapshotsDir: File =
+        File(appUpdateCacheDir, "restore-snapshots"),
+    private val mediaReferenceDao: com.lezi.babylog.core.database.causal.MediaReferenceDao? = null,
 ) : SyncPort {
     private val currentStatus = MutableStateFlow(SyncStatus.Disabled)
     private val currentFailureKind = MutableStateFlow<FailureKind?>(null)
@@ -354,6 +379,52 @@ class RealSyncPort @Inject constructor(
         conflictSnapshotCacheDao = conflictSnapshotCacheDao,
         sourceRelationDao = sourceRelationDao,
     )
+    private val restoreFileSnapshots by lazy {
+        com.lezi.babylog.sync.disasterrecovery.RestoreFileSnapshotStore(restoreSnapshotsDir,
+            incompleteSourceGuard = { paths, action -> mediaFileCleanup.withOwnedPaths(paths, action) })
+    }
+    private val restoreSnapshotJournal by lazy {
+        com.lezi.babylog.sync.disasterrecovery.RestoreSnapshotJournal(
+            requireNotNull(conflictSnapshotCacheDao), immutableMediaSpool, transactionRunner, restoreFileSnapshots,
+        )
+    }
+    private val restoreFileLifecycle by lazy {
+        com.lezi.babylog.sync.disasterrecovery.RestoreFileLifecycleOwner(
+            conflictSnapshotCacheDao, restoreFileSnapshots, transactionRunner, mediaDao, mediaFiles, mediaFileCleanup, babyDao,
+            currentFamilyId = { preferences.session.first().familyId },
+            verifiedBytes = { restoreFileSnapshots.metrics.verificationBytes += it })
+    }
+    private suspend fun captureRestoreRows() = com.lezi.babylog.sync.disasterrecovery.CapturedRestoreRows(
+        babyDao.listAllIncludingDeleted(), recordDao.listAllIncludingDeleted(),
+        carePlanDao.listAllIncludingDeleted(), customItemDao.listAllIncludingDeleted(),
+        fulfillmentCandidateDao.listAllIncludingDeleted(), wakeObservationDao.listAllIncludingDeleted(),
+        mediaDao.listAllIncludingDeleted(),
+    )
+    private val terminalSpoolRetirement by lazy {
+        mediaReferenceDao?.let { references ->
+            com.lezi.babylog.sync.disasterrecovery.RestoreTerminalSpoolRetirementOwner(
+                conflictSnapshotCacheDao, immutableMediaSpool, mediaFiles, mediaDao, babyDao,
+                references, transactionRunner, mediaFileCleanup, ::captureRestoreRows,
+                currentSession = { preferences.session.first() }, pendingClear = pendingReplicaCleanupStore,
+                commandFence = syncMutex,
+            )
+        }
+    }
+    private val sourceLogoutAdmission by lazy {
+        com.lezi.babylog.sync.sourcerelation.SourceCommandLogoutAdmission(
+            conflictSnapshotCacheDao, requireNotNull(sourceRelationDao), transactionRunner,
+            currentSession = { preferences.session.first() }, trustedEndpoint = { preferences.verifiedEndpoint.first() },
+            hasVerifiedTerminalRemoval = {
+                preferences.hasPendingDeviceRemovalClear() || preferences.hasPendingMembershipDeletionClear() ||
+                    preferences.hasPendingFamilyDeletionClear()
+            })
+    }
+    private val sourceRelationCommandOwner by lazy {
+        com.lezi.babylog.sync.sourcerelation.SourceRelationCommandOwner(
+            requireNotNull(sourceRelationDao), conflictSnapshotCacheDao, transactionRunner, backend,
+            currentSession = { preferences.session.first() },
+            currentEndpoint = { preferences.verifiedEndpoint.first() }, nowMillis = clock::nowMillis)
+    }
     private val disasterRecoverySnapshotBuilder = DisasterRecoverySnapshotBuilder(
         babyDao = babyDao,
         recordDao = recordDao,
@@ -363,6 +434,9 @@ class RealSyncPort @Inject constructor(
         mediaDao = mediaDao,
         wakeObservationDao = wakeObservationDao,
         mediaFiles = mediaFiles,
+        transactions = transactionRunner,
+        sourceRelationDao = sourceRelationDao,
+        conflictSnapshotCacheDao = conflictSnapshotCacheDao,
     )
     private val localReplicaClearCoordinator = LocalReplicaClearCoordinator(
         barrier = syncMutex,
@@ -370,8 +444,21 @@ class RealSyncPort @Inject constructor(
         babyDao = babyDao,
         mediaDao = mediaDao,
         mediaFiles = mediaFiles,
+        mediaSpoolClear = com.lezi.babylog.sync.media.ScopedMediaSpoolClear(
+            babyDao = babyDao,
+            cache = conflictSnapshotCacheDao,
+            summaries = conflictSummaryDao,
+            spool = immutableMediaSpool,
+        ),
         transactionRunner = transactionRunner,
         pendingStore = pendingReplicaCleanupStore,
+        terminalSpoolOwner = { terminalSpoolRetirement },
+        restoreOwnedPaths = { restoreFileLifecycle.ownedArtifactPaths() },
+        reclaimRestoreFiles = {
+            restoreFileLifecycle.reclaimRetired(force = true)
+            sourceLogoutAdmission.restoreNotice()
+        },
+        clearSourceEvidence = { scope, session, clear -> sourceLogoutAdmission.aroundClear(scope, session, clear) },
     )
     private val familySessionCoordinator = FamilySessionCoordinator(
         backend = backend,
@@ -391,6 +478,9 @@ class RealSyncPort @Inject constructor(
         requestSync = ::requestSync,
         beforeOperation = ::recoverPendingLocalClearLocked,
         launchBestEffort = { work -> processScope.launch { work() } },
+        recoverRestoreAuthority = ::recoverRestoreAuthoritySwitch,
+        beforeDeviceLogout = { sourceLogoutAdmission.admit(it) },
+        afterDeviceLogoutConfirmed = { sourceLogoutAdmission.logoutConfirmed() },
     )
     private val syncSignal = Channel<Unit>(Channel.CONFLATED)
     private val pullRequested = AtomicBoolean(false)
@@ -410,6 +500,7 @@ class RealSyncPort @Inject constructor(
      * start another data round. See [ForegroundRoundFuse].
      */
     private val heartbeatRoundFuse = ForegroundRoundFuse()
+    @Volatile private var serverUpgradeBlockedIdentity: ForegroundFuseIdentity? = null
 
     /**
      * Set when the NEXT Foreground-triggered round must run in full: a
@@ -449,20 +540,17 @@ class RealSyncPort @Inject constructor(
     @Volatile
     private var quietProofIdentity: ForegroundFuseIdentity? = null
 
-    /**
-     * Replay key for the non-takeover login that learns family id before
-     * `/v1/owner/takeover`. Same request id cannot flip its takeover flag.
-     */
-    private var ownerIdentityProbeRequestId: String? = null
-
     @Volatile
     private var cachedSession = SyncSession()
 
     init {
+        StartupBoundaryObservation.record("sync:activate")
         processScope.launch {
+            StartupBoundaryObservation.record("sync:recovery-start")
             runProcessStartupRecovery(::updateFailureStatus) {
                 val resumeTerminalRemoval = syncMutex.withLock {
                     recoverPendingLocalClearLocked()
+                    if (sourceRelationDao != null) sourceLogoutAdmission.restoreNotice()
                     sourceRelationDao?.repairLegacyAutoAlignedSummaries()
                     preferences.hasPendingDeviceRemovalClear() ||
                         preferences.hasPendingMembershipDeletionClear() ||
@@ -472,6 +560,7 @@ class RealSyncPort @Inject constructor(
             }
         }
         processScope.launch {
+            StartupBoundaryObservation.record("sync:session-collect")
             preferences.session.collect { session ->
                 // Identity switches (join/rejoin, unjoin, endpoint change,
                 // terminal clear) retire any cross-beat fuse keyed to the
@@ -543,6 +632,7 @@ class RealSyncPort @Inject constructor(
                     syncInternal(trigger, allowQuietSkip = !skipVetoed)
                 }.onFailure { failure ->
                     if (failure is CancellationException &&
+                        failure !is ForegroundSessionEnded &&
                         failure !is TimeoutCancellationException
                     ) {
                         throw failure
@@ -556,6 +646,8 @@ class RealSyncPort @Inject constructor(
     override fun lastFailureKind(): Flow<FailureKind?> = currentFailureKind
     override fun availability(): Flow<FamilyServerAvailability> = currentAvailability
     override fun lastServerHealthyAt(): Flow<Long?> = preferences.lastServerHealthyAt
+    override fun sessionPresentation(): Flow<SyncSessionPresentation> =
+        preferences.session.map(SyncSession::toPresentation).distinctUntilChanged()
     override fun session(): Flow<SyncSession> = preferences.session
     @OptIn(ExperimentalCoroutinesApi::class)
     override fun pendingPublishCount(): Flow<Int> = preferences.session.flatMapLatest { session ->
@@ -611,6 +703,9 @@ class RealSyncPort @Inject constructor(
             }
         }.distinctUntilChanged()
     override fun pendingGenerationResync(): Flow<Boolean> = preferences.pendingGenerationResync
+    override fun familyReadSnapshot(): Flow<com.lezi.babylog.sync.session.FamilyReadSnapshot> =
+        preferences.familyReadSnapshot
+
     override fun familyMemberDirectory(): Flow<List<FamilyMember>> =
         preferences.familyMemberDirectory
 
@@ -660,6 +755,15 @@ class RealSyncPort @Inject constructor(
      * both tails the triple runs inside this same user-initiated refresh.
      */
     override suspend fun probeServerAvailability(
+        reason: AvailabilityProbeReason,
+    ): Result<FamilyServerAvailability> {
+        if (!foregroundState.isForeground()) {
+            return Result.failure(ForegroundSyncBlockedException(ForegroundSyncDecision.Background))
+        }
+        return foregroundState.whileForeground { probeAvailabilityWithinForeground(reason) }
+    }
+
+    private suspend fun probeAvailabilityWithinForeground(
         reason: AvailabilityProbeReason,
     ): Result<FamilyServerAvailability> {
         val endpoint = preferences.verifiedEndpoint.first()
@@ -912,7 +1016,7 @@ class RealSyncPort @Inject constructor(
             if (staleEndpoint?.origin == endpoint.origin) {
                 try {
                     withContext(NonCancellable) {
-                        preferences.forgetEndpoint()
+                        preferences.forgetEndpoint(retainMemberAttempts = true)
                     }
                 } catch (cancelled: CancellationException) {
                     throw cancelled
@@ -1012,7 +1116,9 @@ class RealSyncPort @Inject constructor(
 
     override suspend fun forgetEndpoint(): Result<Unit> =
         try {
+            pendingReconnectMember.set(null)
             preferences.forgetEndpoint()
+            pendingReconnectMember.set(null)
             Result.success(Unit)
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -1036,6 +1142,7 @@ class RealSyncPort @Inject constructor(
         // foreground return and clear the fuse.
         heartbeatRoundFuse.onRealUserTrigger()
         if (trigger != SyncTrigger.LocalWrite) {
+            serverUpgradeBlockedIdentity = null
             pullRequested.set(true)
             realUserSyncTriggerRequested.set(true)
         } else {
@@ -1062,9 +1169,8 @@ class RealSyncPort @Inject constructor(
      * permanent 404 gate ([HeartbeatGate.EndpointMissing]) suppresses the
      * loop. Unjoined / reauthRequired / lost endpoint trust cancels the loop
      * immediately — never probe a dead endpoint. A background transition is
-     * enforced by the loop itself at its next wake (bounded by the cadence
-     * and carrying zero traffic), after which only a foreground-return kick
-     * can relaunch it.
+     * enforced by the foreground residency owner immediately; a subsequent
+     * foreground-return kick starts a fresh loop and debounce deadline.
      */
     private suspend fun refreshHeartbeatLoop() {
         val shouldRun = foregroundState.isForeground() &&
@@ -1081,7 +1187,7 @@ class RealSyncPort @Inject constructor(
             val current = heartbeatLoopJob.get()
             if (current?.isActive == true) return
             val started = (heartbeatLoopScopeOverride ?: processScope).launch {
-                runHeartbeatLoop()
+                foregroundState.whileForeground { runHeartbeatLoop() }
             }
             if (heartbeatLoopJob.compareAndSet(current, started)) {
                 started.invokeOnCompletion { heartbeatLoopJob.compareAndSet(started, null) }
@@ -1135,7 +1241,11 @@ class RealSyncPort @Inject constructor(
             val deadline = heartbeatEngine.nextBeatAtMillis.filterNotNull().first()
             val waitMillis = deadline - clock.nowMillis()
             if (waitMillis > 0) {
-                delay(waitMillis)
+                // A local write or lifecycle hook can move or clear this deadline.
+                // Suspend on the deadline itself, so the old timer never hides a reset.
+                kotlinx.coroutines.withTimeoutOrNull(waitMillis) {
+                    heartbeatEngine.nextBeatAtMillis.first { it != deadline }
+                }
                 continue
             }
             if (currentStatus.value == SyncStatus.Syncing) {
@@ -1206,6 +1316,7 @@ class RealSyncPort @Inject constructor(
      * re-evaluated residency itself this iteration.
      */
     private fun kickHeartbeatRound(signal: SyncHeartbeat, session: SyncSession) {
+        if (serverUpgradeBlockedIdentity == session.foregroundFuseIdentity()) return
         if (!heartbeatRoundFuse.shouldKickRound(signal, session.foregroundFuseIdentity())) return
         pullRequested.set(true)
         // 0.5 ticket 04: a kicked round is the only in-band proof that the
@@ -1262,6 +1373,7 @@ class RealSyncPort @Inject constructor(
     }
 
     override fun notifyNetworkRecovered() {
+        if (serverUpgradeBlockedIdentity == cachedSession.foregroundFuseIdentity()) return
         val now = clock.nowMillis()
         while (true) {
             val lastAccepted = lastAcceptedNetworkRecoveredAtMillis.get()
@@ -1369,26 +1481,22 @@ class RealSyncPort @Inject constructor(
 
     override suspend fun declareSourceRelation(
         request: com.lezi.babylog.sync.backend.SourceRelationDeclareRequest,
-    ): com.lezi.babylog.sync.backend.SourceRelationResult {
-        try {
-            val session = preferences.session.first()
-            check(session.isJoined) { "未加入家庭，无法声明来源关系" }
-            return backend.declareSourceRelation(session, request)
-        } finally {
-            backend.releaseForegroundKeepAlive()
+    ): com.lezi.babylog.sync.backend.SourceRelationResult = syncMutex.withLock {
+        require(preferences.disasterRestoreCheckpoint.first() == null) {
+            "家庭恢复正在进行，来源关系选择已暂停；请先完成或明确取消原恢复批次"
         }
+        try { sourceRelationCommandOwner.declare(request) }
+        finally { backend.releaseForegroundKeepAlive() }
     }
 
     override suspend fun resolveSourceRelationGroup(
         request: com.lezi.babylog.sync.backend.SourceRelationResolveGroupRequest,
-    ): com.lezi.babylog.sync.backend.SourceRelationResult {
-        try {
-            val session = preferences.session.first()
-            check(session.isJoined) { "未加入家庭，无法解决疑似重复组" }
-            return backend.resolveSourceRelationGroup(session, request)
-        } finally {
-            backend.releaseForegroundKeepAlive()
+    ): com.lezi.babylog.sync.backend.SourceRelationResult = syncMutex.withLock {
+        require(preferences.disasterRestoreCheckpoint.first() == null) {
+            "家庭恢复正在进行，来源关系选择已暂停；请先完成或明确取消原恢复批次"
         }
+        try { sourceRelationCommandOwner.resolveGroup(request) }
+        finally { backend.releaseForegroundKeepAlive() }
     }
 
     override suspend fun saveEndpointConfig(
@@ -1470,28 +1578,10 @@ class RealSyncPort @Inject constructor(
                 revokeForeignProbeDevice(probed, endpoint)
                 throw DifferentFamilyServerException()
             }
-            val loginRequestId = preferences.ensureOwnerLoginRequestId()
-            val joined = try {
-                backend.ownerLogin(
-                    endpoint = endpoint,
-                    deviceName = device,
-                    loginRequestId = loginRequestId,
-                    rootPassword = rootPassword,
-                    // Same family only. Takeover revokes older Owner devices so a
-                    // retry does not accumulate ghost administrators.
-                    takeover = true,
-                )
-            } catch (error: SyncHttpException) {
-                if (error.statusCode == 401 || error.statusCode == 403) {
-                    throw OwnerRootPasswordRejectedException()
-                }
-                if (error.statusCode == 409) {
-                    preferences.clearOwnerLoginRequestId()
-                    throw IllegalStateException("登录方式或设备称呼已变化，请重试", error)
-                }
-                throw error
-            }
-            ownerIdentityProbeRequestId = null
+            // The non-destructive probe already authenticated this family and minted
+            // exactly one device. Adopt it as the reconnect result; a second takeover
+            // request would silently revoke unrelated administrator devices.
+            val joined = probed
             require(joined.role == FamilyRole.Owner) { "管理员登录响应角色无效" }
             if (joined.familyId != previous.familyId) throw DifferentFamilyServerException()
             val config = FamilyEndpointConfig.fromBaseUrl(endpoint.origin).withNormalized()
@@ -1527,8 +1617,15 @@ class RealSyncPort @Inject constructor(
     }
 
     override suspend fun prepareDisasterRecovery(): Result<DisasterRecoverySummary> = runCatching {
-        requireRetainedOwnerSession()
-        disasterRecoverySnapshotBuilder.build().use { it.summary }
+        syncMutex.withLock {
+            requireRetainedOwnerSession()
+            preferences.pendingDisasterRestoreRequestIds()?.let { ids ->
+                if (restoreSnapshotJournal.exists(ids.start)) return@withLock restoreSnapshotJournal.load(ids.start).use { it.summary }
+                restoreFileSnapshots.completed(ids.start)?.let { return@withLock restoreSnapshotJournal.completedSummary(it) }
+                error("原本机恢复准备尚未完成，请继续或取消；不能用新摘要替换原请求")
+            }
+            disasterRecoverySnapshotBuilder.summary()
+        }
     }
 
     override suspend fun startDisasterRecovery(
@@ -1536,34 +1633,63 @@ class RealSyncPort @Inject constructor(
         ownerDisplayName: String,
         deviceName: String,
         rootPassword: String,
+    ): Result<DisasterRecoveryProgress> = startDisasterRecoveryRequest(endpoint, ownerDisplayName, deviceName, rootPassword)
+
+    private suspend fun startDisasterRecoveryRequest(
+        endpoint: TrustedEndpointProfile, ownerDisplayName: String, deviceName: String, rootPassword: String,
+        expectedRequestId: String? = null, retainedFamilyName: String? = null,
     ): Result<DisasterRecoveryProgress> = mapDisasterRecoveryClientUpdateRequired(
         inviteHostHint = hostForLanInvite(endpoint),
         result = runCatching {
             require(rootPassword.isNotBlank()) { "请输入新服务器管理员根密码" }
             syncMutex.withLock {
+                if (expectedRequestId != null) require(preferences.pendingDisasterRestoreRequestIds()?.start == expectedRequestId) {
+                    "恢复请求已变化，请重新查询原批次"
+                }
                 preferences.disasterRestoreCheckpoint.first()?.let {
                     return@withLock resumeDisasterRecoveryLocked(it)
                 }
                 val previous = requireRetainedOwnerSession()
                 val probe = probeReconnectCandidate(endpoint.origin, endpoint)
+                if (probe == SetupProbeResult.Failed.Incompatible)
+                    throw com.lezi.babylog.sync.disasterrecovery.RestoreAuthorityUnsupportedException()
                 require(
                     probe is SetupProbeResult.Ready &&
                         probe.familyState == com.lezi.babylog.sync.session.SetupFamilyState.Empty,
                 ) { "家庭灾难恢复只适用于已校验的空服务器" }
+                if ("restore_authority_v1" !in (probe as SetupProbeResult.Ready).capabilities)
+                    throw com.lezi.babylog.sync.disasterrecovery.RestoreAuthorityUnsupportedException()
                 val familyName = requireNotNull(
-                    previous.familyName?.trim()?.takeIf(String::isNotEmpty),
+                    retainedFamilyName ?: previous.familyName?.trim()?.takeIf(String::isNotEmpty),
                 ) {
                     "本机缺少旧家庭名称，无法安全恢复"
                 }
                 val requestIds = preferences.ensureDisasterRestoreRequestIds()
-                disasterRecoverySnapshotBuilder.build().use { snapshot ->
+                val ownerName = requireMemberDisplayName(ownerDisplayName)
+                val restoredDeviceName = requireDeviceName(deviceName)
+                val startIntent = buildJsonObject {
+                    put("origin", endpoint.origin); put("trust", endpoint.trustMode.name)
+                    put("spki", endpoint.spkiSha256?.let(::JsonPrimitive) ?: kotlinx.serialization.json.JsonNull)
+                    put("family", previous.familyId); put("family_name", familyName)
+                    put("owner_name", ownerName); put("device_name", restoredDeviceName)
+                }
+                if (!restoreSnapshotJournal.exists(requestIds.start)) {
+                    val pointer = disasterRecoverySnapshotBuilder.capture(requestIds.start, previous.familyId,
+                        restoreFileSnapshots)
+                    // Pointer and exact nonsecret target/arguments commit together before dispatch.
+                    restoreSnapshotJournal.bind(pointer, previous.familyId, startIntent)
+                }
+                restoreSnapshotJournal.requireStartIntent(requestIds.start, startIntent)
+                val prepared = restoreSnapshotJournal.load(requestIds.start)
+                prepared.use { snapshot ->
+                    transactionRunner.run { requireUnchangedRestoreRelations(snapshot) }
                     val batch = backend.startDisasterRestore(
                         endpoint = endpoint,
                         requestId = requestIds.start,
                         familyId = previous.familyId,
                         familyName = familyName,
-                        ownerDisplayName = requireMemberDisplayName(ownerDisplayName),
-                        deviceName = requireDeviceName(deviceName),
+                        ownerDisplayName = ownerName,
+                        deviceName = restoredDeviceName,
                         rootPassword = rootPassword,
                     )
                     var checkpoint = DisasterRestoreCheckpoint(
@@ -1575,7 +1701,8 @@ class RealSyncPort @Inject constructor(
                         commitRequestId = requestIds.commit,
                         expiresAtEpochSeconds = batch.expiresAtEpochSeconds,
                         status = batch.status,
-                        entityVersions = snapshot.retirementVersions,
+                        // New snapshots own their complete equality evidence in the immutable file.
+                        entityVersions = if (snapshot.fileSnapshot == null) snapshot.retirementVersions else emptyList(),
                     )
                     preferences.saveDisasterRestoreCheckpoint(checkpoint, batch.recoveryToken)
                     val status = uploadDisasterRecoverySnapshot(
@@ -1599,14 +1726,46 @@ class RealSyncPort @Inject constructor(
         },
     )
 
+    override suspend fun retryDisasterRecoveryStart(rootPassword: String): Result<DisasterRecoveryProgress> = runCatching {
+        val retained = syncMutex.withLock {
+            val ids = preferences.pendingDisasterRestoreRequestIds() ?: throw NoPendingDisasterRecoveryException()
+            val intent = restoreSnapshotJournal.read(ids.start)["start_intent"]?.jsonObject
+                ?: error("旧开始请求缺少固定目标和参数，原快照已保留，需要受控修复")
+            require(intent.keys == setOf("origin", "trust", "spki", "family", "family_name", "owner_name", "device_name"))
+            val origin = intent.getValue("origin").jsonPrimitive.content
+            val endpoint = when (intent.getValue("trust").jsonPrimitive.content) {
+                "SystemPki" -> { require(intent["spki"] == kotlinx.serialization.json.JsonNull); TrustedEndpointProfile.systemPki(origin) }
+                "TofuSpki" -> TrustedEndpointProfile.tofuSpki(origin, intent.getValue("spki").jsonPrimitive.content)
+                else -> error("恢复目标信任信息无效，原快照已保留")
+            }
+            Triple(ids.start, endpoint, intent)
+        }
+        startDisasterRecoveryRequest(retained.second,
+            retained.third.getValue("owner_name").jsonPrimitive.content,
+            retained.third.getValue("device_name").jsonPrimitive.content,
+            rootPassword, expectedRequestId = retained.first,
+            retainedFamilyName = retained.third.getValue("family_name").jsonPrimitive.content).getOrThrow()
+    }
+
     override suspend fun resumeDisasterRecovery(): Result<DisasterRecoveryProgress> {
         val checkpoint = preferences.disasterRestoreCheckpoint.first()
         return mapDisasterRecoveryClientUpdateRequired(
             inviteHostHint = checkpoint?.let { hostForLanInvite(it.endpoint) },
             result = runCatching {
                 syncMutex.withLock {
-                    val current = requireNotNull(preferences.disasterRestoreCheckpoint.first()) {
-                        "没有可继续的家庭恢复批次"
+                    val current = preferences.disasterRestoreCheckpoint.first()
+                    if (current == null) {
+                        val request = preferences.pendingDisasterRestoreRequestIds() ?: throw NoPendingDisasterRecoveryException()
+                        // Room binding precedes dispatch. A missing preference receipt after
+                        // binding is an unknown remote start, never local-only cancellation.
+                        val bound = restoreSnapshotJournal.exists(request.start)
+                        val intent = if (bound) restoreSnapshotJournal.read(request.start)["start_intent"]?.jsonObject else null
+                        require(!bound || intent != null) { "旧开始请求缺少固定目标和参数，原快照已保留，需要受控修复" }
+                        return@withLock DisasterRecoveryProgress(null,
+                            if (bound) "start_unknown" else "local_capture_pending", 0,
+                            retainedStart = intent?.let { DisasterRecoveryStartPreview(
+                                it.getValue("origin").jsonPrimitive.content, it.getValue("owner_name").jsonPrimitive.content,
+                                it.getValue("device_name").jsonPrimitive.content) })
                     }
                     resumeDisasterRecoveryLocked(current)
                 }
@@ -1621,17 +1780,41 @@ class RealSyncPort @Inject constructor(
         return mapDisasterRecoveryClientUpdateRequired(
             inviteHostHint = checkpoint?.let { hostForLanInvite(it.endpoint) },
             result = runCatching {
-                require(rootPassword.isNotBlank()) { "请输入新服务器管理员根密码" }
                 syncMutex.withLock {
                     val current = requireNotNull(preferences.disasterRestoreCheckpoint.first()) {
                         "没有等待提交的家庭恢复批次"
                     }
+                    if (restoreFileLifecycle.recoverPreparedRetirement(current.startRequestId)) {
+                        recoverPendingLocalClearLocked()
+                        error("家庭恢复批次已在本机退休，请重新开始")
+                    }
+                    val knownPhase = if (restoreSnapshotJournal.exists(current.startRequestId))
+                        restoreSnapshotJournal.read(current.startRequestId)["phase"]?.jsonPrimitive?.content else null
+                    if (knownPhase == "switched" || (knownPhase == "committed" &&
+                            preferences.pendingReplicaResetPrevious() != null &&
+                            preferences.pendingReplicaResetCredentialsReady())) {
+                        check(recoverRestoreAuthoritySwitch())
+                        requestSync(SyncTrigger.Foreground)
+                        return@withLock OwnerLoginResult(preferences.session.first(), InitialFamilyDataRecovery.Complete)
+                    }
+                    require(rootPassword.isNotBlank()) { "请输入新服务器管理员根密码" }
                     val token = preferences.disasterRestoreToken().also {
                         require(it.isNotBlank()) { "家庭恢复凭据已丢失，请取消后重新开始" }
                     }
                     val previous = requireRetainedOwnerSession()
                     require(previous.familyId == current.familyId) {
                         "本机家庭身份已变化，恢复已停止"
+                    }
+                    requireRestoreAuthorityEndpoint(current.endpoint)
+                    restoreSnapshotJournal.load(current.startRequestId).use { snapshot ->
+                        requireCapturedRestoreRelations(snapshot)
+                        if (current.status != "commit_uncertain" && current.status != "committed") {
+                            transactionRunner.run { requireUnchangedRestoreRelations(snapshot) }
+                        }
+                    }
+                    preferences.saveDisasterRestoreCheckpoint(current.copy(status = "commit_uncertain"), token)
+                    if (!restoreSnapshotJournal.isSwitched(current.startRequestId)) {
+                        restoreSnapshotJournal.phase(current.startRequestId, "commit_uncertain")
                     }
                     val joined = backend.commitDisasterRestore(
                         endpoint = current.endpoint,
@@ -1660,10 +1843,10 @@ class RealSyncPort @Inject constructor(
                         familyName = joined.familyName?.trim()?.takeIf(String::isNotEmpty),
                         membershipId = joined.membershipId.trim(),
                     )
-                    retireDisasterRestoreReceipts(session, current)
-                    preferences.saveReconnectedSession(session, current.endpoint)
-                    preferences.clearDisasterRestoreCheckpoint()
-                    publishSession(session)
+                    restoreSnapshotJournal.committed(current.startRequestId, session)
+                    preferences.saveDisasterRestoreCheckpoint(current.copy(status = "committed"), token)
+                    preferences.saveSessionPendingReplicaReset(session, previous)
+                    check(recoverRestoreAuthoritySwitch())
                     currentAvailability.value = FamilyServerAvailability.Disabled
                     requestSync(SyncTrigger.Foreground)
                     OwnerLoginResult(session, InitialFamilyDataRecovery.Complete)
@@ -1674,15 +1857,39 @@ class RealSyncPort @Inject constructor(
 
     override suspend fun cancelDisasterRecovery(): Result<Unit> = runCatching {
         syncMutex.withLock {
-            val checkpoint = preferences.disasterRestoreCheckpoint.first() ?: return@withLock
+            val checkpoint = preferences.disasterRestoreCheckpoint.first()
+            if (checkpoint == null) {
+                val request = preferences.pendingDisasterRestoreRequestIds() ?: return@withLock
+                restoreFileLifecycle.retireUndispatched(request.start)
+                preferences.clearDisasterRestoreCheckpoint()
+                restoreFileLifecycle.reclaimRetired(force = true)
+                return@withLock
+            }
+            restoreFileLifecycle.recoverPreparedRetirement(checkpoint.startRequestId)
+            if (restoreSnapshotJournal.isRetiring(checkpoint.startRequestId)) {
+                recoverPendingLocalClearLocked()
+                return@withLock
+            }
             val token = preferences.disasterRestoreToken()
             require(token.isNotBlank()) { "家庭恢复凭据已丢失，请清除本机恢复状态" }
-            backend.cancelDisasterRestore(
-                checkpoint.endpoint,
-                checkpoint.batchId,
-                token,
-            )
+            if (restoreSnapshotJournal.read(checkpoint.startRequestId)["format"]?.jsonPrimitive?.content == "2") {
+                restoreFileLifecycle.retireAfterConfirmedCancellation(
+                    checkpoint, currentCheckpoint = { preferences.disasterRestoreCheckpoint.first() },
+                ) { backend.cancelDisasterRestore(checkpoint.endpoint, checkpoint.batchId, token) }
+            } else {
+                val cancelled = backend.cancelDisasterRestore(checkpoint.endpoint, checkpoint.batchId, token)
+                require(cancelled.batchId == checkpoint.batchId && cancelled.status == "cancelled") {
+                    "服务器尚未确认取消原恢复批次，请保留恢复信息"
+                }
+                restoreSnapshotJournal.cancel(checkpoint.startRequestId)
+            }
             preferences.clearDisasterRestoreCheckpoint()
+            restoreFileLifecycle.reclaimRetired(force = true)
+            conflictSnapshotCacheDao?.let { cache ->
+                com.lezi.babylog.sync.disasterrecovery.RestoreArtifactRetirement(
+                    cache, mediaDao, mediaFiles, immutableMediaSpool, transactionRunner,
+                ).reclaim()
+            }
         }
     }
 
@@ -1699,9 +1906,21 @@ class RealSyncPort @Inject constructor(
         deviceName: String,
     ): Result<PendingMemberLogin> = runCatching {
         reconnectMutex.withLock {
+            preferences.memberLoginAttempt(reconnect = true)?.let { retained ->
+                require(retained.endpointOrigin == endpoint.origin) {
+                    "原候选服务器仍有结果待确认的申请，请先在这台设备放弃等待"
+                }
+                val live = pendingReconnectMember.get()
+                if (live != null && preferences.isReconnectMemberAttemptCurrent(live.request.operationId, live.owner)) {
+                    return@withLock live.request
+                }
+                pendingReconnectMember.set(null)
+                return@withLock retained
+            }
             require(pendingReconnectMember.get() == null) {
                 "已有一条候选服务器加入申请"
             }
+            val owner = preferences.memberReconnectOwner()
             val probe = probeReconnectCandidate(endpoint.origin, endpoint)
             require(
                 probe is SetupProbeResult.Ready &&
@@ -1709,34 +1928,90 @@ class RealSyncPort @Inject constructor(
             ) { "候选家庭服务器尚未完成配置或连接校验" }
             val normalizedDisplayName = requireMemberDisplayName(displayName)
             val normalizedDeviceName = requireDeviceName(deviceName)
-            val receipt = backend.requestMemberLogin(
-                endpoint,
-                normalizedDisplayName,
-                normalizedDeviceName,
+            val uncertain = PendingMemberLogin(
+                requestId = "", displayName = normalizedDisplayName, deviceName = normalizedDeviceName,
+                expiresAtEpochSeconds = 0L, operationId = java.util.UUID.randomUUID().toString(),
+                endpointOrigin = endpoint.origin, remoteOutcomeUnknown = true,
             )
+            check(preferences.beginReconnectMemberAttempt(uncertain, owner)) {
+                "当前家庭或服务器信任已变化，原候选申请未发送"
+            }
+            val receipt = try {
+                backend.requestMemberLogin(endpoint, normalizedDisplayName, normalizedDeviceName)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                if (failure is com.lezi.babylog.sync.backend.MemberLoginRequestNotSentException ||
+                    (failure is SyncHttpException && failure.statusCode in setOf(400, 401, 403, 404, 409, 422, 429))
+                ) {
+                    preferences.clearMemberLoginAttempt(reconnect = true, expectedOperationId = uncertain.operationId)
+                    throw failure
+                }
+                check(preferences.isReconnectMemberAttemptCurrent(uncertain.operationId, owner)) {
+                    "原候选申请已放弃或身份已变化"
+                }
+                return@withLock uncertain
+            }
+            check(preferences.isReconnectMemberAttemptCurrent(uncertain.operationId, owner)) {
+                "原候选申请已放弃或身份已变化，迟到回执未恢复连接"
+            }
             val public = PendingMemberLogin(
                 requestId = receipt.requestId,
                 displayName = normalizedDisplayName,
                 deviceName = normalizedDeviceName,
                 expiresAtEpochSeconds = receipt.expiresAtEpochSeconds,
+                operationId = uncertain.operationId,
+                endpointOrigin = endpoint.origin,
             )
             pendingReconnectMember.set(
                 CandidateMemberReconnectAttempt(
                     endpoint = endpoint,
+                    owner = owner,
                     pendingSecret = receipt.pendingSecret,
                     request = public,
                 ),
             )
+            if (!preferences.isReconnectMemberAttemptCurrent(uncertain.operationId, owner)) {
+                pendingReconnectMember.set(null)
+                error("原候选申请已放弃或身份已变化")
+            }
             public
         }
-    }
+    }.onFailure { it.cancellationCauseOrNull()?.let { cancellation -> throw cancellation } }
+
+    override suspend fun recoverPendingReconnectMember(): Result<PendingMemberLogin?> = runCatching {
+        reconnectMutex.withLock {
+            val retained = preferences.memberLoginAttempt(reconnect = true)
+            val live = pendingReconnectMember.get()
+            if (live != null && preferences.isReconnectMemberAttemptCurrent(live.request.operationId, live.owner)) {
+                live.request
+            } else {
+                pendingReconnectMember.set(null)
+                retained
+            }
+        }
+    }.onFailure { it.cancellationCauseOrNull()?.let { cancellation -> throw cancellation } }
 
     override suspend fun checkReconnectMember(): Result<MemberLoginCheckResult> = runCatching {
         reconnectMutex.withLock {
+            if (pendingReconnectMember.get() == null) {
+                preferences.memberLoginAttempt(reconnect = true)?.let {
+                    throw MemberLoginOutcomeUnknownException(it)
+                }
+            }
             val attempt = requireNotNull(pendingReconnectMember.get()) {
                 "没有等待管理员确认的候选服务器申请"
             }
-            when (val status = backend.memberLoginStatus(attempt.endpoint, attempt.pendingSecret)) {
+            suspend fun requireCurrentAttempt() {
+                if (!preferences.isReconnectMemberAttemptCurrent(attempt.request.operationId, attempt.owner)) {
+                    pendingReconnectMember.compareAndSet(attempt, null)
+                    error("原候选申请已放弃或当前家庭身份已变化")
+                }
+            }
+            requireCurrentAttempt()
+            val status = backend.memberLoginStatus(attempt.endpoint, attempt.pendingSecret)
+            requireCurrentAttempt()
+            when (status) {
                 com.lezi.babylog.sync.backend.MemberLoginStatus.Pending ->
                     MemberLoginCheckResult.Waiting(attempt.request)
                 com.lezi.babylog.sync.backend.MemberLoginStatus.Approved,
@@ -1750,6 +2025,7 @@ class RealSyncPort @Inject constructor(
                             error.statusCode in setOf(404, 409, 410)
                         ) {
                             pendingReconnectMember.set(null)
+                            preferences.clearMemberLoginAttempt(reconnect = true, expectedOperationId = attempt.request.operationId)
                             return@withLock MemberLoginCheckResult.Terminal(status)
                         }
                         throw error
@@ -1776,11 +2052,14 @@ class RealSyncPort @Inject constructor(
                         pendingCreatorAcknowledgements = previous.pendingCreatorAcknowledgements,
                     )
                     syncMutex.withLock {
-                        preferences.saveReconnectedSession(session, attempt.endpoint)
+                        check(preferences.activateReconnectMemberIfCurrent(
+                            attempt.request.operationId, attempt.owner, session, attempt.endpoint,
+                        )) { "原候选申请已放弃或当前家庭身份已变化，未恢复旧连接" }
                         publishSession(session)
                         currentAvailability.value = FamilyServerAvailability.Disabled
                     }
                     pendingReconnectMember.set(null)
+                    preferences.clearMemberLoginAttempt(reconnect = true, expectedOperationId = attempt.request.operationId)
                     val dataRecovery = try {
                         requestSync(SyncTrigger.Foreground)
                         InitialFamilyDataRecovery.NotRequired
@@ -1796,14 +2075,16 @@ class RealSyncPort @Inject constructor(
                 }
                 else -> {
                     pendingReconnectMember.set(null)
+                    preferences.clearMemberLoginAttempt(reconnect = true, expectedOperationId = attempt.request.operationId)
                     MemberLoginCheckResult.Terminal(status)
                 }
             }
         }
-    }
+    }.onFailure { it.cancellationCauseOrNull()?.let { cancellation -> throw cancellation } }
 
     override suspend fun cancelReconnectMember(): Result<Unit> = runCatching {
         val attempt = reconnectMutex.withLock {
+            preferences.clearMemberLoginAttempt(reconnect = true)
             pendingReconnectMember.getAndSet(null)
         }
         if (attempt != null) {
@@ -1906,14 +2187,22 @@ class RealSyncPort @Inject constructor(
         executeFamily(FamilySessionCommand.RenameFamily(familyName)).map { Unit }
 
     override suspend fun listFamilyMembers(): Result<List<FamilyMember>> {
+        val ownerEpoch = preferences.familyReadSnapshot.first().identityEpoch
         val remote = executeFamily(FamilySessionCommand.ListMembers)
         val directory = remote.getOrElse { return Result.failure(it) }
             .let { it as FamilySessionOutcome.MembersListed }
         return try {
-            preferences.saveFamilyMemberDirectorySnapshot(
-                generation = directory.generation,
-                members = directory.members,
-            )
+            // A→B→A is a different local epoch even when the wire identity is identical.
+            // Legacy adapters retain their old read API; their combined view stays roster-free.
+            if (ownerEpoch != null) {
+                check(preferences.saveFamilyMemberDirectoryIfCurrent(
+                    expectedIdentityEpoch = ownerEpoch,
+                    generation = directory.generation,
+                    members = directory.members,
+                )) { "家庭身份已变化，请重新刷新成员" }
+            } else {
+                preferences.saveFamilyMemberDirectorySnapshot(directory.generation, directory.members)
+            }
             Result.success(directory.members)
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -1972,7 +2261,20 @@ class RealSyncPort @Inject constructor(
         trigger: SyncTrigger,
         allowQuietSkip: Boolean,
     ): Result<Unit> {
+        if (!foregroundState.isForeground()) {
+            return Result.failure(ForegroundSyncBlockedException(ForegroundSyncDecision.Background))
+        }
+        return foregroundState.whileForeground {
+            syncWithinForeground(trigger, allowQuietSkip)
+        }
+    }
+
+    private suspend fun syncWithinForeground(
+        trigger: SyncTrigger,
+        allowQuietSkip: Boolean,
+    ): Result<Unit> {
         if (trigger == SyncTrigger.PullToRefresh) {
+            serverUpgradeBlockedIdentity = null
             // The direct suspend seam of the user pull-to-refresh (timeline /
             // members / summary refresh): a REAL retry authorization, same
             // release semantics as requestSync(PullToRefresh). The conflated
@@ -1985,6 +2287,7 @@ class RealSyncPort @Inject constructor(
         } else {
             null
         }
+        var actedSession: SyncSession? = null
         val result = runCatching {
             if (
                 trigger == SyncTrigger.Foreground &&
@@ -1998,6 +2301,7 @@ class RealSyncPort @Inject constructor(
                 recoverPendingLocalClearLocked()
                 val session = preferences.session.first()
                 cachedSession = session
+                actedSession = session
                 if (!session.isJoined) {
                     currentStatus.value = SyncStatus.Disabled
                     return@withLock
@@ -2008,6 +2312,24 @@ class RealSyncPort @Inject constructor(
                     allowQuietSkip = allowQuietSkip && trigger == SyncTrigger.Foreground,
                 )
             }
+        }.recoverCatching { failure ->
+            if (failure !is MissingTrustedMediaIdentityException) throw failure
+            val acted = actedSession ?: throw failure
+            val session = preferences.session.first()
+            if (session.foregroundFuseIdentity() != acted.foregroundFuseIdentity()) throw failure
+            val endpoint = preferences.verifiedEndpoint.first()
+            val setup = withTimeout(10_000) { setupProbe.probe(session.baseUrl, endpoint) }
+            if (preferences.session.first().foregroundFuseIdentity() != acted.foregroundFuseIdentity()) {
+                throw failure
+            }
+            if (setup is SetupProbeResult.Ready) {
+                if (CAPABILITY_CAUSAL_MEDIA_IDENTITY_V1 !in setup.capabilities) {
+                    serverUpgradeBlockedIdentity = session.foregroundFuseIdentity()
+                    throw ServerUpdateRequiredException(failure)
+                }
+                throw MediaIdentityProtocolException(failure)
+            }
+            throw failure
         }
         val failure = result.exceptionOrNull()
         if (failure is CancellationException && failure !is TimeoutCancellationException) {
@@ -2108,6 +2430,24 @@ class RealSyncPort @Inject constructor(
             return remote.map { Unit }
         }
         return completeConfirmedMembershipDeletion()
+    }
+
+    override suspend fun prepareSourceCommandLogout(): Result<SourceCommandLogoutConsent?> = try {
+        Result.success(syncMutex.withLock { sourceLogoutAdmission.prepare() })
+    } catch (cancelled: CancellationException) { throw cancelled }
+      catch (error: Exception) { Result.failure(error) }
+
+    override suspend fun logoutCurrentDevice(consent: SourceCommandLogoutConsent): Result<Unit> {
+        val remote = executeFamily(FamilySessionCommand.LogoutCurrentDeviceWithSourceConsent(consent))
+        if (remote.isFailure) return remote.map { Unit }
+        return completeConfirmedDeviceRemoval()
+    }
+
+    override fun sourceCommandClearNotice(): Flow<com.lezi.babylog.sync.sourcerelation.SourceCommandClearNotice?> =
+        sourceLogoutAdmission.notice
+
+    override suspend fun acknowledgeSourceCommandClearNotice(notice: com.lezi.babylog.sync.sourcerelation.SourceCommandClearNotice) {
+        sourceLogoutAdmission.acknowledge(notice)
     }
 
     override suspend fun logoutCurrentDevice(): Result<Unit> {
@@ -2602,7 +2942,26 @@ class RealSyncPort @Inject constructor(
     /** Caller owns [syncMutex]; lock order is sync mutex then domain mutation guard. */
     private suspend fun recoverPendingLocalClearLocked(): LocalDataClearScope? {
         preferences.recoverPendingCredentialClear()
+        preferences.disasterRestoreCheckpoint.first()?.let { checkpoint ->
+            restoreFileLifecycle.recoverPreparedRetirement(checkpoint.startRequestId)
+            if (restoreSnapshotJournal.isRetiring(checkpoint.startRequestId)) {
+                preferences.clearDisasterRestoreCheckpoint()
+            }
+        }
         familySessionCoordinator.recoverPendingReplicaReset()
+        if (preferences.disasterRestoreCheckpoint.first() == null) {
+            preferences.pendingDisasterRestoreRequestIds()?.let { request ->
+                if (restoreFileLifecycle.recoverUndispatchedRetirement(request.start))
+                    preferences.clearDisasterRestoreCheckpoint()
+            }
+            terminalSpoolRetirement?.reclaim()
+            restoreFileLifecycle.reclaimRetired()
+            conflictSnapshotCacheDao?.let { cache ->
+                com.lezi.babylog.sync.disasterrecovery.RestoreArtifactRetirement(
+                    cache, mediaDao, mediaFiles, immutableMediaSpool, transactionRunner,
+                ).reclaim()
+            }
+        }
         val resumedDomain = localClearRecoveryGate.recoverPendingLocalClear()
         val resumedReplica = localReplicaClearCoordinator.recoverPendingLocked()
         return LocalDataClearScope.widest(resumedDomain, resumedReplica)
@@ -2630,8 +2989,14 @@ class RealSyncPort @Inject constructor(
             removedAtEpochMillis = clock.nowMillis(),
             clearedPendingCount = pendingPublishDao.observeCount().first().coerceAtLeast(0),
         )
-        preferences.saveDeviceRemovedReceipt(receipt)
-        preferences.markPendingDeviceRemovalClear()
+        if (removal.actedFor != null) {
+            check(preferences.stageTerminalRemovalIfCurrent(removal.actedFor, TerminalRemovalKind.Device, receipt)) {
+                "过期会话的设备撤销已忽略"
+            }
+        } else {
+            preferences.saveDeviceRemovedReceipt(receipt)
+            preferences.markPendingDeviceRemovalClear()
+        }
         finishPendingTerminalIdentityClear()
         updateFailureStatus(removal)
         Result.failure(removal)
@@ -2657,7 +3022,13 @@ class RealSyncPort @Inject constructor(
     private suspend fun handleRemoteMembershipDeleted(
         deletion: RemoteMembershipDeletedException,
     ): Result<Unit> = try {
-        preferences.markPendingMembershipDeletionClear()
+        if (deletion.actedFor != null) {
+            check(preferences.stageTerminalRemovalIfCurrent(deletion.actedFor, TerminalRemovalKind.Membership)) {
+                "过期会话的删除响应已忽略"
+            }
+        } else {
+            preferences.markPendingMembershipDeletionClear()
+        }
         finishPendingTerminalIdentityClear()
         updateFailureStatus(deletion)
         Result.failure(deletion)
@@ -2683,7 +3054,13 @@ class RealSyncPort @Inject constructor(
     private suspend fun handleRemoteFamilyDeleted(
         deletion: RemoteFamilyDeletedException,
     ): Result<Unit> = try {
-        preferences.markPendingFamilyDeletionClear()
+        if (deletion.actedFor != null) {
+            check(preferences.stageTerminalRemovalIfCurrent(deletion.actedFor, TerminalRemovalKind.Family)) {
+                "过期会话的删除响应已忽略"
+            }
+        } else {
+            preferences.markPendingFamilyDeletionClear()
+        }
         finishPendingTerminalIdentityClear()
         updateFailureStatus(deletion)
         Result.failure(deletion)
@@ -2715,8 +3092,7 @@ class RealSyncPort @Inject constructor(
         deviceName: String,
         rootPassword: String,
     ): com.lezi.babylog.sync.backend.SessionBootstrapResult {
-        val probeRequestId = ownerIdentityProbeRequestId ?: java.util.UUID.randomUUID().toString()
-            .also { ownerIdentityProbeRequestId = it }
+        val probeRequestId = preferences.ensureOwnerLoginRequestId()
         return try {
             backend.ownerLogin(
                 endpoint = endpoint,
@@ -2727,7 +3103,7 @@ class RealSyncPort @Inject constructor(
             )
         } catch (error: SyncHttpException) {
             if (error.statusCode == 401 || error.statusCode == 403) {
-                ownerIdentityProbeRequestId = null
+                preferences.clearOwnerLoginRequestId()
                 throw OwnerRootPasswordRejectedException()
             }
             throw error
@@ -2753,7 +3129,7 @@ class RealSyncPort @Inject constructor(
         )
         try {
             backend.logoutCurrentDevice(probeSession)
-            ownerIdentityProbeRequestId = null
+            preferences.clearOwnerLoginRequestId()
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
@@ -2767,10 +3143,20 @@ class RealSyncPort @Inject constructor(
     private suspend fun finishPendingTerminalIdentityClear() {
         conflictSnapshotClearEpoch.incrementAndGet()
         syncMutex.withLock {
+            // Another recovery owner may have completed while this caller waited.
+            if (!preferences.hasPendingDeviceRemovalClear() &&
+                !preferences.hasPendingMembershipDeletionClear() &&
+                !preferences.hasPendingFamilyDeletionClear()
+            ) return@withLock
+
             // Terminal identity and every local family projection converge under
             // the same barrier used by foreground sync. Credentials are already
             // made unusable by the durable terminal marker before this method.
-            removedDeviceLocalClearGate.clearAllLocalFamilyData()
+            localReplicaClearCoordinator.clearUnderBarrier(
+                scope = LocalDataClearScope.AllLocalData,
+                workflow = removedDeviceLocalClearGate.localClearWorkflow(),
+                recoverDomain = localClearRecoveryGate::recoverPendingLocalClear,
+            )
             preferences.clearAllLocalSyncConfig()
             preferences.clearPendingDeviceRemovalClear()
             preferences.clearPendingMembershipDeletionClear()
@@ -2884,7 +3270,10 @@ class RealSyncPort @Inject constructor(
         if (anchorAge < 0 || anchorAge > windowMillis) return false
         if (proof.headRev != session.pullCursor) return false
         if (proof.generation != session.pullGeneration) return false
-        if (proof.directoryGeneration != preferences.familyMemberDirectoryGeneration.first()) {
+        val directory = preferences.familyReadSnapshot.first()
+        if (directory.identityEpoch != null) {
+            if (!directory.hasCurrentDirectory || proof.directoryGeneration != directory.directoryGeneration) return false
+        } else if (proof.directoryGeneration != preferences.familyMemberDirectoryGeneration.first()) {
             return false
         }
         if (preferences.hasPendingGenerationResync()) return false
@@ -2934,15 +3323,51 @@ class RealSyncPort @Inject constructor(
             }
         }
 
+    private suspend fun requireRestoreAuthorityEndpoint(endpoint: TrustedEndpointProfile) {
+        val probe = probeReconnectCandidate(endpoint.origin, endpoint)
+        if (probe == SetupProbeResult.Failed.Incompatible)
+            throw com.lezi.babylog.sync.disasterrecovery.RestoreAuthorityUnsupportedException()
+        check(probe is SetupProbeResult.Ready) { "暂时无法验证恢复服务器，原恢复信息已保留，请稍后重试" }
+        if ("restore_authority_v1" !in probe.capabilities)
+            throw com.lezi.babylog.sync.disasterrecovery.RestoreAuthorityUnsupportedException()
+    }
+
     private suspend fun resumeDisasterRecoveryLocked(
         checkpoint: DisasterRestoreCheckpoint,
     ): DisasterRecoveryProgress {
+        // Released app34 checkpoints have no immutable Room snapshot. Preserve them and
+        // the local dataset; even a remote401 must not silently abandon an unproved batch.
+        if (restoreFileLifecycle.recoverPreparedRetirement(checkpoint.startRequestId)) {
+            recoverPendingLocalClearLocked()
+            throw IllegalStateException("家庭恢复批次已在本机退休，请重新开始")
+        }
+        val localSnapshot = restoreSnapshotJournal.read(checkpoint.startRequestId)
+        if (localSnapshot["phase"]?.jsonPrimitive?.content == "retiring") {
+            recoverPendingLocalClearLocked()
+            throw IllegalStateException("家庭恢复批次已失效，请重新开始")
+        }
+        if (checkpoint.status == "committed" && localSnapshot["phase"]?.jsonPrimitive?.content == "switched" &&
+            restoreSnapshotJournal.matchesTarget(checkpoint.startRequestId, preferences.session.first()) &&
+            preferences.pendingReplicaResetCredentialsReady()) {
+            return DisasterRecoveryProgress(null, "committed", checkpoint.expiresAtEpochSeconds, localActivationReady = true)
+        }
+        val localSummary = restoreSnapshotJournal.load(checkpoint.startRequestId).use { snapshot ->
+            transactionRunner.run { requireUnchangedRestoreRelations(snapshot) }
+            snapshot.summary
+        }
+        if (checkpoint.status == "committed" &&
+            localSnapshot["phase"]?.jsonPrimitive?.content in setOf("committed", "switched") &&
+            restoreSnapshotJournal.matchesTarget(checkpoint.startRequestId, preferences.session.first()) &&
+            preferences.pendingReplicaResetCredentialsReady()) {
+            return DisasterRecoveryProgress(localSummary, "committed", checkpoint.expiresAtEpochSeconds, localActivationReady = true)
+        }
         val token = preferences.disasterRestoreToken().also {
             require(it.isNotBlank()) { "家庭恢复凭据已丢失，请取消后重新开始" }
         }
         requireRetainedOwnerSession().also {
             require(it.familyId == checkpoint.familyId) { "本机家庭身份已变化，恢复已停止" }
         }
+        requireRestoreAuthorityEndpoint(checkpoint.endpoint)
         val remote = try {
             backend.disasterRestoreStatus(
                 checkpoint.endpoint,
@@ -2950,12 +3375,28 @@ class RealSyncPort @Inject constructor(
                 token,
             )
         } catch (error: SyncHttpException) {
-            if (error.statusCode == 404 || error.statusCode == 410) {
+            // Absent batches deliberately return 401 just like invalid recovery tokens.
+            // This endpoint's credential is restore-scoped, never the active family session.
+            if (error.statusCode == 401 || error.statusCode == 404 || error.statusCode == 410) {
+                // Neither a missing capability nor expiry proves an uncertain commit failed.
+                require(checkpoint.status != "commit_uncertain" && checkpoint.status != "committed") {
+                    "家庭恢复提交结果尚未确认，请保留原恢复信息并重试"
+                }
+                // Retain durable artifact ownership before forgetting the replay identifiers.
+                if (localSnapshot["format"]?.jsonPrimitive?.int == 2) {
+                    restoreFileLifecycle.retirePrepared(checkpoint.startRequestId,
+                        com.lezi.babylog.sync.disasterrecovery.RestoreFileRetirementReason.Unavailable)
+                } else restoreSnapshotJournal.retireUnavailable(checkpoint.startRequestId)
                 preferences.clearDisasterRestoreCheckpoint()
+                restoreFileLifecycle.reclaimRetired(force = true)
+                com.lezi.babylog.sync.disasterrecovery.RestoreArtifactRetirement(
+                    conflictSnapshotCacheDao, mediaDao, mediaFiles, immutableMediaSpool, transactionRunner,
+                ).reclaim()
                 throw IllegalStateException("家庭恢复批次已失效，请重新开始", error)
             }
             throw error
         }
+        restoreSnapshotJournal.read(checkpoint.startRequestId)
         if (remote.readyToCommit || remote.committed) {
             preferences.saveDisasterRestoreCheckpoint(
                 checkpoint.copy(
@@ -2966,13 +3407,9 @@ class RealSyncPort @Inject constructor(
             )
             return DisasterRecoveryProgress(null, remote.status, remote.expiresAtEpochSeconds)
         }
-        disasterRecoverySnapshotBuilder.build().use { snapshot ->
+        restoreSnapshotJournal.load(checkpoint.startRequestId).use { snapshot ->
             val uploadManifest = remote.status == "started"
-            val activeCheckpoint = if (uploadManifest) {
-                checkpoint.copy(entityVersions = snapshot.retirementVersions)
-            } else {
-                checkpoint
-            }
+            val activeCheckpoint = checkpoint
             val status = uploadDisasterRecoverySnapshot(
                 activeCheckpoint,
                 token,
@@ -3013,6 +3450,9 @@ class RealSyncPort @Inject constructor(
                 requestId = checkpoint.manifestRequestId,
                 entities = snapshot.entities,
                 media = snapshot.media.map { it.spec },
+                sourceRelations = requireNotNull(snapshot.sourceRelations) {
+                    "旧恢复快照缺少完整来源关系证据，原数据已保留，请取消后重新开始"
+                },
             )
         }
         snapshot.media.forEach { media ->
@@ -3037,161 +3477,240 @@ class RealSyncPort @Inject constructor(
         }
     }
 
+    private fun requireCapturedRestoreRelations(snapshot: com.lezi.babylog.sync.disasterrecovery.DisasterRecoverySnapshot) {
+        require(snapshot.sourceRelations != null && snapshot.sourceRelationEvidence != null) {
+            "旧恢复快照缺少完整来源关系证据；原数据和批次已保留，请明确取消后重新开始"
+        }
+    }
+
+    /** Caller owns the sync command fence and a Room transaction. */
+    private suspend fun requireUnchangedRestoreRelations(snapshot: com.lezi.babylog.sync.disasterrecovery.DisasterRecoverySnapshot) {
+        requireCapturedRestoreRelations(snapshot)
+        val dao = requireNotNull(sourceRelationDao) { "来源关系存储不可用，恢复已停止" }
+        require(conflictSnapshotCacheDao.getTransportJournal("source-relation-command-v1") == null &&
+            dao.listUnsettledDeclarations().isEmpty()) { "来源关系操作结果尚未确认；请先在原服务器确认原操作，恢复数据已保留" }
+        require(snapshot.sourceRelationEvidence ==
+            com.lezi.babylog.sync.disasterrecovery.readRestoreSourceRelationEvidence(dao)) {
+            "来源关系在恢复快照之后发生变化；原批次和本机选择已保留，不能覆盖当前选择"
+        }
+    }
+
+    /** Dispatch before generic replica reset; the Room marker makes a cross-store retry idempotent. */
+    private suspend fun recoverRestoreAuthoritySwitch(): Boolean {
+        val checkpoint = preferences.disasterRestoreCheckpoint.first() ?: return false
+        val previous = preferences.pendingReplicaResetPrevious()
+        val restored = preferences.session.first()
+        val switched = restoreSnapshotJournal.exists(checkpoint.startRequestId) &&
+            restoreSnapshotJournal.isSwitched(checkpoint.startRequestId)
+        if (previous == null && !switched) {
+            require(checkpoint.status != "commit_uncertain" && checkpoint.status != "committed") {
+                "家庭恢复提交结果待确认，请继续原恢复批次"
+            }
+            return false
+        }
+        require(restoreSnapshotJournal.matchesTarget(checkpoint.startRequestId, restored)) {
+            "恢复会话尚未完整保存，请重放原恢复提交"
+        }
+        require(preferences.pendingReplicaResetCredentialsReady()) {
+            "恢复凭据保存被中断，请重放原恢复提交"
+        }
+        if (previous != null) {
+            require(restored.familyId == checkpoint.familyId && previous.familyId == checkpoint.familyId)
+            retireDisasterRestoreReceipts(restored, checkpoint)
+        }
+        preferences.completePendingRestoreSession(checkpoint.endpoint)
+        val active = preferences.session.first()
+        require(active.isJoined) { "恢复凭据尚未可用，请重放原恢复提交" }
+        if (restoreSnapshotJournal.read(checkpoint.startRequestId)["format"]?.jsonPrimitive?.int == 2) {
+            restoreFileLifecycle.retirePublished(checkpoint.startRequestId)
+        }
+        preferences.clearDisasterRestoreCheckpoint()
+        publishSession(preferences.session.first())
+        try {
+            terminalSpoolRetirement?.reclaim()
+            com.lezi.babylog.sync.disasterrecovery.RestoreArtifactRetirement(
+                conflictSnapshotCacheDao, mediaDao, mediaFiles, immutableMediaSpool, transactionRunner,
+            ).compactSnapshot(com.lezi.babylog.sync.disasterrecovery.RestoreSnapshotJournal.key(checkpoint.startRequestId))
+            restoreFileLifecycle.reclaimRetired(force = true)
+        } catch (failure: Exception) {
+            failure.cancellationCauseOrNull()?.let { throw it }
+            // Authority is already published. The durable marker retries cleanup at startup;
+            // report the existing sync warning without returning a false restore failure.
+            currentFailureKind.value = FailureKind.UnexpectedError
+            currentStatus.value = SyncStatus.Error
+        }
+        return true
+    }
+
     private suspend fun retireDisasterRestoreReceipts(
         restored: SyncSession,
         checkpoint: DisasterRestoreCheckpoint,
     ) {
-        transactionRunner.run {
-            // Care remains writable while a restore batch uploads. Re-author every local row to
-            // the new Owner, including rows created after the immutable restore manifest, but
-            // retire publication state only when the Room version is exactly the version
-            // activated by the server. Newer local work stays dirty and publishes after switch.
-            recordDao.listAllIncludingDeleted().forEach { record ->
-                if (record.createdByMembershipId != restored.membershipId) {
-                    recordDao.update(record.copy(createdByMembershipId = restored.membershipId))
+        if (restoreSnapshotJournal.isSwitched(checkpoint.startRequestId)) return
+        val snapshot = restoreSnapshotJournal.load(checkpoint.startRequestId)
+        snapshot.use {
+            restoreFileLifecycle.withAuthorityTransition(snapshot) { checkedMedia, ownedPaths ->
+            transactionRunner.run {
+                if (restoreSnapshotJournal.isSwitched(checkpoint.startRequestId)) return@run
+                requireUnchangedRestoreRelations(snapshot)
+                val captured = com.lezi.babylog.sync.disasterrecovery.CapturedRestoreRows(
+                    babyDao.listAllIncludingDeleted(), recordDao.listAllIncludingDeleted(),
+                    carePlanDao.listAllIncludingDeleted(), customItemDao.listAllIncludingDeleted(),
+                    fulfillmentCandidateDao.listAllIncludingDeleted(), wakeObservationDao.listAllIncludingDeleted(),
+                    mediaDao.listAllIncludingDeleted(),
+                )
+                check(checkedMedia.all { (uuid, row) -> captured.mediaRow(uuid) == row }) {
+                    "服务器已提交恢复，本机照片刚刚变化；原批次已保留，请重试本机激活"
                 }
+                val versions = snapshot.retirementVersions.associateBy { it.type to it.clientUuid }
+                val restoredPayloads = snapshot.entities.associate {
+                    (it.type to it.clientUuid) to Json.parseToJsonElement(it.payloadJson).jsonObject
+                }
+                fun unchanged(type: String, uuid: String): Boolean {
+                    // Legacy toString hashes can alias null and literal text; never use them to clean current facts.
+                    if (snapshot.evidenceVersion != 2) return false
+                    val evidence = versions[type to uuid]?.localEvidence ?: return false
+                    return evidence == captured.exactEvidence(type, uuid)
+                }
+                fun base(type: String, uuid: String): String? =
+                    versions[type to uuid]?.takeIf { it.restored }?.let {
+                        com.lezi.babylog.sync.disasterrecovery.RestoreAuthority.baseline(checkpoint.batchId, type, uuid)
+                    }
+                fun dirty(type: String, uuid: String) = !unchanged(type, uuid)
+                captured.babies.forEach { row ->
+                    val pending = dirty("baby", row.clientUuid)
+                    val payload = restoredPayloads["baby" to row.clientUuid]?.takeIf { !pending }
+                    val avatar = if (payload != null) payload["avatar_media_uuid"]?.jsonPrimitive?.contentOrNull else row.avatarMediaUuid
+                    babyDao.update(row.copy(
+                        avatarMediaUuid = avatar,
+                        avatarPath = avatar?.let { uuid ->
+                            ownedPaths[uuid]?.takeIf { unchanged("media", uuid) }
+                                ?: if (avatar == row.avatarMediaUuid) row.avatarPath else
+                                    captured.mediaRow(avatar)?.localUri
+                        },
+                        baseVersion = base("baby", row.clientUuid),
+                        mutationId = if (pending) UUID.randomUUID().toString() else null,
+                        syncDirty = pending, openConflictId = null, localBranchVersionId = null,
+                    ))
+                }
+                captured.records.forEach { row ->
+                    val pending = dirty("record", row.clientUuid)
+                    recordDao.update(row.copy(
+                        baseVersion = base("record", row.clientUuid),
+                        mutationId = if (pending) UUID.randomUUID().toString() else null,
+                        syncDirty = pending, openConflictId = null, localBranchVersionId = null,
+                        createdByMembershipId = restored.membershipId,
+                        familyPublishedUpdatedAt = if (!pending && base("record", row.clientUuid) != null) row.updatedAt else null,
+                    ))
+                }
+                captured.plans.forEach { row ->
+                    val pending = dirty("care_plan", row.clientUuid)
+                    val payload = restoredPayloads["care_plan" to row.clientUuid]?.takeIf { !pending }
+                    carePlanDao.update(row.copy(
+                        status = payload?.get("status")?.jsonPrimitive?.content ?: row.status,
+                        fulfilledRecordClientUuid = if (payload != null)
+                            payload["fulfilled_record_client_uuid"]?.jsonPrimitive?.contentOrNull else row.fulfilledRecordClientUuid,
+                        fulfilledAt = if (payload != null) payload["fulfilled_at"]?.jsonPrimitive?.longOrNull else row.fulfilledAt,
+                        baseVersion = base("care_plan", row.clientUuid),
+                        mutationId = if (pending) UUID.randomUUID().toString() else null,
+                        syncDirty = pending, openConflictId = null, localBranchVersionId = null,
+                        createdByMembershipId = restored.membershipId,
+                        familyPublishedUpdatedAt = if (!pending && base("care_plan", row.clientUuid) != null) row.updatedAt else null,
+                    ))
+                }
+                captured.customItems.forEach { row ->
+                    val pending = dirty("custom_item", row.clientUuid)
+                    customItemDao.update(row.copy(
+                        baseVersion = base("custom_item", row.clientUuid),
+                        mutationId = if (pending) UUID.randomUUID().toString() else null,
+                        syncDirty = pending, openConflictId = null, localBranchVersionId = null,
+                        createdByMembershipId = restored.membershipId,
+                    ))
+                }
+                captured.wakes.forEach { row ->
+                    val pending = dirty("wake_observation", row.clientUuid)
+                    wakeObservationDao.update(row.copy(
+                        baseVersion = base("wake_observation", row.clientUuid),
+                        mutationId = if (pending) UUID.randomUUID().toString() else null,
+                        syncDirty = pending, openConflictId = null, localBranchVersionId = null,
+                        observerMembershipId = restored.membershipId,
+                        familyPublishedUpdatedAt = if (!pending && base("wake_observation", row.clientUuid) != null) row.updatedAt else null,
+                    ))
+                }
+                captured.candidates.forEach { row ->
+                    fulfillmentCandidateDao.update(row.copy(
+                        submitterMembershipId = restored.membershipId, submitterRole = "owner",
+                        syncDirty = !unchanged("fulfillment_candidate", row.clientUuid),
+                    ))
+                }
+                val uploadedMedia = snapshot.media.associateBy { it.clientUuid }
+                captured.media.forEach { row ->
+                    val uploaded = uploadedMedia[row.clientUuid]
+                    val exact = uploaded != null && unchanged("media", row.clientUuid)
+                    val verified = uploaded != null && row.clientUuid in ownedPaths
+                    mediaDao.update(row.copy(
+                        localUri = ownedPaths[row.clientUuid] ?: row.localUri,
+                        remoteUri = if (verified || exact) restored.receiptFor(row.clientUuid) else null,
+                        sha256 = if (verified || exact) uploaded?.spec?.sha256 else row.sha256,
+                        byteSize = if (verified || exact) requireNotNull(uploaded).spec.byteSize else row.byteSize,
+                        syncDirty = !exact && !unchanged("media", row.clientUuid),
+                        baseVersion = null, mutationId = null,
+                        openConflictId = null, localBranchVersionId = null,
+                    ))
+                }
+                // Preserve durable byte references before retiring old-authority envelopes.
+                // Plain manifests carry no replayable operation, receipt or authority binding.
+                val cache = requireNotNull(conflictSnapshotCacheDao)
+                val originalSpoolRows = cache.listFrozenMediaSpoolManifests()
+                val retainedGroups = originalSpoolRows.map {
+                    com.lezi.babylog.sync.engine.decodeFrozenMediaSpoolManifest(it.payloadJson)
+                }
+                val journal = restoreSnapshotJournal.read(checkpoint.startRequestId)
+                val previousFileOwners = cache.listRestoreFileOwners()
+                val previousTerminalSeals = cache.listRestoreTerminalSpoolSeals()
+                cache.deleteAll()
+                conflictSummaryDao?.deleteAll()
+                cache.deleteAllTransportJournals()
+                (previousFileOwners + previousTerminalSeals).forEach { owner ->
+                    cache.putTransportJournal(owner.journalKey, owner.payloadJson, owner.contentEpoch)
+                }
+                retainedGroups.forEach { group ->
+                    cache.putFrozenMediaSpoolManifest(group.mutationId,
+                        com.lezi.babylog.sync.media.encodeImmutableMediaSpoolGroup(group), 0)
+                }
+                captured.media.filter { row ->
+                    row.deletedAt == null && row.clientUuid in uploadedMedia &&
+                        (row.clientUuid in ownedPaths || unchanged("media", row.clientUuid))
+                }.forEach { row ->
+                    cache.putTransportJournal("restored-media-bytes-v1:${row.clientUuid}",
+                        ownedPaths[row.clientUuid] ?: row.localUri, row.updatedAt)
+                }
+                cache.putTransportJournal(
+                    com.lezi.babylog.sync.disasterrecovery.RestoreSnapshotJournal.key(checkpoint.startRequestId),
+                    journal.toString(), 0,
+                )
+                // Keep declarations (local source intent), remove only old derived authority.
+                val relationDao = requireNotNull(sourceRelationDao)
+                relationDao.deleteAllMembers()
+                relationDao.deleteAll()
+                requireNotNull(snapshot.sourceRelations).forEach { relation ->
+                    relationDao.applyPullSummary(relation.relationId, relation.displayClientUuid,
+                        com.lezi.babylog.core.database.causal.SourceRelationRole.DISPLAY,
+                        relation.sourceClientUuids, clock.nowMillis(), relation.autoAligned)
+                }
+                cache.putTransportJournal(
+                    com.lezi.babylog.sync.disasterrecovery.RestoreArtifactRetirement.KEY,
+                    com.lezi.babylog.sync.disasterrecovery.RestoreArtifactRetirement.encode(
+                        com.lezi.babylog.sync.disasterrecovery.RestoreSnapshotJournal.key(checkpoint.startRequestId),
+                        retainedGroups.map { it.mutationId },
+                    ), 0,
+                )
+                val terminalSeals = terminalSpoolRetirement?.captureAcceptedSwitch(
+                    snapshot, journal, checkpoint, restored, captured, originalSpoolRows, ownedPaths,
+                ).orEmpty()
+                terminalSpoolRetirement?.persistCaptured(terminalSeals)
+                restoreSnapshotJournal.phase(checkpoint.startRequestId, "switched")
             }
-            carePlanDao.listAllIncludingDeleted().forEach { plan ->
-                if (plan.createdByMembershipId != restored.membershipId) {
-                    carePlanDao.update(plan.copy(createdByMembershipId = restored.membershipId))
-                }
-            }
-            customItemDao.listAllIncludingDeleted().forEach { item ->
-                if (item.createdByMembershipId != restored.membershipId) {
-                    customItemDao.update(item.copy(createdByMembershipId = restored.membershipId))
-                }
-            }
-            fulfillmentCandidateDao.listAllIncludingDeleted().forEach { candidate ->
-                if (
-                    candidate.submitterMembershipId != restored.membershipId ||
-                    candidate.submitterRole != "owner"
-                ) {
-                    fulfillmentCandidateDao.update(
-                        candidate.copy(
-                            submitterMembershipId = restored.membershipId,
-                            submitterRole = "owner",
-                        ),
-                    )
-                }
-            }
-            // Re-author every local wake, including rows edited while the batch uploaded.
-            // Publication state is retired only for the exact activated revision below.
-            wakeObservationDao.listAllIncludingDeleted().forEach { wake ->
-                if (wake.observerMembershipId != restored.membershipId) {
-                    wakeObservationDao.update(
-                        wake.copy(observerMembershipId = restored.membershipId),
-                    )
-                }
-            }
-            checkpoint.entityVersions.forEach { version ->
-                when (version.type) {
-                    "baby" -> babyDao.markSynced(version.clientUuid, version.updatedAt)
-                    "record" -> recordDao.getByClientUuid(version.clientUuid)
-                        ?.takeIf { it.updatedAt == version.updatedAt }
-                        ?.let { record ->
-                            recordDao.update(
-                                record.copy(
-                                    createdByMembershipId = if (version.restored) {
-                                        restored.membershipId
-                                    } else {
-                                        record.createdByMembershipId
-                                    },
-                                    familyPublishedUpdatedAt = if (version.restored) {
-                                        record.updatedAt
-                                    } else {
-                                        record.familyPublishedUpdatedAt
-                                    },
-                                    syncDirty = false,
-                                ),
-                            )
-                        }
-                    "wake_observation" -> wakeObservationDao.getByClientUuid(version.clientUuid)
-                        ?.takeIf { it.updatedAt == version.updatedAt }
-                        ?.let { wake ->
-                            wakeObservationDao.update(
-                                wake.copy(
-                                    observerMembershipId = if (version.restored) {
-                                        restored.membershipId
-                                    } else {
-                                        wake.observerMembershipId
-                                    },
-                                    familyPublishedUpdatedAt = if (version.restored) {
-                                        wake.updatedAt
-                                    } else {
-                                        wake.familyPublishedUpdatedAt
-                                    },
-                                    syncDirty = false,
-                                ),
-                            )
-                        }
-                    "care_plan" -> carePlanDao.getByClientUuid(version.clientUuid)
-                        ?.takeIf { it.updatedAt == version.updatedAt }
-                        ?.let { plan ->
-                            carePlanDao.update(
-                                plan.copy(
-                                    createdByMembershipId = if (version.restored) {
-                                        restored.membershipId
-                                    } else {
-                                        plan.createdByMembershipId
-                                    },
-                                    familyPublishedUpdatedAt = if (version.restored) {
-                                        plan.updatedAt
-                                    } else {
-                                        plan.familyPublishedUpdatedAt
-                                    },
-                                    syncDirty = false,
-                                ),
-                            )
-                        }
-                    "custom_item" -> customItemDao.getByClientUuid(version.clientUuid)
-                        ?.takeIf { it.updatedAt == version.updatedAt }
-                        ?.let { item ->
-                            customItemDao.update(
-                                item.copy(
-                                    createdByMembershipId = if (version.restored) {
-                                        restored.membershipId
-                                    } else {
-                                        item.createdByMembershipId
-                                    },
-                                    syncDirty = false,
-                                ),
-                            )
-                        }
-                    "fulfillment_candidate" ->
-                        fulfillmentCandidateDao.getByClientUuid(version.clientUuid)
-                            ?.takeIf { it.updatedAt == version.updatedAt }
-                            ?.let { candidate ->
-                                fulfillmentCandidateDao.update(
-                                    candidate.copy(
-                                        submitterMembershipId = if (version.restored) {
-                                            restored.membershipId
-                                        } else {
-                                            candidate.submitterMembershipId
-                                        },
-                                        submitterRole = if (version.restored) {
-                                            "owner"
-                                        } else {
-                                            candidate.submitterRole
-                                        },
-                                        syncDirty = false,
-                                    ),
-                                )
-                            }
-                    "media" -> mediaDao.getByClientUuid(version.clientUuid)
-                        ?.takeIf { it.updatedAt == version.updatedAt }
-                        ?.let { media ->
-                            mediaDao.update(
-                                media.copy(
-                                    remoteUri = if (version.restored) {
-                                        restored.receiptFor(media.clientUuid)
-                                    } else {
-                                        media.remoteUri
-                                    },
-                                    syncDirty = false,
-                                ),
-                            )
-                        }
-                }
             }
         }
     }
@@ -3318,6 +3837,7 @@ class RealSyncPort @Inject constructor(
 
 private data class CandidateMemberReconnectAttempt(
     val endpoint: TrustedEndpointProfile,
+    val owner: com.lezi.babylog.sync.session.MemberReconnectOwner,
     val pendingSecret: String,
     val request: PendingMemberLogin,
 ) {
@@ -3397,6 +3917,7 @@ private data class QuietProof(
     val directoryGeneration: String,
 )
 private val REQUIRED_HEALTH_CAPABILITIES = setOf(
+    CAPABILITY_NURSING_PLAN_INTENT_V1,
     CAPABILITY_ATOMIC_BUNDLE,
     CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
     CAPABILITY_DISASTER_RESTORE,

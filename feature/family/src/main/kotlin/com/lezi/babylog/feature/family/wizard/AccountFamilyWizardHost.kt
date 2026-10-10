@@ -60,7 +60,7 @@ class AccountFamilyWizardHost @Inject constructor(
     val verifiedEndpoint = sync.verifiedEndpoint()
 
     /** Session endpoint projection for join/create draft seed (not account overview). */
-    val endpointSeed: StateFlow<WizardEndpointSeed> = sync.session().map { session ->
+    val endpointSeed: StateFlow<WizardEndpointSeed> = sync.sessionPresentation().map { session ->
         WizardEndpointSeed(
             baseUrl = session.baseUrl,
             serverHost = session.serverHost,
@@ -74,7 +74,7 @@ class AccountFamilyWizardHost @Inject constructor(
             sync.memberLoginChecks().collect(familyWizard::observeMemberLoginCheck)
         }
         viewModelScope.launch {
-            combine(sync.pendingMemberLogin(), sync.session()) { pending, session ->
+            combine(sync.pendingMemberLogin(), sync.sessionPresentation()) { pending, session ->
                 pending to session
             }.collect { (pending, session) ->
                 familyWizard.reconcilePendingMemberApproval(

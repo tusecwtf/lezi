@@ -37,6 +37,7 @@ import com.lezi.babylog.domain.canManageCreatorOwnedFamilyEntity
 import com.lezi.babylog.domain.nextSyncUpdatedAt
 import com.lezi.babylog.domain.requireCurrentPayloadDocument
 import com.lezi.babylog.domain.requireCurrentPayloadJson
+import com.lezi.babylog.domain.requireValidCarePlanPayload
 import com.lezi.babylog.domain.stampCustomItemSnapshotIntoPayload
 import com.lezi.babylog.domain.toModel
 import com.lezi.babylog.domain.validateSleepInterval
@@ -92,11 +93,6 @@ internal class RecordMutationCoordinator(
         now: Long,
         actualTimestamp: Long,
     ) -> Unit,
-    /**
-     * Authoritative active plan photo paths (ordered). Timer fulfillment clones these
-     * into the new Record inside the same transaction; does not use UI snapshots.
-     */
-    private val listCarePlanPhotoPaths: suspend (Long) -> List<String>,
     private val requestLocalSync: () -> Unit,
     private val wakeObservations: WakeObservationCoordinator,
 ) {
@@ -207,6 +203,7 @@ internal class RecordMutationCoordinator(
         /** Null preserves current photos; an explicit empty list clears them. */
         photoLocalPaths: List<String>? = null,
         nowMillis: Long = System.currentTimeMillis(),
+        expectedPayloadType: RecordType? = null,
     ) {
         // Future start must use [convertRecordToCarePlan] after explicit UI confirm.
         // Closed-interval end also uses zero skew (invalid fact, not convert).
@@ -224,6 +221,7 @@ internal class RecordMutationCoordinator(
             sleepMutationMutex.withLock {
                 transactionRunner.run {
                     val existing = recordDao.get(id) ?: return@run emptySet<String>()
+                    requireExpectedCareType(expectedPayloadType, existing.type)
                     val canManage = actorCanManageRecord(existing)
                     if (!canManage) {
                         throw RecordPermissionException()
@@ -247,47 +245,24 @@ internal class RecordMutationCoordinator(
                     )
                     val effectiveSchema = schemaVersion
                     validateSleepInterval(type, effectiveTimestamp, endTimestamp)
-                    // Same transaction as the record write: a rejected update must not commit the wake.
-                    if (type == RecordType.SLEEP && endTimestamp != null) {
-                        val wakeId = existing.effectiveWakeObservationClientUuid
-                        if (!wakeId.isNullOrBlank()) {
-                            wakeObservations.updateWakeInCallerTransaction(
-                                clientUuid = wakeId,
-                                wakeTimestamp = endTimestamp,
-                                note = note,
-                                photoLocalPaths = null,
-                                photoDigests = emptyMap(),
-                            )
-                        } else {
-                            // Provisional matches projectSleepInterval against the start being saved.
-                            val provisional = provisionalWake(
-                                wakeObservations.listWakeRowsForSleep(existing.clientUuid),
-                                effectiveTimestamp,
-                            )
-                            if (provisional == null) {
-                                wakeObservations.recordWakeInCallerTransaction(
-                                    babyId = existing.babyId,
-                                    at = endTimestamp,
-                                    note = note,
-                                    photoLocalPaths = emptyList(),
-                                    photoDigests = emptyMap(),
-                                    sleepRecordId = existing.id,
-                                    clientUuid = closedSleepWakeUuid(existing.clientUuid),
-                                )
-                            } else if (wakeObservations.actorMayEditWake(provisional)) {
-                                wakeObservations.updateWakeInCallerTransaction(
-                                    clientUuid = provisional.clientUuid,
-                                    wakeTimestamp = endTimestamp,
-                                    note = note,
-                                    photoLocalPaths = null,
-                                    photoDigests = emptyMap(),
-                                )
-                            } else if (
-                                effectiveTimestamp > provisional.wakeTimestamp ||
-                                endTimestamp != provisional.wakeTimestamp
-                            ) {
-                                throw RecordPermissionException()
-                            }
+                    // Select against the saved interval before moving its start. Otherwise a
+                    // forward edit hides its own wake and mistakes an edit for an insert replay.
+                    val originalWakes = if (type == RecordType.SLEEP) {
+                        wakeObservations.listWakeRowsForSleep(existing.clientUuid)
+                    } else {
+                        emptyList()
+                    }
+                    val originalWake = originalWakes.firstOrNull {
+                        it.clientUuid == existing.effectiveWakeObservationClientUuid &&
+                            it.deletedAt == null && !it.withdrawn &&
+                            it.wakeTimestamp >= existing.timestamp
+                    } ?: provisionalWake(originalWakes, existing.timestamp)
+                    if (type == RecordType.SLEEP && originalWake != null) {
+                        require(endTimestamp != null) { "已完成的睡眠不可改为进行中" }
+                        if (endTimestamp != originalWake.wakeTimestamp &&
+                            !wakeObservations.actorMayEditWake(originalWake)
+                        ) {
+                            throw RecordPermissionException()
                         }
                     }
                     updateRecordEntity(
@@ -300,6 +275,29 @@ internal class RecordMutationCoordinator(
                             updatedAt = now,
                         ),
                     )
+                    // Validate the wake against the newly saved start, within this same
+                    // transaction. Root note/photos never rewrite independent wake content.
+                    if (type == RecordType.SLEEP && endTimestamp != null) {
+                        if (originalWake == null) {
+                            wakeObservations.recordWakeInCallerTransaction(
+                                babyId = existing.babyId,
+                                at = endTimestamp,
+                                note = null,
+                                photoLocalPaths = emptyList(),
+                                photoDigests = emptyMap(),
+                                sleepRecordId = existing.id,
+                                clientUuid = newClientUuid(),
+                            )
+                        } else if (endTimestamp != originalWake.wakeTimestamp) {
+                            wakeObservations.updateWakeInCallerTransaction(
+                                clientUuid = originalWake.clientUuid,
+                                wakeTimestamp = endTimestamp,
+                                note = originalWake.note,
+                                photoLocalPaths = null,
+                                photoDigests = emptyMap(),
+                            )
+                        }
+                    }
                     photos?.let {
                         photoAttachmentReconciler.reconcile(
                             owner,
@@ -339,24 +337,32 @@ internal class RecordMutationCoordinator(
         nowMillis: Long = System.currentTimeMillis(),
         projectToSystemCalendar: Boolean = true,
         clientUuid: String = newClientUuid(),
+        expectedPayloadType: RecordType? = null,
     ): Long {
         require(scheduledAt > nowMillis) { "转为护理计划须选择未来时刻" }
         require(clientUuid.isNotBlank()) { "转计划写入标识不能为空" }
-        carePlanDao.getByClientUuid(clientUuid)?.let { replay ->
+        // Both callers hold a database transaction. A replay needs no path leases,
+        // file digest, or source rewrite; the returned plan is the verified snapshot.
+        suspend fun loadVerifiedReplay(source: RecordEntity? = null): CarePlanEntity? {
+            val replay = carePlanDao.getByClientUuid(clientUuid) ?: return null
+            val currentSource = source ?: recordDao.getIncludingDeleted(recordId)
+                ?: error("记录不存在")
+            requireExpectedCareType(expectedPayloadType, currentSource.type)
             check(replay.deletedAt == null) { "这次护理计划已删除，请重新填写" }
-            val source = recordDao.getIncludingDeleted(recordId)
-            require(source != null && replay.sourceRecordClientUuid == source.clientUuid) {
-                "转计划写入标识与既有计划冲突"
-            }
+            require(
+                replay.sourceRecordClientUuid == currentSource.clientUuid &&
+                    replay.type == currentSource.type,
+            ) { "转计划写入标识与既有计划冲突" }
+            return replay
+        }
+        val replay = transactionRunner.run { loadVerifiedReplay() }
+        if (replay != null) {
             requestLocalSync()
-            replay.toModel().let { plan ->
-                projectOrScheduleCarePlanReminder(plan, projectToSystemCalendar)
-            }
+            projectOrScheduleCarePlanReminder(replay.toModel(), projectToSystemCalendar)
             return replay.id
         }
         val photos = photoLocalPaths
-        val peek = recordDao.get(recordId) ?: error("记录不存在")
-        if (peek.deletedAt != null) error("记录已删除")
+        val peek = recordDao.getIncludingDeleted(recordId) ?: error("记录不存在")
         val type = RecordType.fromKey(peek.type) ?: error("未知记录类型")
         requireCurrentPayloadDocument(type, peek.payloadJson, peek.schemaVersion)
         require(type.isPlanableCarePlanType || type == RecordType.CUSTOM) {
@@ -365,13 +371,17 @@ internal class RecordMutationCoordinator(
 
         // Global lock order: path gate → sleepMutationMutex → Room (never invert).
         val recordOwner = PhotoAttachmentOwner.Record(recordId)
-        val (planId, cleanupCandidates) = photoAttachmentReconciler.withInvolvedPaths(
+        val (committedPlan, cleanupCandidates) = photoAttachmentReconciler.withInvolvedPaths(
             owner = recordOwner,
             additionalPaths = photos,
         ) {
             val contentDigests = photoAttachmentReconciler.digestReadablePaths(photos)
-            suspend fun writeConvert(): Pair<Long, Set<String>> = transactionRunner.run {
-                val existing = recordDao.get(recordId) ?: error("记录不存在")
+            suspend fun writeConvert(): Pair<CarePlanEntity, Set<String>> = transactionRunner.run {
+                val existing = recordDao.getIncludingDeleted(recordId) ?: error("记录不存在")
+                requireExpectedCareType(expectedPayloadType, existing.type)
+                loadVerifiedReplay(existing)?.let { concurrentReplay ->
+                    return@run concurrentReplay to emptySet<String>()
+                }
                 if (existing.deletedAt != null) error("记录已删除")
                 requireCanManageRecord(existing)
                 requireActiveBaby(existing.babyId)
@@ -419,6 +429,8 @@ internal class RecordMutationCoordinator(
                     schemaVersion = schemaVersion,
                 )
 
+                requireValidCarePlanPayload(resolvedType, persistedPayload, schemaVersion, note)
+
                 val at = nextSyncUpdatedAt(existing.updatedAt, System.currentTimeMillis())
                 recordDao.softDelete(recordId, at)
                 val recordPhotoMutation = photoAttachmentReconciler.tombstone(
@@ -429,8 +441,7 @@ internal class RecordMutationCoordinator(
                 // Plan media rows are new ownership (separate clientUuids); record media
                 // remain tombstoned only. Same localUri may be referenced by both, but
                 // only plan rows stay active after commit.
-                val planId = carePlanDao.upsert(
-                    CarePlanEntity(
+                val plan = CarePlanEntity(
                         clientUuid = clientUuid,
                         babyId = existing.babyId,
                         type = resolvedType.key,
@@ -446,15 +457,15 @@ internal class RecordMutationCoordinator(
                         updatedAt = at,
                         syncDirty = true,
                         systemCalendarProjectionEnabled = projectToSystemCalendar,
-                    ),
-                )
+                    )
+                val planId = carePlanDao.upsert(plan)
                 photoAttachmentReconciler.reconcile(
                     PhotoAttachmentOwner.CarePlan(planId),
                     photos,
                     at,
                     contentDigests,
                 )
-                planId to recordPhotoMutation.tombstonedClientUuids
+                plan.copy(id = planId) to recordPhotoMutation.tombstonedClientUuids
             }
             if (type == RecordType.SLEEP) {
                 // Same mutex as soft-delete/open-sleep so convert cannot leave half-live intervals.
@@ -467,10 +478,8 @@ internal class RecordMutationCoordinator(
         cleanupCommittedPhotoTombstones(cleanupCandidates)
         requestLocalSync()
         // Creator keeps full local plan + projection immediately.
-        carePlanDao.get(planId)?.toModel()?.let { plan ->
-            projectOrScheduleCarePlanReminder(plan, projectToSystemCalendar)
-        }
-        return planId
+        projectOrScheduleCarePlanReminder(committedPlan.toModel(), projectToSystemCalendar)
+        return committedPlan.id
     }
 
     suspend fun deleteRecord(id: Long): Boolean {
@@ -520,7 +529,7 @@ internal class RecordMutationCoordinator(
     )
 
     suspend fun canManageRecord(record: Record): Boolean {
-        val session = syncPort.session().first()
+        val session = syncPort.sessionPresentation().first()
         return canManageCreatorOwnedFamilyEntity(
             creatorMembershipId = record.createdByMembershipId,
             actorMembershipId = session.membershipId.trim(),
@@ -539,7 +548,7 @@ internal class RecordMutationCoordinator(
     suspend fun canDeleteRecord(record: Record): Boolean = canManageRecord(record)
 
     private suspend fun actorCanManageRecord(record: RecordEntity): Boolean {
-        val session = syncPort.session().first()
+        val session = syncPort.sessionPresentation().first()
         return canManageCreatorOwnedFamilyEntity(
             creatorMembershipId = record.createdByMembershipId,
             actorMembershipId = session.membershipId.trim(),
@@ -616,9 +625,14 @@ internal class RecordMutationCoordinator(
         require(completionClientUuid.isNotBlank()) { "计时完成标识不能为空" }
         val now = System.currentTimeMillis()
         // Ticket 09: explicit seed merge paths; Ticket 08 fallback: live plan media.
+        val planPhotoSnapshot = if (photoLocalPaths == null && carePlanId != null) {
+            photoAttachmentReconciler.activePlanPhotoSnapshot(carePlanId)
+        } else {
+            null
+        }
         val recordPhotos = when {
             photoLocalPaths != null -> photoLocalPaths
-            carePlanId != null -> listCarePlanPhotoPaths(carePlanId)
+            planPhotoSnapshot != null -> planPhotoSnapshot.map { it.localUri }.filter(String::isNotBlank)
             else -> emptyList()
         }
         val id = photoAttachmentReconciler.withInvolvedPaths(
@@ -650,6 +664,16 @@ internal class RecordMutationCoordinator(
                     return@run existing.id
                 }
                 requireActiveBaby(babyId)
+                if (photoLocalPaths == null && carePlanId != null) {
+                    check(photoAttachmentReconciler.activePlanPhotoSnapshot(carePlanId) == planPhotoSnapshot) {
+                        "护理计划照片已变化，请重试计时完成"
+                    }
+                    // Only new completions need readable inherited bytes. The replay
+                    // branch above must survive a file disappearing after a prior commit.
+                    check(planPhotoSnapshot.orEmpty().all { photo ->
+                        photo.localUri.isNotBlank() && photo.localUri.trim() in contentDigests
+                    }) { "护理计划照片不可读取，请重试计时完成" }
+                }
                 val recordTimestamp = if (recordMode == "start") startedAt else endedAt
                 val inserted = insertRecord(
                     RecordEntity(
@@ -713,7 +737,7 @@ internal class RecordMutationCoordinator(
         note: String?,
         payloadJson: String,
         schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-        photoLocalPaths: List<String> = emptyList(),
+        photoLocalPaths: List<String>? = emptyList(),
         nowMillis: Long = System.currentTimeMillis(),
         clientUuid: String = newClientUuid(),
     ): Long {
@@ -732,7 +756,10 @@ internal class RecordMutationCoordinator(
             }
         }
         require(clientUuid.isNotBlank()) { "睡眠写入标识不能为空" }
-        val photos = photoLocalPaths
+        require(photoLocalPaths != null || (expectedOpenSleepId != null && endTimestamp == null)) {
+            "只有现有睡下记录编辑可保留原照片"
+        }
+        val photos = photoLocalPaths.orEmpty()
         val incomingPayload = requireCurrentPayloadJson(
             type = RecordType.SLEEP,
             payloadJson = payloadJson,
@@ -755,51 +782,52 @@ internal class RecordMutationCoordinator(
         // Wake close: photos attach to WakeObservation, not Sleep log media.
         // [clientUuid] is the WakeObservation identity (composer idempotency), not Sleep.
         if (isWakeClose) {
-            val wakeCoordinator = wakeObservations
             val wakeAt = requireNotNull(endTimestamp)
             val openId = requireNotNull(expectedOpenSleepId)
-            // Exact replay by wake mutation identity.
-            val existingWake = wakeCoordinator.get(clientUuid)
-            if (existingWake != null) {
-                return openId
-            }
-            sleepMutationMutex.withLock {
-                transactionRunner.run {
-                    requireActiveBaby(babyId)
-                    val current = recordDao.get(openId)
-                        ?: throw SleepStateChangedException()
-                    val openCandidates = wakeCoordinator.listProjectedOpenSleeps(babyId)
-                    if (openCandidates.none { it.id == openId }) {
-                        // Already provisionally closed with same end+note (legacy replay).
-                        val match = wakeCoordinator.listForSleep(current.clientUuid).firstOrNull {
-                            it.wakeTimestamp == wakeAt && it.note == note && !it.withdrawn
+            photoAttachmentReconciler.withInvolvedPaths(owner = null, additionalPaths = photos) {
+                val photoDigests = photoAttachmentReconciler.digestReadablePaths(photos)
+                sleepMutationMutex.withLock {
+                    transactionRunner.run {
+                        requireActiveBaby(babyId)
+                        val current = recordDao.get(openId) ?: throw SleepStateChangedException()
+                        require(current.babyId == babyId) { "醒来必须关联本宝宝的睡眠记录" }
+                        val replay = wakeObservations.get(clientUuid)
+                        if (replay != null) {
+                            require(replay.sleepRecordClientUuid == current.clientUuid) {
+                                "醒来标识已用于另一条睡眠"
+                            }
+                            return@run
                         }
-                        if (match != null) return@run
-                        throw SleepStateChangedException()
-                    }
-                    if (timestamp != current.timestamp && actorCanManageRecord(current)) {
-                        RecordTime.intervalError(timestamp, wakeAt, nowMillis)?.let {
-                            throw IllegalArgumentException(it)
+                        val openCandidates = wakeObservations.listProjectedOpenSleeps(babyId)
+                        if (openCandidates.none { it.id == openId }) {
+                            val match = wakeObservations.listForSleep(current.clientUuid).firstOrNull {
+                                it.wakeTimestamp == wakeAt && it.note == note && !it.withdrawn
+                            }
+                            if (match != null) return@run
+                            throw SleepStateChangedException()
                         }
-                        validateSleepInterval(RecordType.SLEEP, timestamp, null)
-                        updateRecordEntity(
-                            current.copy(
-                                timestamp = timestamp,
-                                updatedAt = System.currentTimeMillis(),
-                            ),
+                        if (timestamp != current.timestamp && actorCanManageRecord(current)) {
+                            RecordTime.intervalError(timestamp, wakeAt, nowMillis)?.let {
+                                throw IllegalArgumentException(it)
+                            }
+                            validateSleepInterval(RecordType.SLEEP, timestamp, null)
+                            updateRecordEntity(
+                                current.copy(timestamp = timestamp, updatedAt = System.currentTimeMillis()),
+                            )
+                        }
+                        wakeObservations.recordWakeInCallerTransaction(
+                            babyId = babyId,
+                            at = wakeAt,
+                            note = note,
+                            photoLocalPaths = photos,
+                            photoDigests = photoDigests,
+                            sleepRecordId = openId,
+                            clientUuid = clientUuid,
                         )
                     }
                 }
             }
-            wakeCoordinator.recordWake(
-                babyId = babyId,
-                at = wakeAt,
-                note = note,
-                photoLocalPaths = photos,
-                nowMillis = nowMillis,
-                sleepRecordId = openId,
-                clientUuid = clientUuid,
-            )
+            requestLocalSync()
             return openId
         }
         val ownerHint = expectedOpenSleepId?.let(PhotoAttachmentOwner::Record)
@@ -876,13 +904,15 @@ internal class RecordMutationCoordinator(
                                 updatedAt = now,
                             ),
                         )
-                        val photoMutation = photoAttachmentReconciler.reconcile(
-                            PhotoAttachmentOwner.Record(expectedOpenSleepId),
-                            photos,
-                            now,
-                            contentDigests,
-                        )
-                        expectedOpenSleepId to photoMutation.tombstonedClientUuids
+                        val photoMutation = photoLocalPaths?.let {
+                            photoAttachmentReconciler.reconcile(
+                                PhotoAttachmentOwner.Record(expectedOpenSleepId),
+                                it,
+                                now,
+                                contentDigests,
+                            )
+                        }
+                        expectedOpenSleepId to photoMutation?.tombstonedClientUuids.orEmpty()
                     }
                 }
             }
@@ -919,6 +949,18 @@ internal class RecordMutationCoordinator(
                     val replay = recordDao.getByClientUuid(clientUuid)
                     if (replay != null) {
                         check(replay.deletedAt == null) { "这次睡眠记录已删除，请重新填写" }
+                        require(replay.babyId == babyId && replay.type == RecordType.SLEEP.key) {
+                            "睡眠写入标识与既有记录冲突"
+                        }
+                        wakeObservations.recordWakeInCallerTransaction(
+                            babyId = babyId,
+                            at = endTimestamp,
+                            note = note,
+                            photoLocalPaths = emptyList(),
+                            photoDigests = emptyMap(),
+                            sleepRecordId = replay.id,
+                            clientUuid = wakeUuid,
+                        )
                         return@run replay.id
                     }
                     if (wakeObservations.findWakeShortcutTarget(babyId) != null) {
@@ -944,18 +986,20 @@ internal class RecordMutationCoordinator(
                         now,
                         contentDigests,
                     )
+                    wakeObservations.recordWakeInCallerTransaction(
+                        babyId = babyId,
+                        at = endTimestamp,
+                        note = note,
+                        photoLocalPaths = emptyList(),
+                        photoDigests = emptyMap(),
+                        sleepRecordId = inserted,
+                        clientUuid = wakeUuid,
+                    )
                     inserted
                 }
             }
         }
-        wakeObservations.recordWake(
-            babyId = babyId,
-            at = endTimestamp,
-            note = note,
-            nowMillis = nowMillis,
-            sleepRecordId = sleepId,
-            clientUuid = wakeUuid,
-        )
+        requestLocalSync()
         return sleepId
     }
 
@@ -1024,62 +1068,54 @@ internal class RecordMutationCoordinator(
         nowMillis: Long = System.currentTimeMillis(),
     ): Long {
         RecordTime.pointError(at, nowMillis)?.let { throw IllegalArgumentException(it) }
-        val wakeCoordinator = wakeObservations
-        requireActiveBaby(babyId)
-        val open = sleepMutationMutex.withLock {
-            transactionRunner.run {
-                wakeCoordinator.findWakeShortcutTarget(babyId)
-            }
-        }
-        if (open != null) {
-            validateWakeTimestamp(open.timestamp, at)?.let {
-                throw IllegalArgumentException(it)
-            }
-            wakeCoordinator.recordWake(
-                babyId = babyId,
-                at = at,
-                nowMillis = nowMillis,
-                sleepRecordId = open.id,
-            )
-            return open.id
-        }
-
-        // No open sleep: create SleepStart + WakeObservation (1-minute anomaly interval).
-        val start = at - 60_000L
-        validateWakeTimestamp(start, at)?.let { throw IllegalArgumentException(it) }
         val sleepId = sleepMutationMutex.withLock {
             transactionRunner.run {
-                val now = System.currentTimeMillis()
-                insertRecord(
-                    RecordEntity(
-                        clientUuid = newClientUuid(),
-                        babyId = babyId,
-                        type = RecordType.SLEEP.key,
-                        timestamp = start,
-                        endTimestamp = null,
-                        note = null,
-                        payloadJson = RecordPayloadCodec.encode(
-                            RecordPayloadDocument(
-                                type = RecordType.SLEEP,
-                                payload = SleepPayload(anomaly = true),
-                                schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+                requireActiveBaby(babyId)
+                val open = wakeObservations.findWakeShortcutTarget(babyId)
+                val id = if (open != null) {
+                    validateWakeTimestamp(open.timestamp, at)?.let {
+                        throw IllegalArgumentException(it)
+                    }
+                    open.id
+                } else {
+                    // The anomaly start and its closing observation are one fact.
+                    val start = at - 60_000L
+                    validateWakeTimestamp(start, at)?.let { throw IllegalArgumentException(it) }
+                    insertRecord(
+                        RecordEntity(
+                            clientUuid = newClientUuid(),
+                            babyId = babyId,
+                            type = RecordType.SLEEP.key,
+                            timestamp = start,
+                            endTimestamp = null,
+                            note = null,
+                            payloadJson = RecordPayloadCodec.encode(
+                                RecordPayloadDocument(
+                                    type = RecordType.SLEEP,
+                                    payload = SleepPayload(anomaly = true),
+                                    schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+                                ),
                             ),
+                            schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+                            updatedAt = System.currentTimeMillis(),
                         ),
-                        schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-                        updatedAt = now,
-                    ),
+                    )
+                }
+                wakeObservations.recordWakeInCallerTransaction(
+                    babyId = babyId,
+                    at = at,
+                    note = null,
+                    photoLocalPaths = emptyList(),
+                    photoDigests = emptyMap(),
+                    sleepRecordId = id,
+                    clientUuid = newClientUuid(),
                 )
+                id
             }
         }
-        wakeCoordinator.recordWake(
-            babyId = babyId,
-            at = at,
-            nowMillis = nowMillis,
-            sleepRecordId = sleepId,
-        )
+        requestLocalSync()
         return sleepId
     }
-
 
     internal suspend fun insertRecord(
         record: RecordEntity,

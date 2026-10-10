@@ -48,19 +48,19 @@ class MediaLocalPathGate @Inject constructor() {
             .distinct()
             .sorted()
             .toList()
-        return withLocksOrdered(ordered, 0, block)
-    }
-
-    private suspend fun <T> withLocksOrdered(
-        ordered: List<String>,
-        index: Int,
-        block: suspend () -> T,
-    ): T {
-        if (index >= ordered.size) return block()
-        return withLock(ordered[index]) {
-            withLocksOrdered(ordered, index + 1, block)
+        val acquired = ArrayList<Mutex>(ordered.size)
+        try {
+            for (key in ordered) {
+                val mutex = locks.getOrPut(key) { Mutex() }
+                mutex.lock()
+                acquired.add(mutex)
+            }
+            return block()
+        } finally {
+            for (index in acquired.indices.reversed()) acquired[index].unlock()
         }
     }
+
 }
 
 /**

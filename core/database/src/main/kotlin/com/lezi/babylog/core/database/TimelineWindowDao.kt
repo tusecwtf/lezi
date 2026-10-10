@@ -1,5 +1,6 @@
 package com.lezi.babylog.core.database
 
+import com.lezi.babylog.core.database.causal.AUTO_ALIGNED_RELATION_PREDICATE
 import androidx.room.Dao
 import androidx.room.Query
 import androidx.room.Transaction
@@ -10,7 +11,7 @@ import com.lezi.babylog.core.model.WakeObservationFact
 import com.lezi.babylog.core.model.isWakeShortcutTarget
 import com.lezi.babylog.core.database.causal.TERMINAL_RECEIPT_KEY_PREFIX
 import com.lezi.babylog.core.database.causal.TERMINAL_RECEIPT_KEY_RANGE_END
-import com.lezi.babylog.core.model.projectSleepInterval
+import com.lezi.babylog.core.model.projectSleepIntervalCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
@@ -27,7 +28,11 @@ internal const val RECORD_WAKE_INVALIDATION_SQL =
         "COALESCE((SELECT id FROM fulfillment_candidates WHERE id = -1), 0) + " +
         "COALESCE((SELECT rowid FROM conflict_summaries WHERE rowid = -1), 0)"
 
-/** Timeline snapshot invalidation. Keeps media_assets so plan and log photos refresh. */
+/**
+ * Timeline snapshot invalidation. Source metadata writes share their source-relation transaction.
+ * Do not subscribe to the entire transport journal: unrelated sync bookkeeping must not reload
+ * the complete window. Identity retirement clears relations alongside their auto markers.
+ */
 internal const val TIMELINE_WINDOW_INVALIDATION_SQL =
     "SELECT " +
         "COALESCE((SELECT id FROM records WHERE id = -1), 0) + " +
@@ -35,7 +40,30 @@ internal const val TIMELINE_WINDOW_INVALIDATION_SQL =
         "COALESCE((SELECT id FROM media_assets WHERE id = -1), 0) + " +
         "COALESCE((SELECT id FROM fulfillment_candidates WHERE id = -1), 0) + " +
         "COALESCE((SELECT id FROM wake_observations WHERE id = -1), 0) + " +
-        "COALESCE((SELECT rowid FROM conflict_summaries WHERE rowid = -1), 0)"
+        "COALESCE((SELECT rowid FROM conflict_summaries WHERE rowid = -1), 0) + " +
+        "COALESCE((SELECT rowid FROM source_relations WHERE rowid = -1), 0) + " +
+        "COALESCE((SELECT rowid FROM source_relation_members WHERE rowid = -1), 0)"
+
+/** One SQL candidate rule for record roots, wake evidence, root photos and source edges. */
+private const val RECORD_WINDOW_PREDICATE = """
+    r.babyId = :babyId AND r.deletedAt IS NULL
+    AND r.clientUuid NOT IN (
+        SELECT recordClientUuid FROM fulfillment_candidates
+        WHERE adoptionStatus = 'conflict_not_adopted' AND deletedAt IS NULL
+    )
+    AND r.timestamp < :endExclusive
+    AND (r.timestamp >= :startInclusive OR (r.type = 'sleep' AND COALESCE(
+        (SELECT selected.wakeTimestamp FROM wake_observations selected
+         WHERE selected.clientUuid = r.effectiveWakeObservationClientUuid
+           AND selected.sleepRecordClientUuid = r.clientUuid
+           AND selected.deletedAt IS NULL AND selected.withdrawn = 0
+           AND selected.wakeTimestamp >= r.timestamp),
+        (SELECT MIN(legal.wakeTimestamp) FROM wake_observations legal
+         WHERE legal.sleepRecordClientUuid = r.clientUuid
+           AND legal.deletedAt IS NULL AND legal.withdrawn = 0
+           AND legal.wakeTimestamp >= r.timestamp),
+        r.endTimestamp, 9223372036854775807) > :startInclusive))
+"""
 
 /** One immutable Room transaction used to assemble a timeline window. */
 data class TimelineWindowDbSnapshot(
@@ -43,6 +71,15 @@ data class TimelineWindowDbSnapshot(
     val carePlans: List<CarePlanEntity>,
     val media: List<MediaAssetEntity>,
     val unacceptedReceiptEpochs: Map<String, Long> = emptyMap(),
+    val sourceRelations: List<TimelineSourceRelation> = emptyList(),
+)
+
+/** Existing source facts relevant to roots in this window, read in the same transaction. */
+data class TimelineSourceRelation(
+    val recordClientUuid: String,
+    val displayClientUuid: String,
+    val role: String,
+    val autoAligned: Boolean,
 )
 
 data class TerminalReceiptKeyAndEpoch(
@@ -63,7 +100,7 @@ data class ProjectedRecordEntity(
  *
  * Implementations publish only projections assembled from one storage revision. Effective-wake
  * selection, provisional fallback, illegal/withdrawn filtering and open-Sleep arbitration are
- * owned by this seam's canonical [projectSleepInterval] projection.
+ * owned by this seam's canonical [projectSleepIntervalCancellable] projection.
  */
 interface RecordWakeProjectionDao {
     /** Wide probe kept for timeline snapshot consumers that include media. */
@@ -105,9 +142,9 @@ interface RecordWakeProjectionDao {
  * Timeline-specific extension of the shared Record + Wake projection.
  *
  * Record projection is exactly three batch reads. A complete timeline snapshot adds one plan
- * read, one log-media read, and one terminal-receipt journal read, for six reads after each
- * invalidation signal. The sixth read is the terminal-receipt journal. Statement count is
- * independent of row count.
+ * read, one log-media read, one terminal-receipt journal read and one bounded source-relation
+ * read, for seven reads after each invalidation signal. Source edges replace separate role/auto
+ * subscriptions and per-tick detail reads. Statement count is independent of row count.
  */
 @Dao
 interface TimelineWindowDao : RecordWakeProjectionDao {
@@ -129,34 +166,7 @@ interface TimelineWindowDao : RecordWakeProjectionDao {
 
     /** Conservative root candidates; [loadRecordProjection] applies canonical overlap afterward. */
     @Query(
-        """
-        SELECT * FROM records
-        WHERE babyId = :babyId
-          AND deletedAt IS NULL
-          AND clientUuid NOT IN (
-              SELECT recordClientUuid FROM fulfillment_candidates
-              WHERE adoptionStatus = 'conflict_not_adopted'
-                AND deletedAt IS NULL
-          )
-          AND timestamp < :endExclusive
-          AND (
-              timestamp >= :startInclusive
-              OR (
-                  type = 'sleep'
-                  AND (
-                      endTimestamp IS NULL
-                      OR endTimestamp > :startInclusive
-                      OR
-                      EXISTS (
-                          SELECT 1 FROM wake_observations w
-                          WHERE w.sleepRecordClientUuid = records.clientUuid
-                            AND w.wakeTimestamp > :startInclusive
-                      )
-                  )
-              )
-          )
-        ORDER BY timestamp DESC
-        """,
+        "SELECT r.* FROM records r WHERE " + RECORD_WINDOW_PREDICATE + " ORDER BY r.timestamp DESC",
     )
     suspend fun listRecordRoots(
         babyId: Long,
@@ -168,30 +178,7 @@ interface TimelineWindowDao : RecordWakeProjectionDao {
         """
         SELECT w.* FROM wake_observations w
         JOIN records r ON r.clientUuid = w.sleepRecordClientUuid
-        WHERE r.babyId = :babyId
-          AND r.deletedAt IS NULL
-          AND r.clientUuid NOT IN (
-              SELECT recordClientUuid FROM fulfillment_candidates
-              WHERE adoptionStatus = 'conflict_not_adopted'
-                AND deletedAt IS NULL
-          )
-          AND r.timestamp < :endExclusive
-          AND (
-              r.timestamp >= :startInclusive
-              OR (
-                  r.type = 'sleep'
-                  AND (
-                      r.endTimestamp IS NULL
-                      OR r.endTimestamp > :startInclusive
-                      OR
-                      EXISTS (
-                          SELECT 1 FROM wake_observations candidate
-                          WHERE candidate.sleepRecordClientUuid = r.clientUuid
-                            AND candidate.wakeTimestamp > :startInclusive
-                      )
-                  )
-              )
-          )
+        WHERE """ + RECORD_WINDOW_PREDICATE + """
         ORDER BY w.sleepRecordClientUuid, w.wakeTimestamp, w.clientUuid
         """,
     )
@@ -206,32 +193,7 @@ interface TimelineWindowDao : RecordWakeProjectionDao {
         SELECT m.* FROM media_assets m
         JOIN wake_observations w ON w.id = m.wakeObservationId
         JOIN records r ON r.clientUuid = w.sleepRecordClientUuid
-        WHERE m.kind = 'wake'
-          AND m.deletedAt IS NULL
-          AND r.babyId = :babyId
-          AND r.deletedAt IS NULL
-          AND r.clientUuid NOT IN (
-              SELECT recordClientUuid FROM fulfillment_candidates
-              WHERE adoptionStatus = 'conflict_not_adopted'
-                AND deletedAt IS NULL
-          )
-          AND r.timestamp < :endExclusive
-          AND (
-              r.timestamp >= :startInclusive
-              OR (
-                  r.type = 'sleep'
-                  AND (
-                      r.endTimestamp IS NULL
-                      OR r.endTimestamp > :startInclusive
-                      OR
-                      EXISTS (
-                          SELECT 1 FROM wake_observations candidate
-                          WHERE candidate.sleepRecordClientUuid = r.clientUuid
-                            AND candidate.wakeTimestamp > :startInclusive
-                      )
-                  )
-              )
-          )
+        WHERE m.kind = 'wake' AND m.deletedAt IS NULL AND """ + RECORD_WINDOW_PREDICATE + """
         ORDER BY m.wakeObservationId, m.id
         """,
     )
@@ -258,6 +220,12 @@ interface TimelineWindowDao : RecordWakeProjectionDao {
                    SELECT babyId FROM records WHERE clientUuid IN (:rootClientUuids)
                )
                AND endTimestamp IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM wake_observations legal
+                   WHERE legal.sleepRecordClientUuid = records.clientUuid
+                     AND legal.deletedAt IS NULL AND legal.withdrawn = 0
+                     AND legal.wakeTimestamp >= records.timestamp
+               )
             )
           )
         ORDER BY timestamp DESC
@@ -356,32 +324,8 @@ interface TimelineWindowDao : RecordWakeProjectionDao {
           AND media_assets.deletedAt IS NULL
           AND (
               EXISTS (
-                  SELECT 1 FROM records
-                  WHERE records.id = media_assets.recordId
-                    AND records.babyId = :babyId
-                    AND records.deletedAt IS NULL
-                    AND records.clientUuid NOT IN (
-                        SELECT recordClientUuid FROM fulfillment_candidates
-                        WHERE adoptionStatus = 'conflict_not_adopted'
-                          AND deletedAt IS NULL
-                    )
-                    AND records.timestamp < :recordEndExclusive
-                    AND (
-                        records.timestamp >= :recordStartInclusive
-                        OR (
-                            records.type = 'sleep'
-                            AND (
-                                records.endTimestamp IS NULL
-                                OR records.endTimestamp > :recordStartInclusive
-                                OR
-                                EXISTS (
-                                    SELECT 1 FROM wake_observations candidate
-                                    WHERE candidate.sleepRecordClientUuid = records.clientUuid
-                                      AND candidate.wakeTimestamp > :recordStartInclusive
-                                )
-                            )
-                        )
-                    )
+                  SELECT 1 FROM records r
+                  WHERE r.id = media_assets.recordId AND """ + RECORD_WINDOW_PREDICATE + """
               )
               OR EXISTS (
                   SELECT 1 FROM care_plans
@@ -403,8 +347,8 @@ interface TimelineWindowDao : RecordWakeProjectionDao {
     )
     suspend fun listActiveLogMedia(
         babyId: Long,
-        recordStartInclusive: Long,
-        recordEndExclusive: Long,
+        startInclusive: Long,
+        endExclusive: Long,
         planDayStart: Long,
         planDayEnd: Long,
         nowMillis: Long,
@@ -424,7 +368,8 @@ interface TimelineWindowDao : RecordWakeProjectionDao {
         context.ensureActive()
         val wakeMedia = listActiveWakeMedia(babyId, startInclusive, endExclusive)
         context.ensureActive()
-        return projectRecordRoots(records, wakes, wakeMedia).filter { projected ->
+        return projectRecordRoots(records, wakes, wakeMedia).filterIndexed { index, projected ->
+            if ((index and 127) == 0) context.ensureActive()
             projected.root.timestamp >= startInclusive ||
                 projected.sleepInterval?.let { interval ->
                     val projectedEnd = interval.endTimestamp
@@ -450,7 +395,10 @@ interface TimelineWindowDao : RecordWakeProjectionDao {
         context.ensureActive()
         val wakeMedia = listActiveWakeMediaForRoots(requested)
         context.ensureActive()
-        val projected = projectRecordRoots(records, wakes, wakeMedia).associateBy { it.root.clientUuid }
+        val projected = projectRecordRoots(records, wakes, wakeMedia).associateBy {
+            context.ensureActive()
+            it.root.clientUuid
+        }
         return requested.mapNotNull(projected::get)
     }
 
@@ -574,6 +522,24 @@ interface TimelineWindowDao : RecordWakeProjectionDao {
             "' AND journalKey < '" + TERMINAL_RECEIPT_KEY_RANGE_END + "'",
     )
     suspend fun listTerminalReceiptKeyAndEpochs(): List<TerminalReceiptKeyAndEpoch>
+    @Query(
+        """
+        SELECT member.recordClientUuid, relation.displayClientUuid, member.role,
+               (member.role = 'display' AND member.recordClientUuid = relation.displayClientUuid
+                AND (""" + AUTO_ALIGNED_RELATION_PREDICATE + """)) AS autoAligned
+        FROM source_relation_members member
+        JOIN source_relations relation ON relation.relationId = member.relationId
+        JOIN records r ON r.clientUuid = member.recordClientUuid
+        WHERE """ + RECORD_WINDOW_PREDICATE + """
+        ORDER BY relation.createdAt, member.recordClientUuid
+        """,
+    )
+    suspend fun listWindowSourceRelations(
+        babyId: Long,
+        startInclusive: Long,
+        endExclusive: Long,
+    ): List<TimelineSourceRelation>
+
     @Transaction
     suspend fun loadSnapshot(
         babyId: Long,
@@ -597,8 +563,8 @@ interface TimelineWindowDao : RecordWakeProjectionDao {
         context.ensureActive()
         val media = listActiveLogMedia(
             babyId = babyId,
-            recordStartInclusive = recordStartInclusive,
-            recordEndExclusive = recordEndExclusive,
+            startInclusive = recordStartInclusive,
+            endExclusive = recordEndExclusive,
             planDayStart = planDayStart,
             planDayEnd = planDayEnd,
             nowMillis = nowMillis,
@@ -611,72 +577,108 @@ interface TimelineWindowDao : RecordWakeProjectionDao {
             if (uuid != null) uuid to entry.contentEpoch else null
         }.toMap()
         context.ensureActive()
-        return TimelineWindowDbSnapshot(records, carePlans, media, unacceptedReceiptEpochs = unacceptedEpochs)
+        val sourceRelations = listWindowSourceRelations(babyId, recordStartInclusive, recordEndExclusive)
+        context.ensureActive()
+        return TimelineWindowDbSnapshot(
+            records, carePlans, media,
+            unacceptedReceiptEpochs = unacceptedEpochs,
+            sourceRelations = sourceRelations,
+        )
     }
 }
 
 /** Root cap shared by explicit-root projection and the latest-root fetch. */
 const val MAX_EXPLICIT_PROJECTION_ROOTS = 64
 
-private fun projectRecordRoots(
+private suspend fun projectRecordRoots(
     records: List<RecordEntity>,
     wakes: List<WakeObservationEntity>,
     wakeMedia: List<MediaAssetEntity>,
 ): List<ProjectedRecordEntity> {
-    val wakesBySleep = wakes.groupBy(WakeObservationEntity::sleepRecordClientUuid)
-    val wakeMediaByObservation = wakeMedia.groupBy { requireNotNull(it.wakeObservationId) }
-    val initialIntervals = records.asSequence()
-        .filter { it.type == RecordType.SLEEP.key }
-        .associate { root ->
-            root.clientUuid to projectSleep(root, wakesBySleep[root.clientUuid].orEmpty(), emptyList())
+    val context = currentCoroutineContext()
+    var visited = 0
+    fun checkWork() {
+        if ((visited++ and 127) == 0) context.ensureActive()
+    }
+    val wakesBySleep = linkedMapOf<String, MutableList<WakeObservationEntity>>()
+    for (wake in wakes) {
+        checkWork()
+        wakesBySleep.getOrPut(wake.sleepRecordClientUuid) { mutableListOf() }.add(wake)
+    }
+    val wakeMediaByObservation = linkedMapOf<Long, MutableList<MediaAssetEntity>>()
+    for (media in wakeMedia) {
+        checkWork()
+        wakeMediaByObservation.getOrPut(requireNotNull(media.wakeObservationId)) { mutableListOf() }.add(media)
+    }
+    val initialIntervals = linkedMapOf<String, SleepIntervalProjection>()
+    for (root in records) {
+        checkWork()
+        if (root.type == RecordType.SLEEP.key) {
+            initialIntervals[root.clientUuid] = projectSleep(root, wakesBySleep[root.clientUuid].orEmpty(), emptyList())
         }
-    val openPeerStarts = records.asSequence()
-        .filter { root -> initialIntervals[root.clientUuid]?.isOpen == true }
-        .map { it.clientUuid to it.timestamp }
-        .toList()
-    val latestOpenStart = openPeerStarts.maxWithOrNull(
-        compareBy<Pair<String, Long>> { it.second }.thenBy { it.first },
-    )
+    }
+    var latestOpenStart: Pair<String, Long>? = null
+    val order = compareBy<Pair<String, Long>> { it.second }.thenBy { it.first }
+    for (root in records) {
+        checkWork()
+        if (initialIntervals[root.clientUuid]?.isOpen == true) {
+            val candidate = root.clientUuid to root.timestamp
+            val previous = latestOpenStart
+            if (previous == null || order.compare(candidate, previous) > 0) latestOpenStart = candidate
+        }
+    }
     return records.map { root ->
+        checkWork()
         val observations = wakesBySleep[root.clientUuid].orEmpty()
         val initialInterval = initialIntervals[root.clientUuid]
+        val projectedMedia = buildList {
+            for (observation in observations) {
+                checkWork()
+                for (media in wakeMediaByObservation[observation.id].orEmpty()) {
+                    checkWork()
+                    add(media)
+                }
+            }
+        }
         ProjectedRecordEntity(
             root = root,
             sleepInterval = if (initialInterval?.isOpen == true) {
                 projectSleep(
                     root = root,
                     observations = observations,
-                    peerOpenSleepStarts = listOfNotNull(
-                        latestOpenStart?.takeIf { it.first != root.clientUuid },
-                    ),
+                    peerOpenSleepStarts = listOfNotNull(latestOpenStart?.takeIf { it.first != root.clientUuid }),
                 )
             } else {
                 initialInterval
             },
             wakeObservations = observations,
-            wakeMedia = observations.flatMap { wakeMediaByObservation[it.id].orEmpty() },
+            wakeMedia = projectedMedia,
         )
     }
 }
 
-private fun projectSleep(
+private suspend fun projectSleep(
     root: RecordEntity,
     observations: List<WakeObservationEntity>,
     peerOpenSleepStarts: Collection<Pair<String, Long>>,
-): SleepIntervalProjection = projectSleepInterval(
-    sleepClientUuid = root.clientUuid,
-    startTimestamp = root.timestamp,
-    effectiveWakeObservationClientUuid = root.effectiveWakeObservationClientUuid,
-    observations = observations.map { wake ->
-        WakeObservationFact(
-            clientUuid = wake.clientUuid,
-            wakeTimestamp = wake.wakeTimestamp,
-            withdrawn = wake.withdrawn,
-            observerMembershipId = wake.observerMembershipId,
-            note = wake.note,
-            deleted = wake.deletedAt != null,
-        )
-    },
-    legacyEndTimestamp = root.endTimestamp,
-    peerOpenSleepStarts = peerOpenSleepStarts,
-)
+): SleepIntervalProjection {
+    val context = currentCoroutineContext()
+    return projectSleepIntervalCancellable(
+        sleepClientUuid = root.clientUuid,
+        startTimestamp = root.timestamp,
+        effectiveWakeObservationClientUuid = root.effectiveWakeObservationClientUuid,
+        observations = observations.mapIndexed { index, wake ->
+            if ((index and 127) == 0) context.ensureActive()
+            WakeObservationFact(
+                clientUuid = wake.clientUuid,
+                wakeTimestamp = wake.wakeTimestamp,
+                withdrawn = wake.withdrawn,
+                observerMembershipId = wake.observerMembershipId,
+                note = wake.note,
+                deleted = wake.deletedAt != null,
+            )
+        },
+        legacyEndTimestamp = root.endTimestamp,
+        peerOpenSleepStarts = peerOpenSleepStarts,
+    )
+}

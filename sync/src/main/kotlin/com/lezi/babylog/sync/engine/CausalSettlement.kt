@@ -1,5 +1,7 @@
 package com.lezi.babylog.sync.engine
 
+import com.lezi.babylog.sync.media.parseCanonicalMediaMime
+import com.lezi.babylog.sync.media.requireCanonicalMediaMime
 import com.lezi.babylog.core.common.MediaContentDigest
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.CarePlanDao
@@ -22,7 +24,7 @@ import com.lezi.babylog.core.database.causal.WakeObservationEntity
 import com.lezi.babylog.core.database.causal.frozenMediaSpoolCacheKey
 import com.lezi.babylog.core.model.FulfillmentAuthority
 import com.lezi.babylog.core.model.FulfillmentCandidateEvidence
-import com.lezi.babylog.core.model.isNextFeedPlanNote
+import com.lezi.babylog.core.model.carePlanAllowsIntentOnlyFeed
 import com.lezi.babylog.core.database.causal.TerminalRejectionReceipt
 import com.lezi.babylog.sync.backend.AuthorityProofException
 import com.lezi.babylog.sync.backend.CausalCommitBatchResult
@@ -43,7 +45,9 @@ import com.lezi.babylog.sync.media.ImmutableMediaSpoolItem
 import com.lezi.babylog.sync.media.ImmutableMediaSpoolRecovery
 import com.lezi.babylog.sync.media.ImmutableMediaSpoolSource
 import com.lezi.babylog.sync.media.CausalMediaPolicy
+import com.lezi.babylog.sync.media.PublishedMediaIdentity
 import com.lezi.babylog.sync.media.encodeImmutableMediaSpoolGroup
+import com.lezi.babylog.sync.session.receiptFor
 import com.lezi.babylog.sync.session.SyncSession
 import java.util.UUID
 import kotlinx.serialization.json.Json
@@ -57,6 +61,8 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
@@ -65,6 +71,11 @@ import kotlinx.serialization.json.put
 
 /** Bounded concurrent preimage PUTs; matches the download side's media-GET parallelism. */
 private const val CAUSAL_PREIMAGE_UPLOAD_PARALLELISM = 2
+
+/** A legacy receipt is not evidence that its local import file is canonical. */
+internal class PublishedMediaAuthorityRequiredException : IllegalStateException(
+    "已发布照片需要从家庭服务器校验原始内容，请刷新同步后重试",
+)
 
 internal val CAUSAL_ROOT_TYPES = setOf(
     "baby",
@@ -111,6 +122,11 @@ private data class CausalMediaRevision(
     val babyId: Long?,
     val kind: String,
     val updatedAt: Long,
+    val sha256: String?,
+    val byteSize: Long,
+    val mime: String?,
+    val width: Int?,
+    val height: Int?,
 )
 
 private fun ImmutableMediaSpoolItem.toCausalMediaItem() = CausalMediaItem(
@@ -142,7 +158,9 @@ internal class CausalSettlement(
     private val conflictSummaryDao: ConflictSummaryDao,
     private val conflictSnapshotCacheDao: ConflictSnapshotCacheDao? = null,
     private val immutableMediaSpool: ImmutableMediaSpool,
+    private val mediaFiles: com.lezi.babylog.sync.media.SyncMediaFileStore,
     private val transactionRunner: DatabaseTransactionRunner,
+    private val cleanupUnownedMediaPaths: suspend (Set<String>) -> Unit,
     private val requireRemoteAllowed: suspend (SyncSession) -> Unit,
 ) {
     private val mediaSettlementJournal = conflictSnapshotCacheDao?.let { cache ->
@@ -155,6 +173,7 @@ internal class CausalSettlement(
      */
     suspend fun recoverImmutableMediaSpool(): Set<String> {
         val cache = conflictSnapshotCacheDao ?: return emptySet()
+        recoverMaterializedMediaPaths()
         mediaSettlementJournal?.finishPendingCleanups()
         val roomGroups = cache.listFrozenMediaSpoolManifests().map { row ->
             val group = decodeFrozenMediaSpoolManifest(row.payloadJson)
@@ -174,11 +193,23 @@ internal class CausalSettlement(
             customItemDao.listPendingSync().mapNotNullTo(this) { it.mutationId }
             wakeObservationDao.listPendingSync().mapNotNullTo(this) { it.mutationId }
         }
-        val recovered = immutableMediaSpool.recoverAndSweep(
-            roomGroupsByMutation.keys + pendingMutationIds,
-        )
+        val terminalSeals = com.lezi.babylog.sync.disasterrecovery.terminalSealsForSpoolRecovery(cache)
+        val deletingIds = terminalSeals.filter { it.deleting }.mapTo(hashSetOf()) { it.group.mutationId }
+        val retainedIds = roomGroupsByMutation.keys + pendingMutationIds + terminalSeals.map { it.group.mutationId }
+        val recovered = if (deletingIds.isEmpty()) immutableMediaSpool.recoverAndSweep(retainedIds) else {
+            requireNotNull(immutableMediaSpool as? com.lezi.babylog.sync.media.TerminalRetirementSpool) {
+                "terminal spool deleting owner is unavailable"
+            }.recoverAndSweepRetainingOpaque(retainedIds, terminalSeals.filter { it.deleting }.map { it.group })
+        }
+        val quarantineIds = cache.getTransportJournal(
+            com.lezi.babylog.sync.disasterrecovery.RestoreArtifactRetirement.KEY,
+        )?.payloadJson?.let { (Json.parseToJsonElement(it).jsonObject["groups"] as? JsonArray)
+            ?.map { value -> value.jsonPrimitive.content }?.toSet() }.orEmpty()
         roomGroupsByMutation.forEach { (mutationId, manifest) ->
-            require((recovered[mutationId] as? ImmutableMediaSpoolRecovery.Complete)?.group == manifest) {
+            if (mutationId in deletingIds) return@forEach
+            val recoveredManifest = if (mutationId in quarantineIds) recovered[mutationId]?.group else
+                (recovered[mutationId] as? ImmutableMediaSpoolRecovery.Complete)?.group
+            require(recoveredManifest == manifest) {
                 "Room media spool manifest lost its immutable sidecar evidence"
             }
         }
@@ -191,7 +222,7 @@ internal class CausalSettlement(
         session: SyncSession,
         candidates: List<PublishCandidate>,
     ) {
-        healInvalidEffectiveWakes()
+        healInvalidEffectiveWakes(session)
         abandonUnpublishableDependents()
         val causalCandidates = candidates.filter { it.entityType in CAUSAL_ROOT_TYPES || it.entityType == "media" }
         if (causalCandidates.isEmpty()) return
@@ -232,7 +263,7 @@ internal class CausalSettlement(
         require(frozen.all { it.durableMediaCommitUnknown && it.mutation.media.isNotEmpty() })
         requireRemoteAllowed(session)
         val commit = try {
-            backend.causalCommit(session, frozen.map(FrozenCausalUnit::mutation))
+            commitWithMissingPreimageRecovery(session, frozen)
         } catch (failure: Throwable) {
             val rejected = failure as? CausalCommitRejectedException
                 ?: (failure.cause as? CausalCommitRejectedException)
@@ -254,6 +285,7 @@ internal class CausalSettlement(
                     unit,
                     byMutation.getValue(unit.mutation.mutationId),
                     commit.generation,
+                    session,
                 )
             }
         }
@@ -265,6 +297,59 @@ internal class CausalSettlement(
                 mediaSettlementJournal?.finishCleanup(unit.mutation.mutationId)
             }
         }
+    }
+
+    /**
+     * A receipt proves a past PUT, not permanent staging retention. Always ask the
+     * idempotent commit first: a lost successful response must never trigger a new
+     * mutation or a source read. Only an explicit missing/expired preimage verdict
+     * permits restoring those exact immutable bytes and one bounded commit replay.
+     * No journal state or historical receipt is rewritten during this recovery.
+     */
+    private suspend fun commitWithMissingPreimageRecovery(
+        session: SyncSession,
+        frozen: List<FrozenCausalUnit>,
+    ): CausalCommitBatchResult {
+        val mutations = frozen.map(FrozenCausalUnit::mutation)
+        try {
+            return backend.causalCommit(session, mutations)
+        } catch (failure: Throwable) {
+            val rejected = failure as? CausalCommitRejectedException
+                ?: (failure.cause as? CausalCommitRejectedException)
+                ?: throw failure
+            if (rejected.code !in setOf("missing_media_bytes", "media_preimage_expired")) {
+                throw failure
+            }
+            val repair = frozen.filter { unit ->
+                unit.mutation.media.isNotEmpty() &&
+                    (rejected.mutationId == null || unit.mutation.mutationId == rejected.mutationId)
+            }
+            if (repair.isEmpty()) throw failure
+            val cache = requireNotNull(conflictSnapshotCacheDao)
+            for (unit in repair) {
+                val group = decodeFrozenMediaSpoolManifest(
+                    requireNotNull(cache.getFrozenMediaSpoolManifest(unit.mutation.mutationId)).payloadJson,
+                )
+                require(group.items.map(ImmutableMediaSpoolItem::toCausalMediaItem) == unit.mutation.media) {
+                    "media recovery cannot change the frozen manifest"
+                }
+                for (item in group.items) {
+                    requireRemoteAllowed(session)
+                    val receipt = backend.putCausalMediaPreimage(
+                        session = session,
+                        mediaUuid = item.mediaUuid,
+                        source = immutableMediaSpool.open(unit.mutation.mutationId, item),
+                        sha256 = item.sha256,
+                    )
+                    require(receipt.mediaUuid == item.mediaUuid &&
+                        receipt.sha256 == item.sha256 && receipt.byteSize == item.byteSize &&
+                        receipt.status in setOf("staged", "consumed") && receipt.expiresAtEpochSeconds > 0L
+                    ) { "restaged receipt does not bind the immutable media identity" }
+                }
+            }
+        }
+        requireRemoteAllowed(session)
+        return backend.causalCommit(session, mutations)
     }
 
     private suspend fun commitFirst(
@@ -293,7 +378,7 @@ internal class CausalSettlement(
         }
         requireRemoteAllowed(session)
         val commit = try {
-            backend.causalCommit(session, frozen.map(FrozenCausalUnit::mutation))
+            commitWithMissingPreimageRecovery(session, frozen)
         } catch (failure: Throwable) {
             val rejected = failure as? CausalCommitRejectedException
                 ?: (failure.cause as? CausalCommitRejectedException)
@@ -315,6 +400,7 @@ internal class CausalSettlement(
                     unit,
                     commitByMutation.getValue(unit.mutation.mutationId),
                     commit.generation,
+                    session,
                 )
             }
         }
@@ -333,6 +419,7 @@ internal class CausalSettlement(
         unit: FrozenCausalUnit,
         result: CausalCommitUnitResult,
         authorityGeneration: String,
+        session: SyncSession,
     ) {
         require(
             (unit.durableCommitFirst || unit.durableMediaCommitUnknown) &&
@@ -344,6 +431,7 @@ internal class CausalSettlement(
             "commit-first settlement requires durable envelope storage"
         }
         val stableVersion = result.stableVersionId?.takeIf { it.isNotBlank() }
+        val matchesBoundContent = boundFactsStillCurrent(unit, session)
         when (result.status) {
             CausalCommitStatus.ACCEPTED,
             CausalCommitStatus.MERGED,
@@ -352,10 +440,19 @@ internal class CausalSettlement(
                     authorityGeneration,
                     IllegalArgumentException("accepted/merged 缺少 stable_version_id"),
                 )
-                val settled = settleCommitFirstAcceptedOrMerged(unit, version) ?: return
+                val settled = settleCommitFirstAcceptedOrMerged(unit, version, matchesBoundContent) ?: return
+                applyValidatedStableIdentityRedaction(unit, result)
                 if (settled == CommitFirstSettlementEpoch.CurrentEpoch) {
                     applyStableProjectionAfterAck(unit, result)
                     settleMigratedMediaCandidates(unit)
+                    for (accepted in result.stableMedia) {
+                        val currentMedia = mediaDao.getByClientUuid(accepted.mediaUuid) ?: continue
+                        if (currentMedia.deletedAt == null && currentMedia.sha256 == accepted.sha256 &&
+                            currentMedia.byteSize == accepted.byteSize && currentMedia.mime == accepted.mime &&
+                            currentMedia.width?.toLong() == accepted.width && currentMedia.height?.toLong() == accepted.height) {
+                            mediaDao.update(currentMedia.copy(remoteUri = session.receiptFor(accepted.mediaUuid)))
+                        }
+                    }
                 }
                 settleCommitFirstEvidence(unit, result, cache)
             }
@@ -379,7 +476,9 @@ internal class CausalSettlement(
                     conflictId = conflictId,
                     branchVersionId = branchVersionId,
                     stableBaseVersion = version,
+                    matchesBoundContent = matchesBoundContent,
                 ) ?: return
+                applyValidatedStableIdentityRedaction(unit, result)
                 if (settled == CommitFirstSettlementEpoch.CurrentEpoch) {
                     applyStableProjectionAfterAck(unit, result)
                     settleMigratedMediaCandidates(unit)
@@ -403,6 +502,38 @@ internal class CausalSettlement(
         }
     }
 
+    /** Full proof and the root/mutation CAS already passed; care facts may belong to a newer edit. */
+    private suspend fun applyValidatedStableIdentityRedaction(
+        unit: FrozenCausalUnit,
+        result: CausalCommitUnitResult,
+    ) {
+        val type = unit.mutation.entityType
+        val uuid = unit.mutation.clientUuid
+        val root = Json.parseToJsonElement(result.stableRootJson).jsonObject
+        val key = if (type == "wake_observation") "observer_membership_id" else "created_by_membership_id"
+        if (root[key] !== JsonNull) return
+        when (type) {
+            "record" -> recordDao.getByClientUuid(uuid)?.let { row ->
+                if (row.createdByMembershipId.isNotEmpty()) recordDao.update(row.copy(createdByMembershipId = ""))
+            }
+            "care_plan" -> carePlanDao.getByClientUuid(uuid)?.let { row ->
+                if (row.createdByMembershipId.isNotEmpty()) carePlanDao.update(row.copy(createdByMembershipId = ""))
+            }
+            "custom_item" -> customItemDao.getByClientUuid(uuid)?.let { row ->
+                if (row.createdByMembershipId.isNotEmpty()) customItemDao.update(row.copy(createdByMembershipId = ""))
+            }
+            "wake_observation" -> wakeObservationDao.getByClientUuid(uuid)?.let { row ->
+                if (row.observerMembershipId.isNotEmpty()) wakeObservationDao.update(row.copy(observerMembershipId = ""))
+            }
+        }
+        // Evidence invalidation is independent of stable care-version IDs and content epoch.
+        val conflictIds = conflictSummaryDao.listForRoot(type, uuid).mapTo(mutableSetOf()) { it.conflictId }
+        if (result.status == CausalCommitStatus.BRANCHED) {
+            result.conflictId?.let(conflictIds::add)
+        }
+        conflictIds.forEach { conflictSnapshotCacheDao?.deleteConflictState(it) }
+    }
+
     /** One terminal owner for empty roots and roots with a durable media journal. */
     private suspend fun settleCommitFirstEvidence(
         unit: FrozenCausalUnit,
@@ -417,50 +548,98 @@ internal class CausalSettlement(
     }
 
     /** H21-H23 share settlement for Record, Baby, CarePlan, and Wake media. */
+    /** Caller holds the terminal Room transaction; no mutable snapshot can stand in for bound evidence. */
+    private suspend fun boundFactsStillCurrent(unit: FrozenCausalUnit, session: SyncSession): Boolean {
+        val local = loadCommitFirstLocal(unit.mutation.entityType, unit.mutation.clientUuid) ?: return false
+        if (local.deleted != unit.mutation.deleted) return false
+        val media = loadActiveCausalMedia(unit.mutation.entityType, unit.mutation.clientUuid)
+        if (unit.mutation.media.isEmpty()) {
+            return media.isEmpty() && buildCausalRootJson(unit.mutation.entityType, unit.mutation.clientUuid)
+                ?.let { Json.parseToJsonElement(it) } == Json.parseToJsonElement(unit.mutation.rootJson)
+        }
+        val row = conflictSnapshotCacheDao?.getTransportJournal("media-freeze-capture-v1:${unit.mutation.mutationId}")
+            ?: return false // Missing original local revision is conservative: advance base, retain local intent.
+        val capture = Json.parseToJsonElement(row.payloadJson).jsonObject
+        require(capture.keys == setOf("format", "source", "current") && capture["format"]?.jsonPrimitive?.content == "1")
+        val recorded = requireNotNull(capture["current"] as? JsonObject)
+        require(recorded["type"]?.jsonPrimitive?.content == unit.mutation.entityType &&
+            recorded["uuid"]?.jsonPrimitive?.content == unit.mutation.clientUuid &&
+            recorded["root"] == Json.parseToJsonElement(unit.mutation.rootJson) &&
+            recorded["base"] == (unit.mutation.baseVersion?.let(::JsonPrimitive) ?: JsonNull)) {
+            "bound media capture does not identify its immutable request"
+        }
+        val boundMedia = (recorded["media"] as? JsonArray)?.map { value -> value.jsonObject.let { item ->
+            CausalMediaItem(
+                mediaUuid = item.getValue("uuid").jsonPrimitive.content,
+                role = requireNotNull(CausalMediaPolicy.roleForEntityType(unit.mutation.entityType)).wireName,
+                sha256 = item.getValue("sha").jsonPrimitive.content,
+                byteSize = requireNotNull(item.getValue("size").jsonPrimitive.longOrNull),
+                mime = parseCanonicalMediaMime(item["mime"]),
+                width = item["width"]?.jsonPrimitive?.longOrNull,
+                height = item["height"]?.jsonPrimitive?.longOrNull,
+            )
+        } } ?: error("bound media capture lacks revisions")
+        require(boundMedia == unit.mutation.media) { "bound media capture differs from immutable manifest" }
+        // f5 source evidence predates this redundant deleted flag; the immutable wire envelope
+        // already owns it. This compatibility read never infers newer local deletion state.
+        val expected = if (recorded["deleted"] == null) JsonObject(recorded + ("deleted" to JsonPrimitive(unit.mutation.deleted))) else recorded
+        return expected == mediaCaptureEvidence(session.mediaAuthorityKey(), unit.mutation.entityType,
+            unit.mutation.clientUuid, media)
+    }
+
     private suspend fun settleMigratedMediaCandidates(unit: FrozenCausalUnit) {
         if (unit.mutation.entityType !in MEDIA_COMMIT_FIRST_ROOT_TYPES) return
         unit.candidates.filter { it.entityType == "media" }.forEach { media ->
             mediaDao.markSynced(media.clientUuid, media.updatedAt)
         }
-        // Wake photos are never standalone candidates; clear the frozen snapshot.
-        unit.mediaSnapshot.forEach { media ->
-            mediaDao.markSynced(media.clientUuid, media.updatedAt)
+        // This is called only after the terminal transaction proves the originally bound
+        // complete fact still owns the current rows. Replays never sample a new media snapshot.
+        unit.mutation.media.forEach { media ->
+            mediaDao.getByClientUuid(media.mediaUuid)?.let { current ->
+                mediaDao.markSynced(current.clientUuid, current.updatedAt)
+            }
         }
     }
 
     private suspend fun settleCommitFirstAcceptedOrMerged(
         unit: FrozenCausalUnit,
         stableBaseVersion: String,
+        matchesBoundContent: Boolean,
     ): CommitFirstSettlementEpoch? = when (unit.mutation.entityType) {
         "baby" -> babyDao.settleCommitFirstAcceptedOrMerged(
             unit.mutation.clientUuid,
             unit.mutation.mutationId,
             unit.contentEpoch,
             stableBaseVersion,
+            matchesBoundContent,
         )
         "record" -> recordDao.settleCommitFirstAcceptedOrMerged(
             unit.mutation.clientUuid,
             unit.mutation.mutationId,
             unit.contentEpoch,
             stableBaseVersion,
+            matchesBoundContent,
         )
         "care_plan" -> carePlanDao.settleCommitFirstAcceptedOrMerged(
             unit.mutation.clientUuid,
             unit.mutation.mutationId,
             unit.contentEpoch,
             stableBaseVersion,
+            matchesBoundContent,
         )
         "custom_item" -> customItemDao.settleCommitFirstAcceptedOrMerged(
             unit.mutation.clientUuid,
             unit.mutation.mutationId,
             unit.contentEpoch,
             stableBaseVersion,
+            matchesBoundContent,
         )
         "wake_observation" -> wakeObservationDao.settleCommitFirstAcceptedOrMerged(
             unit.mutation.clientUuid,
             unit.mutation.mutationId,
             unit.contentEpoch,
             stableBaseVersion,
+            matchesBoundContent,
         )
         else -> null
     }
@@ -470,6 +649,7 @@ internal class CausalSettlement(
         conflictId: String,
         branchVersionId: String,
         stableBaseVersion: String,
+        matchesBoundContent: Boolean,
     ): CommitFirstSettlementEpoch? = when (unit.mutation.entityType) {
         "baby" -> babyDao.settleCommitFirstBranched(
             unit.mutation.clientUuid,
@@ -478,6 +658,7 @@ internal class CausalSettlement(
             conflictId,
             branchVersionId,
             stableBaseVersion,
+            matchesBoundContent,
         )
         "record" -> recordDao.settleCommitFirstBranched(
             unit.mutation.clientUuid,
@@ -486,6 +667,7 @@ internal class CausalSettlement(
             conflictId,
             branchVersionId,
             stableBaseVersion,
+            matchesBoundContent,
         )
         "care_plan" -> carePlanDao.settleCommitFirstBranched(
             unit.mutation.clientUuid,
@@ -494,6 +676,7 @@ internal class CausalSettlement(
             conflictId,
             branchVersionId,
             stableBaseVersion,
+            matchesBoundContent,
         )
         "custom_item" -> customItemDao.settleCommitFirstBranched(
             unit.mutation.clientUuid,
@@ -502,6 +685,7 @@ internal class CausalSettlement(
             conflictId,
             branchVersionId,
             stableBaseVersion,
+            matchesBoundContent,
         )
         "wake_observation" -> wakeObservationDao.settleCommitFirstBranched(
             unit.mutation.clientUuid,
@@ -510,6 +694,7 @@ internal class CausalSettlement(
             conflictId,
             branchVersionId,
             stableBaseVersion,
+            matchesBoundContent,
         )
         else -> null
     }
@@ -691,16 +876,19 @@ internal class CausalSettlement(
         clientUuid: String,
         summary: com.lezi.babylog.sync.backend.PullConflictSummary?,
         updatedAt: Long,
-    ) {
+    ): Set<String> {
         val prior = conflictSummaryDao.listForRoot(entityType, clientUuid)
         val open = summary?.takeIfOpenBranches()
+        val retired = mediaSettlementJournal?.retireResolvedBranches(
+            entityType, clientUuid, open?.conflictId, open?.branchVersionIds.orEmpty().toSet(),
+        ).orEmpty()
         if (open == null) {
             prior.forEach { stale ->
                 conflictSnapshotCacheDao?.deleteConflictState(stale.conflictId)
                 conflictSummaryDao.delete(stale.conflictId)
             }
             applyOpenConflictId(entityType, clientUuid, openConflictId = null)
-            return
+            return retired
         }
         prior.filter { it.conflictId != open.conflictId }.forEach { stale ->
             conflictSnapshotCacheDao?.deleteConflictState(stale.conflictId)
@@ -720,6 +908,11 @@ internal class CausalSettlement(
             ),
         )
         applyOpenConflictId(entityType, clientUuid, open.conflictId)
+        return retired
+    }
+
+    suspend fun sweepRetiredMedia(retiredMutationIds: Set<String>) {
+        mediaSettlementJournal?.sweepRetired(retiredMutationIds)
     }
 
     private suspend fun applyOpenConflictId(
@@ -809,7 +1002,7 @@ internal class CausalSettlement(
             for (baby in localBabies) {
                 val subtree = remaining.values.filter { candidateBelongsToBaby(candidate = it, babyId = baby.id) }
                 if (subtree.isEmpty()) continue
-                freezeRoot("baby", baby.clientUuid, baby.updatedAt, subtree, session.role)?.let { units += it }
+                freezeRoot("baby", baby.clientUuid, baby.updatedAt, subtree, session.role, session.mediaAuthorityKey())?.let { units += it }
             }
         }
 
@@ -824,6 +1017,7 @@ internal class CausalSettlement(
                 contentEpoch = rootRow.updatedAt,
                 candidates = listOf(rootRow) + mediaRows,
                 role = session.role,
+                authorityKey = session.mediaAuthorityKey(),
             )?.let { units += it }
             remaining.remove(rootRow.planId)
             mediaRows.forEach { remaining.remove(it.planId) }
@@ -842,7 +1036,7 @@ internal class CausalSettlement(
                 "wake_observation" -> resolveWakeById(rowId)?.let { it.clientUuid to it.updatedAt }
                 else -> null
             } ?: continue
-            freezeRoot(entityType, resolvedUuid, rootEpoch, mediaRows, session.role)?.let { units += it }
+            freezeRoot(entityType, resolvedUuid, rootEpoch, mediaRows, session.role, session.mediaAuthorityKey())?.let { units += it }
         }
         return units.sortedBy { unit ->
             ROOT_DEPENDENCY_PRIORITY.getValue(unit.mutation.entityType)
@@ -855,6 +1049,7 @@ internal class CausalSettlement(
         contentEpoch: Long,
         candidates: List<PublishCandidate>,
         role: FamilyRole = FamilyRole.Member,
+        authorityKey: String,
     ): FrozenCausalUnit? {
         mediaSettlementJournal?.restoreUnsettled(entityType, clientUuid)?.let { journal ->
             val terminalReceipt = conflictSnapshotCacheDao?.getTerminalReceipt(entityType, clientUuid)
@@ -864,27 +1059,27 @@ internal class CausalSettlement(
                 if (current.contentEpoch == terminalReceipt.contentEpoch) {
                     return null
                 } else if (current.contentEpoch > terminalReceipt.contentEpoch) {
-                    conflictSnapshotCacheDao?.deleteTerminalReceipt(entityType, clientUuid)
-                    mediaSettlementJournal.clearBinding(entityType, clientUuid)
+                    transactionRunner.run {
+                        conflictSnapshotCacheDao?.deleteTerminalReceipt(entityType, clientUuid)
+                        mediaSettlementJournal.clearBinding(entityType, clientUuid)
+                    }
+                    // The rejected envelope is retired. Freeze the newer Room fact below;
+                    // never return a unit whose durable media manifest was just removed.
+                    return@let
                 }
             }
             require(
                 current.syncDirty && current.contentEpoch >= journal.binding.contentEpoch,
             ) { "durable media commit no longer owns a pending fact" }
-            val sameFactEpoch = current.contentEpoch == journal.binding.contentEpoch
-            if (journal.phase == CausalMediaSettlementPhase.Pending && !sameFactEpoch) {
-                return null
-            }
+            // A partial prepare already owns an immutable transport envelope. Finish that
+            // intent before publishing a later Room epoch, just as unknown commits replay.
+            // Existing settlement CAS advances only the base of the superseding fact.
             return FrozenCausalUnit(
                 mutation = journal.mutation,
                 contentEpoch = journal.binding.contentEpoch,
                 contentHash = journal.binding.requestHash,
-                candidates = if (sameFactEpoch) candidates else emptyList(),
-                mediaSnapshot = if (sameFactEpoch) {
-                    loadActiveCausalMedia(entityType, clientUuid).toCausalMediaRevisions()
-                } else {
-                    emptyList()
-                },
+                candidates = emptyList(),
+                mediaSnapshot = emptyList(),
                 durableMediaCommitUnknown =
                     journal.phase == CausalMediaSettlementPhase.CommitUnknown,
                 durableCommitFirst =
@@ -977,6 +1172,7 @@ internal class CausalSettlement(
             clientUuid = clientUuid,
             mutationId = effectiveMutationId,
             contentEpoch = contentEpoch,
+            authorityKey = authorityKey,
         ) ?: return null
         val mutation = CausalMutationUnit(
             mutationId = effectiveMutationId,
@@ -988,7 +1184,11 @@ internal class CausalSettlement(
             deleted = state.deleted,
         )
         val contentHash = causalMutationContentHash(mutation)
-        frozenMedia.group?.let { group ->
+        val bindingStillCurrent = transactionRunner.run {
+            if (buildCausalRootJson(entityType, clientUuid) != rootJson ||
+                loadActiveCausalMedia(entityType, clientUuid).toCausalMediaRevisions() != frozenMedia.revisions
+            ) return@run false
+            frozenMedia.group?.let { group ->
             requireNotNull(mediaSettlementJournal) {
                 "causal media freeze requires durable settlement journal"
             }.bind(
@@ -997,7 +1197,10 @@ internal class CausalSettlement(
                 requestHash = contentHash,
                 manifest = group,
             )
+            }
+            true
         }
+        if (!bindingStillCurrent) return null
         return FrozenCausalUnit(
             mutation = mutation,
             contentEpoch = contentEpoch,
@@ -1212,12 +1415,34 @@ internal class CausalSettlement(
      * A live sleep mutation with an invalid pointer is `invalid_domain`; heal it
      * locally so the sleep (or its tombstone) can still settle.
      */
-    private suspend fun healInvalidEffectiveWakes() {
-        recordDao.listPendingSync().forEach { record ->
-            if (record.type != "sleep" || record.deletedAt != null) return@forEach
-            val selected = record.effectiveWakeObservationClientUuid ?: return@forEach
-            if (isValidEffectiveWake(selected, record.clientUuid)) return@forEach
-            recordDao.update(record.copy(effectiveWakeObservationClientUuid = null))
+    private suspend fun healInvalidEffectiveWakes(session: SyncSession) {
+        // The pending list is only an identity census. Never write one of its stale
+        // whole-row snapshots after suspending in another DAO: care edits use a
+        // different mutex. The fresh root and wake share one short Room write lease.
+        recordDao.listPendingSync().map(RecordEntity::clientUuid).forEach { clientUuid ->
+            transactionRunner.run {
+                val current = recordDao.getByClientUuid(clientUuid) ?: return@run
+                if (!current.syncDirty || current.type != "sleep" || current.deletedAt != null) {
+                    return@run
+                }
+                if (session.role != FamilyRole.Owner &&
+                    current.createdByMembershipId != session.membershipId
+                ) return@run
+                val selected = current.effectiveWakeObservationClientUuid ?: return@run
+                // Absence during paginated pull is not proof of withdrawal.
+                val wake = wakeObservationDao.getByClientUuid(selected) ?: return@run
+                if (wake.deletedAt == null && !wake.withdrawn &&
+                    wake.sleepRecordClientUuid == current.clientUuid
+                ) return@run
+                check(current.updatedAt < Long.MAX_VALUE) { "护理记录修订已达到上限" }
+                recordDao.update(
+                    current.copy(
+                        effectiveWakeObservationClientUuid = null,
+                        updatedAt = maxOf(System.currentTimeMillis(), current.updatedAt + 1),
+                        mutationId = null,
+                    ),
+                )
+            }
         }
     }
 
@@ -1226,8 +1451,7 @@ internal class CausalSettlement(
         sleepClientUuid: String,
     ): Boolean {
         val wake = wakeObservationDao.getByClientUuid(wakeClientUuid) ?: return false
-        return wake.deletedAt == null &&
-            !wake.withdrawn &&
+        return wake.deletedAt == null && !wake.withdrawn &&
             wake.sleepRecordClientUuid == sleepClientUuid
     }
 
@@ -1402,6 +1626,10 @@ internal class CausalSettlement(
     suspend fun abandonMutation(entityType: String, clientUuid: String) {
         val cache = conflictSnapshotCacheDao ?: return
         transactionRunner.run {
+            val unsettled = mediaSettlementJournal?.restoreUnsettled(entityType, clientUuid)
+            check(unsettled?.phase != CausalMediaSettlementPhase.CommitUnknown) {
+                "媒体提交结果尚未确认，需先重试同步以保留完整恢复证据"
+            }
             val current = loadCommitFirstLocal(entityType, clientUuid) ?: return@run
             when (entityType) {
                 "baby" -> {
@@ -1820,85 +2048,285 @@ internal class CausalSettlement(
         clientUuid: String,
         mutationId: String,
         contentEpoch: Long,
+        authorityKey: String,
     ): FrozenCausalMedia? {
-        val assets = loadActiveCausalMedia(entityType, clientUuid)
+        val cache = conflictSnapshotCacheDao ?: return null
+        val assets = transactionRunner.run { loadActiveCausalMedia(entityType, clientUuid) }
         val revisions = assets.toCausalMediaRevisions()
         if (assets.isEmpty()) return FrozenCausalMedia(emptyList(), revisions, null)
-        val cache = conflictSnapshotCacheDao ?: return null
-        val expectedSources = assets.sortedBy(MediaAssetEntity::clientUuid).map { asset ->
-            ImmutableMediaSpoolSource(
-                mediaUuid = asset.clientUuid,
-                role = CausalMediaPolicy.roleForEntityType(entityType) ?: return null,
-                localUri = asset.localUri,
-            )
-        }
-        val stored = cache.getFrozenMediaSpoolManifest(mutationId)?.let { row ->
-            decodeFrozenMediaSpoolManifest(row.payloadJson).also { group ->
-                require(group.mutationId == mutationId) { "Room media spool manifest identity drift" }
-                require(row.contentEpoch == contentEpoch) { "Room media spool manifest epoch drift" }
-            }
-        }
-        val sidecarOnly = if (stored == null) {
-            immutableMediaSpool.recoverGroup(mutationId)?.group
-        } else {
-            null
-        }
-        if (sidecarOnly != null && !sidecarOnly.items.all { item ->
-                expectedSources.any { source ->
-                    source.mediaUuid == item.mediaUuid && source.role == item.role
+        val evidenceKey = "media-freeze-capture-v1:$mutationId"
+        val evidence = mediaCaptureEvidence(authorityKey, entityType, clientUuid, assets)
+        // One raw-source digest per present input in this preparation attempt. Reuse this
+        // result for donor comparison and the next durable binding; never decode twice.
+        val sourceBytes = assets.associate { asset -> asset.clientUuid to mediaFiles.readableFile(asset.localUri)?.let {
+            requireNotNull(MediaContentDigest.ofReadableFile(it)) {
+                "present media source could not be hashed; retain preparation evidence for retry"
+            } to it.length()
+        } }
+        val storedRow = cache.getFrozenMediaSpoolManifest(mutationId)
+        val sidecar = immutableMediaSpool.recoverGroup(mutationId)?.group
+        val previous = cache.getTransportJournal(evidenceKey)?.payloadJson?.let {
+            Json.parseToJsonElement(it).jsonObject.also { value ->
+                require(value.keys == setOf("format", "source", "current") && value["format"]?.jsonPrimitive?.content == "1") {
+                    "unsupported media preparation evidence"
                 }
             }
-        ) {
+        }
+        // An unbound sidecar is preparation evidence, not permission to stamp today's facts onto it.
+        // Bound Pending/CommitUnknown/Branched envelopes are replayed by restoreUnsettled before here.
+        if ((previous != null && previous["current"] != evidence) ||
+            (previous == null && (storedRow != null || sidecar != null))) {
+            quarantineUnboundPreparation(entityType, clientUuid, mutationId, evidenceKey, sidecar)
             return null
         }
-        val group = if (stored != null) {
-            require(
-                (immutableMediaSpool.recoverGroup(mutationId) as?
-                    ImmutableMediaSpoolRecovery.Complete)?.group == stored,
-            ) {
-                "Room media spool manifest does not match immutable sidecars"
-            }
-            stored
-        } else {
-            immutableMediaSpool.freezeGroup(mutationId, expectedSources).also { frozen ->
-                if (loadActiveCausalMedia(entityType, clientUuid).toCausalMediaRevisions() != revisions) {
-                    return null
+        if (storedRow != null || sidecar != null) {
+            val originalSources = cache.getTransportJournal("media-preparation-sources-v1:$mutationId")?.payloadJson
+                ?.let { Json.parseToJsonElement(it).jsonObject }
+            val entries = originalSources?.get("sources") as? JsonArray
+            val currentEntries = evidence.getValue("media") as JsonArray
+            val matches = originalSources?.keys == setOf("format", "authority", "type", "uuid", "sources") &&
+                originalSources?.get("format")?.jsonPrimitive?.content == "1" &&
+                originalSources?.get("authority")?.jsonPrimitive?.content == authorityKey &&
+                originalSources?.get("type")?.jsonPrimitive?.content == entityType &&
+                originalSources?.get("uuid")?.jsonPrimitive?.content == clientUuid &&
+                entries?.size == assets.size && assets.all { asset ->
+                    val captured = entries?.singleOrNull {
+                        it.jsonObject["row"]?.jsonObject?.get("uuid")?.jsonPrimitive?.content == asset.clientUuid
+                    }?.jsonObject
+                    val current = currentEntries.single { it.jsonObject["uuid"]?.jsonPrimitive?.content == asset.clientUuid }
+                    val item = sidecar?.items?.singleOrNull { it.mediaUuid == asset.clientUuid }
+                    val adoptedCanonical = previous?.get("current") == evidence && item != null &&
+                        item.role == CausalMediaPolicy.roleForEntityType(entityType) &&
+                        item.sha256 == asset.sha256 && item.byteSize == asset.byteSize &&
+                        item.mime == asset.mime && item.width == asset.width?.toLong() && item.height == asset.height?.toLong() &&
+                        (sourceBytes[asset.clientUuid] == null || sourceBytes[asset.clientUuid] == (item.sha256 to item.byteSize))
+                    adoptedCanonical || (captured?.get("row") == current && sourceBytesStillMatch(sourceBytes[asset.clientUuid], captured))
                 }
-                transactionRunner.run {
-                    val current = requireNotNull(loadCommitFirstLocal(entityType, clientUuid)) {
-                        "media spool manifest lost its product fact"
+            if (!matches) {
+                quarantineUnboundPreparation(entityType, clientUuid, mutationId, evidenceKey, sidecar)
+                return null
+            }
+        }
+        val quarantine = cache.getTransportJournal(
+            com.lezi.babylog.sync.disasterrecovery.RestoreArtifactRetirement.KEY,
+        )?.payloadJson?.let { Json.parseToJsonElement(it).jsonObject }
+        val donorIds = (quarantine?.get("groups") as? JsonArray).orEmpty().map { it.jsonPrimitive.content }.toSet()
+        val donors = donorIds.sorted().filter { it != mutationId }.mapNotNull { id ->
+            cache.getFrozenMediaSpoolManifest(id)?.let { row ->
+                decodeFrozenMediaSpoolManifest(row.payloadJson).also { require(it.mutationId == id) }
+            }
+        }
+        val currentSources = evidence.getValue("media") as JsonArray
+        val preparationProofs = donors.associate { donor -> donor.mutationId to
+            cache.getTransportJournal("media-preparation-sources-v1:${donor.mutationId}")?.payloadJson
+                ?.let { Json.parseToJsonElement(it).jsonObject.also { proof ->
+                    require(proof.keys == setOf("format", "authority", "type", "uuid", "sources") &&
+                        proof["format"]?.jsonPrimitive?.content == "1") { "invalid media preparation source proof" }
+                } } }
+        val sources = assets.sortedBy(MediaAssetEntity::clientUuid).map { asset ->
+            val role = CausalMediaPolicy.roleForEntityType(entityType) ?: return null
+            val currentSource = currentSources.single { it.jsonObject["uuid"]?.jsonPrimitive?.content == asset.clientUuid }
+            var donorIdentity: PublishedMediaIdentity? = null
+            val donor = donors.firstNotNullOfOrNull { group ->
+                val item = group.items.singleOrNull { it.mediaUuid == asset.clientUuid && it.role == role }
+                    ?: return@firstNotNullOfOrNull null
+                val exactCanonical = asset.sha256 != null && item.sha256 == asset.sha256 && item.byteSize == asset.byteSize
+                val proof = preparationProofs[group.mutationId]
+                val source = (proof?.get("sources") as? JsonArray)?.singleOrNull {
+                    it.jsonObject["row"]?.jsonObject?.get("uuid")?.jsonPrimitive?.content == asset.clientUuid
+                }?.jsonObject
+                val unchangedPreparation = proof?.get("authority")?.jsonPrimitive?.content == authorityKey &&
+                    proof?.get("type")?.jsonPrimitive?.content == entityType && proof?.get("uuid")?.jsonPrimitive?.content == clientUuid &&
+                    source?.get("row") == currentSource && sourceBytesStillMatch(sourceBytes[asset.clientUuid], source)
+                if (!exactCanonical && !unchangedPreparation) return@firstNotNullOfOrNull null
+                // A canonical result belongs to its original source revision even when bitmap
+                // normalization changed SHA/size/MIME. Reuse only that item in new ownership.
+                donorIdentity = if (exactCanonical) PublishedMediaIdentity(asset.sha256, asset.byteSize,
+                    asset.mime, asset.width, asset.height) else PublishedMediaIdentity(item.sha256, item.byteSize,
+                    item.mime, item.width?.toInt(), item.height?.toInt())
+                com.lezi.babylog.sync.media.RetainedMediaSpoolSource(group.mutationId, item,
+                    rebaseMetadata = exactCanonical && (item.mime != asset.mime || item.width != asset.width?.toLong() ||
+                        item.height != asset.height?.toLong()))
+            }
+            val canonical = donor != null ||
+                cache.getTransportJournal("canonical-media-bytes-v1:${asset.clientUuid}")?.payloadJson == asset.localUri ||
+                cache.getTransportJournal("restored-media-bytes-v1:${asset.clientUuid}")?.payloadJson == asset.localUri
+            if (asset.remoteUri?.isNotBlank() == true && donor == null) {
+                val file = mediaFiles.readableFile(asset.localUri)
+                if (!canonical || file == null || file.length() != asset.byteSize ||
+                    MediaContentDigest.ofReadableFile(file) != asset.sha256) throw PublishedMediaAuthorityRequiredException()
+            }
+            ImmutableMediaSpoolSource(asset.clientUuid, role, asset.localUri,
+                publishedIdentity = donorIdentity ?: if (canonical) PublishedMediaIdentity(asset.sha256, asset.byteSize,
+                    asset.mime, asset.width, asset.height) else null,
+                retainedSource = donor)
+        }
+        val preparationKey = "media-preparation-sources-v1:$mutationId"
+        val newPreparationProof = if (cache.getTransportJournal(preparationKey) == null) buildJsonObject {
+            put("format", 1); put("authority", authorityKey); put("type", entityType); put("uuid", clientUuid)
+            put("sources", JsonArray(assets.sortedBy { it.clientUuid }.map { asset ->
+                val bytes = sourceBytes[asset.clientUuid]
+                buildJsonObject {
+                    put("row", currentSources.single { it.jsonObject["uuid"]?.jsonPrimitive?.content == asset.clientUuid })
+                    put("byte_sha", bytes?.first?.let(::JsonPrimitive) ?: JsonNull)
+                    put("byte_size", bytes?.second?.let(::JsonPrimitive) ?: JsonNull)
+                }
+            }))
+        }.toString() else null
+        if (previous == null) transactionRunner.run {
+            if (loadActiveCausalMedia(entityType, clientUuid).toCausalMediaRevisions() != revisions) return@run
+            cache.putTransportJournal(evidenceKey, buildJsonObject {
+                put("format", 1); put("source", evidence); put("current", evidence)
+            }.toString(), contentEpoch)
+        }
+        if (cache.getTransportJournal(evidenceKey) == null) return null
+        if (newPreparationProof != null) transactionRunner.run {
+            if (loadActiveCausalMedia(entityType, clientUuid).toCausalMediaRevisions() != revisions) return@run
+            if (cache.getTransportJournal(preparationKey) == null)
+                cache.putTransportJournal(preparationKey, newPreparationProof, contentEpoch)
+        }
+        if (cache.getTransportJournal(preparationKey) == null) return null
+        val group = if (storedRow != null) {
+            require(decodeCausalMediaSettlementOrNull(storedRow.payloadJson) == null) { "bound media cannot be recaptured" }
+            decodeFrozenMediaSpoolManifest(storedRow.payloadJson).also { stored ->
+                require((immutableMediaSpool.recoverGroup(mutationId) as? ImmutableMediaSpoolRecovery.Complete)?.group == stored)
+            }
+        } else immutableMediaSpool.freezeGroup(mutationId, sources)
+        require(group.mutationId == mutationId && group.items.size == sources.size)
+        group.items.forEach { item ->
+            val source = sources.single { it.mediaUuid == item.mediaUuid }
+            require(source.role == item.role)
+            source.publishedIdentity?.let { identity ->
+                require(item.matches(identity)) { "recovered media does not match captured canonical identity" }
+            }
+        }
+        val owned = transactionRunner.run {
+            val current = loadCommitFirstLocal(entityType, clientUuid) ?: return@run false
+            if (current.mutationId != mutationId || current.contentEpoch != contentEpoch ||
+                mediaCaptureEvidence(authorityKey, entityType, clientUuid,
+                    loadActiveCausalMedia(entityType, clientUuid)) != evidence) return@run false
+            cache.putFrozenMediaSpoolManifest(mutationId, encodeImmutableMediaSpoolGroup(group), contentEpoch)
+            true
+        }
+        if (!owned) return null
+        // Persist canonical bytes at a unique product-local path before a terminal receipt can
+        // retire the spool. Copy failure leaves the immutable Room reference and bytes intact.
+        val copied = linkedMapOf<String, String>()
+        val reservedPaths = linkedSetOf<String>()
+        try {
+        for (item in group.items) {
+            val asset = assets.single { it.clientUuid == item.mediaUuid }
+            val alreadyCanonical = asset.sha256 == item.sha256 && asset.byteSize == item.byteSize &&
+                asset.mime == item.mime && asset.width?.toLong() == item.width && asset.height?.toLong() == item.height &&
+                sourceBytes[asset.clientUuid] == (item.sha256 to item.byteSize)
+            if (!alreadyCanonical) {
+                val bytes = immutableMediaSpool.open(mutationId, item).openStream().use { it.readBytes() }
+                require(bytes.size.toLong() == item.byteSize && MediaContentDigest.ofBytes(bytes) == item.sha256)
+                copied[item.mediaUuid] = withContext(NonCancellable) {
+                    mediaFiles.saveDownloadedOwned(UUID.randomUUID().toString(),
+                        if (item.role == com.lezi.babylog.sync.media.CausalMediaRole.Avatar) "avatar" else "log", bytes, item.mime) { path ->
+                        reservedPaths += path
+                        cache.putTransportJournal("canonical-media-materialization-v1",
+                            JsonArray(reservedPaths.map(::JsonPrimitive)).toString(), contentEpoch)
                     }
-                    require(current.mutationId == mutationId && current.contentEpoch == contentEpoch) {
-                        "media spool manifest lost its pending mutation owner"
-                    }
-                    cache.putFrozenMediaSpoolManifest(
-                        mutationId = mutationId,
-                        canonicalManifestJson = encodeImmutableMediaSpoolGroup(frozen),
-                        contentEpoch = contentEpoch,
-                    )
                 }
             }
         }
-        if (group.items.map { it.mediaUuid to it.role } !=
-            expectedSources.map { it.mediaUuid to it.role }
-        ) return null
-        if (loadActiveCausalMedia(entityType, clientUuid).toCausalMediaRevisions() != revisions) {
-            return null
+        val canonicalRows = assets.map { asset ->
+            val item = group.items.single { it.mediaUuid == asset.clientUuid }
+            asset.copy(localUri = copied[asset.clientUuid] ?: asset.localUri, sha256 = item.sha256,
+                byteSize = item.byteSize, mime = item.mime, width = item.width?.toInt(), height = item.height?.toInt())
         }
-        persistFrozenContentIdentities(group)
-        return FrozenCausalMedia(
-            items = group.items.map(ImmutableMediaSpoolItem::toCausalMediaItem),
-            revisions = revisions,
-            group = group,
-        )
+        val adopted = transactionRunner.run {
+            val current = loadCommitFirstLocal(entityType, clientUuid) ?: return@run false
+            if (current.mutationId != mutationId || current.contentEpoch != contentEpoch ||
+                mediaCaptureEvidence(authorityKey, entityType, clientUuid,
+                    loadActiveCausalMedia(entityType, clientUuid)) != evidence) return@run false
+            canonicalRows.forEach { row ->
+                mediaDao.update(row)
+                cache.putTransportJournal("canonical-media-bytes-v1:${row.clientUuid}", row.localUri, row.updatedAt)
+                if (row.kind == "avatar" && row.localUri != assets.single { it.clientUuid == row.clientUuid }.localUri) {
+                    row.babyId?.let { id -> babyDao.getIncludingDeleted(id)?.let { baby ->
+                        babyDao.update(baby.copy(avatarPath = row.localUri))
+                    } }
+                }
+            }
+            val original = Json.parseToJsonElement(requireNotNull(cache.getTransportJournal(evidenceKey)).payloadJson).jsonObject
+            cache.putTransportJournal(evidenceKey, JsonObject(original + ("current" to
+                mediaCaptureEvidence(authorityKey, entityType, clientUuid, canonicalRows))).toString(), contentEpoch)
+            true
+        }
+        if (!adopted) return null
+        return FrozenCausalMedia(group.items.map(ImmutableMediaSpoolItem::toCausalMediaItem),
+            canonicalRows.toCausalMediaRevisions(), group)
+        } finally {
+            withContext(NonCancellable) {
+                cleanupUnownedMediaPaths(reservedPaths)
+                cache.deleteTransportJournal("canonical-media-materialization-v1")
+            }
+        }
     }
 
-    private suspend fun persistFrozenContentIdentities(group: ImmutableMediaSpoolGroup) {
-        for (item in group.items) {
-            mediaDao.persistSha256IfAbsent(
-                item.mediaUuid,
-                MediaContentDigest.requireValid(item.sha256),
-            )
+    private suspend fun recoverMaterializedMediaPaths() {
+        val cache = conflictSnapshotCacheDao ?: return
+        val journal = cache.getTransportJournal("canonical-media-materialization-v1") ?: return
+        val paths = (Json.parseToJsonElement(journal.payloadJson) as JsonArray)
+            .map { it.jsonPrimitive.content }.toSet()
+        cleanupUnownedMediaPaths(paths)
+        cache.deleteTransportJournal(journal.journalKey)
+    }
+
+    private fun sourceBytesStillMatch(bytes: Pair<String, Long>?, source: JsonObject?): Boolean {
+        source ?: return false
+        require(source.keys == setOf("row", "byte_sha", "byte_size")) { "invalid media source byte proof" }
+        bytes ?: return true // retained canonical spool can be the sole surviving copy
+        val sha = (source["byte_sha"] as? JsonPrimitive)?.contentOrNull ?: return false
+        val size = (source["byte_size"] as? JsonPrimitive)?.longOrNull ?: return false
+        return bytes.first == sha && bytes.second == size
+    }
+
+    private suspend fun mediaCaptureEvidence(authority: String, type: String, uuid: String,
+        media: List<MediaAssetEntity>): JsonObject = buildJsonObject {
+        put("authority", authority); put("type", type); put("uuid", uuid)
+        put("base", loadCommitFirstLocal(type, uuid)?.baseVersion?.let(::JsonPrimitive) ?: JsonNull)
+        put("root", buildCausalRootJson(type, uuid)?.let { Json.parseToJsonElement(it) } ?: JsonNull)
+        put("deleted", loadCommitFirstLocal(type, uuid)?.deleted ?: false)
+        put("media", JsonArray(media.sortedBy { it.clientUuid }.map { row -> buildJsonObject {
+            put("uuid", row.clientUuid); put("uri", row.localUri); put("kind", row.kind)
+            put("sha", row.sha256?.let(::JsonPrimitive) ?: JsonNull); put("size", row.byteSize)
+            put("mime", row.mime?.let(::JsonPrimitive) ?: JsonNull)
+            put("width", row.width?.let(::JsonPrimitive) ?: JsonNull); put("height", row.height?.let(::JsonPrimitive) ?: JsonNull)
+            put("record", row.recordId?.let(::JsonPrimitive) ?: JsonNull); put("plan", row.carePlanId?.let(::JsonPrimitive) ?: JsonNull)
+            put("baby", row.babyId?.let(::JsonPrimitive) ?: JsonNull); put("wake", row.wakeObservationId?.let(::JsonPrimitive) ?: JsonNull)
+            put("updated", row.updatedAt); put("deleted", row.deletedAt?.let(::JsonPrimitive) ?: JsonNull)
+        } }))
+    }
+
+    private suspend fun quarantineUnboundPreparation(type: String, uuid: String, mutation: String,
+        evidenceKey: String, sidecar: ImmutableMediaSpoolGroup?) = transactionRunner.run {
+        val cache = requireNotNull(conflictSnapshotCacheDao)
+        check(cache.getFrozenMutation(type, uuid) == null) { "published mutation cannot be replaced" }
+        val old = cache.getFrozenMediaSpoolManifest(mutation)
+        check(old == null || decodeCausalMediaSettlementOrNull(old.payloadJson) == null) { "bound media cannot be replaced" }
+        if (sidecar != null && sidecar.items.isNotEmpty()) {
+            cache.putFrozenMediaSpoolManifest(mutation, encodeImmutableMediaSpoolGroup(sidecar), 0)
+            val oldRetirement = cache.getTransportJournal(com.lezi.babylog.sync.disasterrecovery.RestoreArtifactRetirement.KEY)
+                ?.payloadJson?.let { Json.parseToJsonElement(it).jsonObject }
+            val ids = (oldRetirement?.get("groups") as? JsonArray).orEmpty().map { it.jsonPrimitive.content } + mutation
+            val snapshot = oldRetirement?.get("snapshot_key")?.jsonPrimitive?.content ?: evidenceKey
+            cache.putTransportJournal(com.lezi.babylog.sync.disasterrecovery.RestoreArtifactRetirement.KEY,
+                com.lezi.babylog.sync.disasterrecovery.RestoreArtifactRetirement.encode(snapshot, ids), 0)
+        }
+        if (sidecar == null || sidecar.items.isEmpty()) {
+            cache.deleteTransportJournal(evidenceKey)
+            cache.deleteTransportJournal("media-preparation-sources-v1:$mutation")
+        }
+        val next = UUID.randomUUID().toString()
+        when (type) {
+            "baby" -> babyDao.getByClientUuid(uuid)?.takeIf { it.mutationId == mutation }?.let { babyDao.update(it.copy(mutationId = next)) }
+            "record" -> recordDao.getByClientUuid(uuid)?.takeIf { it.mutationId == mutation }?.let { recordDao.update(it.copy(mutationId = next)) }
+            "care_plan" -> carePlanDao.getByClientUuid(uuid)?.takeIf { it.mutationId == mutation }?.let { carePlanDao.update(it.copy(mutationId = next)) }
+            "wake_observation" -> wakeObservationDao.getByClientUuid(uuid)?.takeIf { it.mutationId == mutation }?.let { wakeObservationDao.update(it.copy(mutationId = next)) }
         }
     }
 
@@ -1951,6 +2379,8 @@ internal class CausalSettlement(
                 babyId = asset.babyId,
                 kind = asset.kind,
                 updatedAt = asset.updatedAt,
+                sha256 = asset.sha256, byteSize = asset.byteSize, mime = asset.mime,
+                width = asset.width, height = asset.height,
             )
         }.sortedWith(compareBy(CausalMediaRevision::clientUuid).thenBy(CausalMediaRevision::id))
 
@@ -2262,7 +2692,7 @@ internal class CausalSettlement(
             type = wire.type,
             payload = wire.payload,
             customItemId = customItemId,
-            allowIntentOnlyFeed = isNextFeedPlanNote(wire.note),
+            allowIntentOnlyFeed = carePlanAllowsIntentOnlyFeed(wire.type, wire.note),
         )
         val calendarDisposition = carePlanCalendarDisposition(
             existing = existing,
@@ -2467,6 +2897,19 @@ internal class CausalSettlement(
             }.getOrElse { fail("本机冻结 Wake causal root 类型或 domain 无效") }
         }
         val providerAvatarUuid = when (unit.mutation.entityType) {
+            "record" -> {
+                if (stableRoot["created_by_membership_id"] === JsonNull) {
+                    runCatching {
+                        val stamp = stableRoot["updated_at"] as? JsonPrimitive
+                        require(stamp != null && !stamp.isString && stamp.longOrNull?.let { it >= 0 } == true)
+                        val wire = parseRecordWire(JsonObject(stableRoot - "updated_at" - "deleted_at"))
+                        SyncWireMapper.requireCurrentTransportPayload(wire.type, wire.payload)
+                        requireNotNull(babyDao.getByClientUuid(wire.babyClientUuid))
+                        wire.customItemClientUuid?.let { requireNotNull(customItemDao.getByClientUuid(it)) }
+                    }.getOrElse { fail("因果 ${result.status} anonymous record stable_root 类型或引用无效") }
+                }
+                null
+            }
             "baby" -> runCatching {
                 decodeBabyWire(stableRoot, RootUpdatedAtLocation.InlineStableRoot)
             }.getOrElse { fail("因果 ${result.status} baby stable_root 类型或 domain 无效") }
@@ -2486,6 +2929,17 @@ internal class CausalSettlement(
                         CarePlanRootShape.StableRoot,
                         requireCanonicalIds = true,
                     )
+                        .also { wire ->
+                            if (stableRoot["created_by_membership_id"] === JsonNull) {
+                                SyncWireMapper.requireCurrentTransportPayload(
+                                    wire.type,
+                                    wire.payload,
+                                    allowIntentOnlyFeed = carePlanAllowsIntentOnlyFeed(wire.type, wire.note),
+                                )
+                                require(resolveCarePlanReferences(wire, babyDao, customItemDao, recordDao)
+                                    is CarePlanReferenceResult.Resolved)
+                            }
+                        }
                 }.getOrElse {
                     fail("因果 ${result.status} care_plan stable_root 类型或 domain 无效")
                 }
@@ -2533,7 +2987,7 @@ internal class CausalSettlement(
                 it.role != expectedRole ||
                     !it.sha256.matches(MediaContentDigest.HEX) ||
                     it.byteSize <= 0 ||
-                    it.mime.isBlank()
+                    runCatching { requireCanonicalMediaMime(it.mime) }.isFailure
             }
         ) {
             fail("因果 ${result.status} stable_media 不符合 closed manifest")
@@ -2700,12 +3154,12 @@ internal fun causalMutationContentHash(unit: CausalMutationUnit): String {
                 buildJsonObject {
                     put("byte_size", media.byteSize)
                     put("media_uuid", media.mediaUuid)
-                    put("mime", media.mime)
+                    put("mime", media.mime?.let(::JsonPrimitive) ?: JsonNull)
                     put("role", media.role)
                     put("sha256", media.sha256)
-                    // Match serde skip_serializing_if=None: omit absent optional dims.
-                    media.height?.let { put("height", it) }
-                    media.width?.let { put("width", it) }
+                    // Rust CausalMediaItem serializes all seven keys, including explicit null dimensions.
+                    put("height", media.height?.let(::JsonPrimitive) ?: JsonNull)
+                    put("width", media.width?.let(::JsonPrimitive) ?: JsonNull)
                 },
             )
         }
@@ -2752,3 +3206,10 @@ private fun encodeBranchVersionIdsJson(ids: List<String>): String =
     buildJsonArray { ids.sorted().forEach { add(JsonPrimitive(it)) } }.toString()
 
 private fun sha256Hex(bytes: ByteArray): String = MediaContentDigest.ofBytes(bytes)
+
+internal fun SyncSession.mediaAuthorityKey(): String = listOf(baseUrl, familyId, membershipId, deviceId, pullGeneration)
+    .joinToString("") { "${it.toByteArray(Charsets.UTF_8).size}:$it" }
+
+private fun ImmutableMediaSpoolItem.matches(identity: PublishedMediaIdentity): Boolean =
+    (identity.sha256 == null || sha256 == identity.sha256) && byteSize == identity.byteSize &&
+        mime == identity.mime && width == identity.width?.toLong() && height == identity.height?.toLong()

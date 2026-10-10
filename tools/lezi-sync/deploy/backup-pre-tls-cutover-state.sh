@@ -5,8 +5,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-NAS_SSH="${NAS_SSH:-nas-account@192.168.77.4}"
-NAS_SSH_PORT="${NAS_SSH_PORT:-10000}"
+NAS_SSH="${NAS_SSH:?Set NAS_SSH to the explicitly approved user@NAS host}"
+NAS_SSH_PORT="${NAS_SSH_PORT:?Set NAS_SSH_PORT to the explicitly approved NAS port}"
 CONTAINER_NAME="${LEZI_PRE_TLS_CONTAINER_NAME:-lezi-sync}"
 EXPECTED_IMAGE_ID="${LEZI_EXPECTED_PRE_TLS_IMAGE_ID:-}"
 config_root="${XDG_CONFIG_HOME:-${HOME:?HOME is required when XDG_CONFIG_HOME is unset}/.config}"

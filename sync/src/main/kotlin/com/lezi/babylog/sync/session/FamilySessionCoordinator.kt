@@ -1,9 +1,7 @@
 package com.lezi.babylog.sync.session
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withTimeoutOrNull
 import com.lezi.babylog.sync.BootstrapSecretRejectedException
@@ -88,6 +86,7 @@ internal sealed interface FamilySessionCommand {
     ) : FamilySessionCommand
     data class RevokeFamilyDevice(val deviceId: String) : FamilySessionCommand
     data object LogoutCurrentDevice : FamilySessionCommand
+    data class LogoutCurrentDeviceWithSourceConsent(val consent: com.lezi.babylog.sync.SourceCommandLogoutConsent) : FamilySessionCommand
     data class RenameFamily(val familyName: String?) : FamilySessionCommand
     data class UpdateMyDisplayName(val displayName: String) : FamilySessionCommand
     data object Leave : FamilySessionCommand
@@ -200,6 +199,9 @@ internal class FamilySessionCoordinator(
     private val onSessionObserved: (SyncSession) -> Unit,
     private val requestSync: (SyncTrigger) -> Unit,
     private val beforeOperation: suspend () -> Unit = {},
+    private val recoverRestoreAuthority: suspend () -> Boolean = { false },
+    private val beforeDeviceLogout: suspend (com.lezi.babylog.sync.SourceCommandLogoutConsent?) -> Unit = {},
+    private val afterDeviceLogoutConfirmed: suspend () -> Unit = {},
     private val launchBestEffort: ((suspend () -> Unit) -> Unit) = {},
 ) {
     suspend fun execute(command: FamilySessionCommand): Result<FamilySessionOutcome> =
@@ -235,7 +237,8 @@ internal class FamilySessionCoordinator(
                     renameFamilyDevice(command.deviceId, command.deviceName)
                 is FamilySessionCommand.RevokeFamilyDevice ->
                     revokeFamilyDevice(command.deviceId)
-                FamilySessionCommand.LogoutCurrentDevice -> logoutCurrentDevice()
+                FamilySessionCommand.LogoutCurrentDevice -> logoutCurrentDevice(null)
+                is FamilySessionCommand.LogoutCurrentDeviceWithSourceConsent -> logoutCurrentDevice(command.consent)
                 is FamilySessionCommand.RenameFamily -> renameFamily(command.familyName)
                 is FamilySessionCommand.UpdateMyDisplayName ->
                     updateMyDisplayName(command.displayName)
@@ -251,6 +254,11 @@ internal class FamilySessionCoordinator(
         val previous = preferences.session.first()
         val normalized = config.withNormalized()
         require(normalized.isServerConfigured) { "请先填写家庭服务器地址" }
+        preferences.memberLoginAttempt()?.let { attempt ->
+            if (attempt.endpointOrigin != normalizeHttpsOrigin(normalized.baseUrl)) {
+                throw com.lezi.babylog.sync.MemberLoginOutcomeUnknownException(attempt)
+            }
+        }
         if (previous.baseUrl.isNotBlank() && previous.baseUrl != normalized.baseUrl) {
             // A retained family id is a configured home. Changing origin before the
             // new server proves it is the same family would dirty Room and publish
@@ -361,18 +369,42 @@ internal class FamilySessionCoordinator(
     ): FamilySessionOutcome = withBarrier {
         val current = preferences.session.first()
         require(!current.isJoined) { "请先退出当前家庭，再提交加入申请" }
-        require(preferences.pendingMemberLogin.first() == null) {
-            "已有一条等待管理员确认的申请"
+        preferences.pendingMemberLogin.first()?.let { pending ->
+            if (pending.remoteOutcomeUnknown) {
+                require(pending.endpointOrigin == normalizeHttpsOrigin(current.baseUrl)) {
+                    "原服务器仍有结果待确认的申请，请先在这台设备放弃等待"
+                }
+                return@withBarrier FamilySessionOutcome.MemberLoginRequested(pending)
+            }
+            error("已有一条等待管理员确认的申请")
         }
         requireRemoteAllowed(current.endpointConfig)
         val displayName = requireMemberDisplayName(command.displayName)
         val deviceName = requireDeviceName(command.deviceName)
-        val receipt = backend.requestMemberLogin(
-            current.endpointConfig.baseUrl,
-            displayName,
-            deviceName,
+        val attempt = PendingMemberLogin(
+            requestId = "", displayName = displayName, deviceName = deviceName,
+            expiresAtEpochSeconds = 0L,
+            operationId = java.util.UUID.randomUUID().toString(),
+            endpointOrigin = normalizeHttpsOrigin(current.baseUrl),
+            remoteOutcomeUnknown = true,
         )
-        preferences.savePendingMemberLogin(receipt, displayName, deviceName)
+        preferences.saveMemberLoginAttempt(attempt)
+        try {
+            val receipt = backend.requestMemberLogin(current.baseUrl, displayName, deviceName)
+            preferences.savePendingMemberLogin(receipt, displayName, deviceName, attempt.operationId)
+        } catch (cancelled: CancellationException) {
+            // The durable attempt remains visible after cancellation/process reconstruction.
+            throw cancelled
+        } catch (failure: Exception) {
+            if (failure is com.lezi.babylog.sync.backend.MemberLoginRequestNotSentException ||
+                (failure is SyncHttpException && failure.statusCode in setOf(400, 401, 403, 404, 409, 422, 429))
+            ) {
+                preferences.clearMemberLoginAttempt(expectedOperationId = attempt.operationId)
+                throw failure
+            }
+            if (preferences.memberLoginAttempt()?.operationId != attempt.operationId) throw failure
+            return@withBarrier FamilySessionOutcome.MemberLoginRequested(attempt)
+        }
         FamilySessionOutcome.MemberLoginRequested(
             requireNotNull(preferences.pendingMemberLogin.first()) {
                 "加入申请未能保存，请重试"
@@ -386,17 +418,24 @@ internal class FamilySessionCoordinator(
         val pending = requireNotNull(preferences.pendingMemberLogin.first()) {
             "没有等待管理员确认的申请"
         }
+        if (pending.remoteOutcomeUnknown) {
+            throw com.lezi.babylog.sync.MemberLoginOutcomeUnknownException(pending)
+        }
+        val owner = preferences.memberReconnectOwner()
         requireRemoteAllowed(current.endpointConfig)
-        val secret = preferences.pendingMemberSecret()
+        val secret = preferences.pendingMemberSecretIfCurrent(pending.requestId, owner)
+            ?: throw com.lezi.babylog.sync.MemberLoginAttemptRetiredException()
         require(secret.isNotBlank()) { "等待确认凭据已丢失，请重新申请" }
-        when (val status = backend.memberLoginStatus(current.endpointConfig.baseUrl, secret)) {
+        val status = backend.memberLoginStatus(current.endpointConfig.baseUrl, secret)
+        abandonedMemberLoginCheckOrNull(pending, owner)?.let { return@withBarrier it }
+        when (status) {
             MemberLoginStatus.Pending -> FamilySessionOutcome.MemberLoginChecked(
                 MemberLoginCheckResult.Waiting(pending),
             )
             MemberLoginStatus.Approved,
             MemberLoginStatus.Claimed,
             -> {
-                abandonedMemberLoginCheckOrNull()?.let { return@withBarrier it }
+                abandonedMemberLoginCheckOrNull(pending, owner)?.let { return@withBarrier it }
                 val joined = try {
                     backend.claimMemberLogin(current.endpointConfig.baseUrl, secret)
                 } catch (error: SyncHttpException) {
@@ -404,18 +443,18 @@ internal class FamilySessionCoordinator(
                         status == MemberLoginStatus.Claimed &&
                         error.statusCode in setOf(404, 409, 410)
                     ) {
-                        preferences.clearPendingMemberLogin()
+                        preferences.clearPendingMemberLogin(expectedOperationId = pending.operationId)
                         return@withBarrier FamilySessionOutcome.MemberLoginChecked(
-                            MemberLoginCheckResult.Terminal(status),
+                            MemberLoginCheckResult.Terminal(status, pending.operationId),
                         )
                     }
                     throw error
                 }
                 require(joined.role == FamilyRole.Member) { "成员登录响应角色无效" }
-                abandonedMemberLoginCheckOrNull()?.let { return@withBarrier it }
+                abandonedMemberLoginCheckOrNull(pending, owner)?.let { return@withBarrier it }
                 val session = claimedMemberSession(current, joined)
                 val dataRecovery = try {
-                    persistClaimedMemberSession(current, session)
+                    persistClaimedMemberSession(current, session, pending to owner)
                     // Initial pull belongs to the process sync loop. Account polling
                     // returns at the durable session boundary and cannot hang on a
                     // slow/offline NAS after the one-shot claim committed.
@@ -427,21 +466,23 @@ internal class FamilySessionCoordinator(
                     // capability. Do not report a joined session that never became
                     // durable. Receipt-reset/initial-pull failures happen after the
                     // replay slot retired and remain ordinary recovery work.
-                    if (preferences.pendingMemberLogin.first() != null) throw error
+                    if (error is com.lezi.babylog.sync.MemberLoginAttemptRetiredException ||
+                        preferences.pendingMemberLogin.first() != null
+                    ) throw error
                     InitialFamilyDataRecovery.RetryRequired(
                         causeKind = familyFailureKind(error),
                     )
                 }
                 FamilySessionOutcome.MemberLoginChecked(
-                    MemberLoginCheckResult.Joined(session, dataRecovery),
+                    MemberLoginCheckResult.Joined(session, dataRecovery, pending.operationId),
                 )
             }
             MemberLoginStatus.Rejected,
             MemberLoginStatus.Cancelled,
             MemberLoginStatus.Expired,
             -> {
-                preferences.clearPendingMemberLogin()
-                FamilySessionOutcome.MemberLoginChecked(MemberLoginCheckResult.Terminal(status))
+                preferences.clearPendingMemberLogin(expectedOperationId = pending.operationId)
+                FamilySessionOutcome.MemberLoginChecked(MemberLoginCheckResult.Terminal(status, pending.operationId))
             }
         }
     }
@@ -451,11 +492,11 @@ internal class FamilySessionCoordinator(
         require(!current.isJoined) { "这台设备已经加入家庭" }
         // Local abandon must not wait for the replica barrier. A full reconcile or
         // in-flight check cannot swallow “在这台设备放弃等待”.
-        if (preferences.pendingMemberLogin.first() == null) {
-            return FamilySessionOutcome.Completed
-        }
+        val pending = preferences.pendingMemberLogin.first() ?: return FamilySessionOutcome.Completed
         val secret = try {
-            preferences.pendingMemberSecret()
+            if (pending.remoteOutcomeUnknown) "" else preferences.pendingMemberSecretIfCurrent(
+                pending.requestId, preferences.memberReconnectOwner(),
+            ).orEmpty()
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Throwable) {
@@ -467,7 +508,7 @@ internal class FamilySessionCoordinator(
         // Device permanently blocked by its one durable pending slot. The server-side request is
         // best-effort and harmless when orphaned: without the retired secret it cannot be claimed
         // and expires on the existing 0.3.3 contract.
-        preferences.clearPendingMemberLogin()
+        preferences.clearPendingMemberLogin(expectedOperationId = pending.operationId)
         if (secret.isNotBlank()) {
             try {
                 launchBestEffort {
@@ -487,11 +528,12 @@ internal class FamilySessionCoordinator(
         return FamilySessionOutcome.Completed
     }
 
-    private suspend fun abandonedMemberLoginCheckOrNull(): FamilySessionOutcome? {
-        if (preferences.pendingMemberLogin.first() != null) return null
-        return FamilySessionOutcome.MemberLoginChecked(
-            MemberLoginCheckResult.Terminal(MemberLoginStatus.Cancelled),
-        )
+    private suspend fun abandonedMemberLoginCheckOrNull(
+        pending: PendingMemberLogin,
+        owner: MemberReconnectOwner,
+    ): FamilySessionOutcome? {
+        if (preferences.isPendingMemberLoginCurrent(pending.requestId, owner)) return null
+        throw com.lezi.babylog.sync.MemberLoginAttemptRetiredException()
     }
 
     private suspend fun listPendingMemberLogins(): FamilySessionOutcome =
@@ -552,30 +594,33 @@ internal class FamilySessionCoordinator(
         payload: MemberLoginQrPayload,
         deviceName: String,
     ): FamilySessionOutcome = withBarrier {
-        require(!preferences.session.first().isJoined) {
-            "请先退出当前家庭，再登录成员设备"
-        }
-        require(preferences.verifiedEndpoint.first() == payload.endpoint) {
-            "请先确认并保存二维码中的家庭服务器信任信息"
-        }
-        val joined = backend.claimMemberLoginGrant(
-            endpoint = payload.endpoint,
-            grant = payload.grant,
-            deviceName = requireDeviceName(deviceName),
-        )
-        require(joined.role == FamilyRole.Member) { "成员登录响应角色无效" }
         val previous = preferences.session.first()
-        val session = claimedMemberSession(
-            previous = previous,
-            joined = joined.copy(cursor = 0L),
-            baseUrl = payload.endpoint.origin,
-        )
-        persistClaimedMemberSession(previous, session)
-        val dataRecovery = scheduleInitialSync()
-        FamilySessionOutcome.Joined(
-            session = session,
-            dataRecovery = dataRecovery,
-        )
+        require(!previous.isJoined) { "请先退出当前家庭，再登录成员设备" }
+        val owner = preferences.memberReconnectOwner()
+        val operationId = java.util.UUID.randomUUID().toString()
+        check(preferences.beginMemberQrClaim(operationId, owner)) { "本机身份已变化，请重新确认二维码" }
+        try {
+            // The explicit QR profile pins this exchange; no temporary durable trust write.
+            val joined = backend.claimMemberLoginGrant(payload.endpoint, payload.grant, requireDeviceName(deviceName))
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            require(joined.role == FamilyRole.Member) { "成员登录响应角色无效" }
+            val session = claimedMemberSession(previous, joined.copy(cursor = 0L), payload.endpoint.origin)
+            if (previous.familyId.isNotBlank() && previous.familyId != session.familyId) {
+                revokeProbeSession(session)
+                throw DifferentFamilyServerException()
+            }
+            val resetPrevious = previous.takeUnless { replicaIdentityUnchanged(it, session) }
+            if (!preferences.activateMemberQrClaimIfCurrent(operationId, owner, session, payload.endpoint, resetPrevious)) {
+                throw com.lezi.babylog.sync.MemberLoginAttemptRetiredException()
+            }
+            onSessionChanged(preferences.session.first())
+            if (resetPrevious != null) recoverPendingReplicaReset()
+            FamilySessionOutcome.Joined(session = session, dataRecovery = scheduleInitialSync())
+        } finally {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                preferences.endMemberQrClaim(operationId)
+            }
+        }
     }
 
     private fun scheduleInitialSync(): InitialFamilyDataRecovery {
@@ -682,9 +727,14 @@ internal class FamilySessionCoordinator(
             FamilySessionOutcome.Completed
         }
 
-    private suspend fun logoutCurrentDevice(): FamilySessionOutcome =
+    private suspend fun logoutCurrentDevice(consent: com.lezi.babylog.sync.SourceCommandLogoutConsent?): FamilySessionOutcome =
         withAllowedSession { session ->
+            beforeDeviceLogout(consent)
             backend.logoutCurrentDevice(session)
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                preferences.markPendingDeviceRemovalClear()
+                afterDeviceLogoutConfirmed()
+            }
             FamilySessionOutcome.Completed
         }
 
@@ -697,9 +747,10 @@ internal class FamilySessionCoordinator(
                 "家庭名不能为空"
             }
             backend.renameFamily(session, normalized)
-            val updated = session.copy(familyName = normalized)
-            preferences.saveSession(updated)
-            onSessionObserved(updated)
+            check(preferences.updateFamilyName(session, normalized)) {
+                "修改家庭名期间会话已变化，请重试"
+            }
+            onSessionObserved(preferences.session.first())
             FamilySessionOutcome.Completed
         }
 
@@ -838,10 +889,21 @@ internal class FamilySessionCoordinator(
     private suspend fun persistClaimedMemberSession(
         previous: SyncSession,
         session: SyncSession,
+        pendingClaim: Pair<PendingMemberLogin, MemberReconnectOwner>? = null,
     ) {
         if (previous.familyId.isNotBlank() && previous.familyId != session.familyId) {
             revokeProbeSession(session)
             throw DifferentFamilyServerException()
+        }
+        if (pendingClaim != null) {
+            val (pending, owner) = pendingClaim
+            val resetPrevious = previous.takeUnless { replicaIdentityUnchanged(it, session) }
+            if (!preferences.activatePendingMemberIfCurrent(pending.requestId, owner, session, resetPrevious)) {
+                throw com.lezi.babylog.sync.MemberLoginAttemptRetiredException()
+            }
+            onSessionChanged(preferences.session.first())
+            if (resetPrevious != null) recoverPendingReplicaReset()
+            return
         }
         if (replicaIdentityUnchanged(previous, session)) {
             preferences.saveSession(session)
@@ -855,6 +917,7 @@ internal class FamilySessionCoordinator(
 
     /** Caller owns [barrier]. Safe to call during process/start-of-operation recovery. */
     suspend fun recoverPendingReplicaReset() {
+        if (recoverRestoreAuthority()) return
         val previous = preferences.pendingReplicaResetPrevious() ?: return
         val pending = preferences.session.first()
         replica.resetLocalSyncReceipts(
@@ -902,46 +965,29 @@ internal class FamilySessionCoordinator(
     }
 
     private suspend fun <T> withBarrier(block: suspend () -> T): T {
-        if (!tryAcquireBarrier()) {
-            throw FamilyHttpException(FamilyHttpFailureKind.HouseholdSyncing)
-        }
+        // The same coroutine owns acquisition, use, and release. The finally is
+        // installed before any cancellable handoff, including timeout completion.
+        var acquired = false
         try {
+            if (barrier.tryLock()) {
+                acquired = true
+            } else {
+                val withinBudget = withTimeoutOrNull(SESSION_BARRIER_WAIT_MILLIS) {
+                    barrier.lock()
+                    acquired = true
+                    true
+                } == true
+                if (!withinBudget) {
+                    throw FamilyHttpException(FamilyHttpFailureKind.HouseholdSyncing)
+                }
+            }
             beforeOperation()
             return block()
         } finally {
-            barrier.unlock()
+            if (acquired) barrier.unlock()
         }
     }
 
-    /**
-     * Acquire the replica barrier, or give up after [SESSION_BARRIER_WAIT_MILLIS].
-     * If [Mutex.lock] wins in the same instant as the wait timeout, unlock so the
-     * next approve / reconcile is not stuck in [FamilyHttpFailureKind.HouseholdSyncing].
-     */
-    private suspend fun tryAcquireBarrier(): Boolean {
-        if (barrier.tryLock()) return true
-        return coroutineScope {
-            val acquired = CompletableDeferred<Boolean>()
-            val locker = launch {
-                try {
-                    barrier.lock()
-                    if (!acquired.complete(true)) {
-                        barrier.unlock()
-                    }
-                } catch (cancelled: CancellationException) {
-                    acquired.complete(false)
-                    throw cancelled
-                }
-            }
-            val got = withTimeoutOrNull(SESSION_BARRIER_WAIT_MILLIS) { acquired.await() } == true
-            if (!got) {
-                acquired.complete(false)
-                locker.cancel()
-                locker.join()
-            }
-            acquired.isCompleted && acquired.getCompleted()
-        }
-    }
 }
 
 private fun requirePendingRequestId(requestId: String): String = requestId.trim().also {

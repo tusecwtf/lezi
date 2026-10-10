@@ -171,7 +171,7 @@ internal class ConflictAuditQueries(
 
 
     private suspend fun isFamilyAdmin(): Boolean {
-        val session = syncPort.session().first()
+        val session = syncPort.sessionPresentation().first()
         return session.role == com.lezi.babylog.sync.session.FamilyRole.Owner
     }
 }

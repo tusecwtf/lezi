@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 /**
@@ -138,6 +139,8 @@ fun SwipeEditDeleteRow(
     var widthPx by remember { mutableFloatStateOf(0f) }
     var heightPx by remember { mutableFloatStateOf(0f) }
     var crossedCommit by remember { mutableStateOf(false) }
+    var settleJob by remember { mutableStateOf<Job?>(null) }
+    var previousPermissions by remember { mutableStateOf(editEnabled to deleteEnabled) }
     val success = LocalLeziColors.current.success
     val danger = LocalLeziColors.current.danger
     val density = LocalDensity.current
@@ -157,7 +160,8 @@ fun SwipeEditDeleteRow(
     }
 
     fun settleFromDrag(current: Float) {
-        scope.launch {
+        settleJob?.cancel()
+        settleJob = scope.launch {
             val ratio = current / widthOrDefault()
             val settle = settleSwipeEditDelete(
                 offsetRatio = ratio,
@@ -200,7 +204,8 @@ fun SwipeEditDeleteRow(
     }
 
     fun closeAnimated(then: (() -> Unit)? = null) {
-        scope.launch {
+        settleJob?.cancel()
+        settleJob = scope.launch {
             dragging = false
             animOffset.animateTo(0f, animationSpec = tween(swipeSettleMs))
             dragOffset = 0f
@@ -213,10 +218,24 @@ fun SwipeEditDeleteRow(
     // Parent closed this row (another row opened, scroll, dialog).
     LaunchedEffect(open) {
         if (!open && (animOffset.value != 0f || dragOffset != 0f || dragging)) {
+            settleJob?.cancel()
             dragging = false
             animOffset.animateTo(0f, animationSpec = tween(swipeSettleMs))
             dragOffset = 0f
             crossedCommit = false
+        }
+    }
+
+    LaunchedEffect(editEnabled, deleteEnabled) {
+        val permissions = editEnabled to deleteEnabled
+        if (permissions != previousPermissions) {
+            previousPermissions = permissions
+            settleJob?.cancel()
+            dragging = false
+            dragOffset = 0f
+            crossedCommit = false
+            animOffset.snapTo(0f)
+            emitOpen(false)
         }
     }
 
@@ -348,7 +367,10 @@ fun SwipeEditDeleteRow(
                             },
                             onHorizontalDrag = { totalX -> applyDrag(totalX) },
                             onGestureEnd = settleGesture,
-                            onGestureCancel = settleGesture,
+                            onGestureCancel = { wasHorizontal ->
+                                // Cancellation is never a release, even past the commit threshold.
+                                if (wasHorizontal) closeAnimated()
+                            },
                         )
                     }
                 } else {

@@ -29,6 +29,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.junit.Test
@@ -67,6 +68,94 @@ class FamilyHttpDeadlineAcceptanceTest {
         assertThat(ForegroundSyncCycle.MAX_ELAPSED_MILLIS).isEqualTo(120_000)
         assertThat(FamilyHttpOperation.DisasterRestore.budget.maxElapsedMillis).isEqualTo(120_000)
         assertThat(FamilyHttpOperation.DisasterRestore.budget.maxAttempts).isEqualTo(1)
+    }
+
+    @Test
+    fun cancellationDisconnectsAnActivelyBlockedResponseBeforeItsTimeout() = runBlocking {
+        val reading = CountDownLatch(1)
+        val released = CountDownLatch(1)
+        val disconnected = AtomicBoolean(false)
+        val backend = HttpSyncBackend(
+            connectionFactory = SyncHttpConnectionFactory {
+                object : HttpURLConnection(URL("https://family.example.com/test")) {
+                    override fun connect() = Unit
+                    override fun usingProxy() = false
+                    override fun disconnect() { disconnected.set(true); released.countDown() }
+                    override fun getResponseCode(): Int {
+                        reading.countDown()
+                        released.await(3, TimeUnit.SECONDS)
+                        throw java.io.IOException("closed")
+                    }
+                }
+            },
+            nameResolver = FamilyHttpNameResolver { arrayOf(InetAddress.getLoopbackAddress()) },
+        )
+        val request = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).async {
+            backend.getAppUpdateMetadata(directSession())
+        }
+        try {
+            assertThat(reading.await(2, TimeUnit.SECONDS)).isTrue()
+            request.cancel()
+            assertThat(released.await(500, TimeUnit.MILLISECONDS)).isTrue()
+            assertThat(disconnected.get()).isTrue()
+            assertThat(runCatching { request.await() }.exceptionOrNull())
+                .isInstanceOf(kotlinx.coroutines.CancellationException::class.java)
+        } finally {
+            released.countDown()
+            request.cancel()
+        }
+    }
+
+    @Test
+    fun cancellingAnApkDownloadReleasesABlockedChunkWithoutWaitingForTheSocketTimeout() = runBlocking {
+        val reading = CountDownLatch(1)
+        val released = CountDownLatch(1)
+        val backend = HttpSyncBackend(
+            connectionFactory = SyncHttpConnectionFactory {
+                object : HttpURLConnection(URL("https://family.example.com/app.apk")) {
+                    override fun connect() = Unit
+                    override fun usingProxy() = false
+                    override fun disconnect() { released.countDown() }
+                    override fun getResponseCode() = 200
+                    override fun getContentLengthLong() = -1L
+                    override fun getInputStream(): InputStream = object : InputStream() {
+                        override fun read(): Int {
+                            reading.countDown()
+                            released.await(3, TimeUnit.SECONDS)
+                            throw java.io.IOException("closed chunk")
+                        }
+                    }
+                }
+            },
+        )
+        val request = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).async {
+            backend.downloadAppUpdateApk(directSession(), ByteArrayOutputStream())
+        }
+        try {
+            assertThat(reading.await(2, TimeUnit.SECONDS)).isTrue()
+            request.cancel()
+            assertThat(released.await(500, TimeUnit.MILLISECONDS)).isTrue()
+            assertThat(runCatching { request.await() }.exceptionOrNull())
+                .isInstanceOf(kotlinx.coroutines.CancellationException::class.java)
+        } finally {
+            released.countDown()
+            request.cancel()
+        }
+    }
+
+    @Test
+    fun successfulDnsConsumesTheSameDeadlineAsTheResponse() = runBlocking {
+        val clock = MutableElapsedClock(0)
+        val response = JsonDeadlineConnection(status = 201, body = ownerLoginBody(),
+            onResponse = { clock.elapsedMillis = 12_001 })
+        val backend = familyHttpBackend(ArrayDeque(listOf(response)),
+            nameResolver = FamilyHttpNameResolver {
+                clock.elapsedMillis = 2_900
+                arrayOf(InetAddress.getByName("127.0.0.1"))
+            }, familyHttpClock = clock)
+        val failure = runCatching { ownerLogin(backend) }.exceptionOrNull()
+        assertThat(failure).isInstanceOf(FamilyHttpException::class.java)
+        assertThat(response.readTimeout).isAtMost(9_100)
     }
 
     @Test
@@ -302,6 +391,92 @@ class FamilyHttpDeadlineAcceptanceTest {
     }
 
     @Test
+    fun receiptBackedSessionRetriesPreserveTheOriginalRequestIdentityAndContent() = runBlocking {
+        val endpoint = TrustedEndpointProfile.systemPki("https://family.example.com:8765")
+        val nonce = "original-request-00000000000000000001"
+        val secret = "original-secret-000000000000000000001"
+        val operations: List<suspend (HttpSyncBackend) -> Unit> = listOf(
+            { it.create(endpoint.origin, "Phone", "爸爸", nonce, "root", "Home") },
+            { it.ownerLogin(endpoint.origin, "Phone", nonce, "root", false) },
+            { it.ownerLogin(endpoint, "Phone", nonce, "root", true) },
+            { it.refresh(endpoint.origin, secret, nonce) },
+            { it.refresh(endpoint, secret, nonce) },
+            { it.claimMemberLogin(endpoint.origin, secret) },
+            { it.claimMemberLogin(endpoint, secret) },
+            { it.claimMemberLoginGrant(endpoint, secret, "Phone") },
+        )
+        for (operation in operations) {
+            val first = JsonDeadlineConnection(responseFailure = SocketTimeoutException("first response lost"))
+            val retry = JsonDeadlineConnection(responseFailure = SocketTimeoutException("retry response lost"))
+            val unused = JsonDeadlineConnection(body = "{}")
+            val backend = familyHttpBackend(ArrayDeque(listOf(first, retry, unused)))
+            assertThat(runCatching { operation(backend) }.exceptionOrNull())
+                .isInstanceOf(FamilyHttpException::class.java)
+            assertThat(first.opened.get()).isTrue()
+            assertThat(retry.opened.get()).isTrue()
+            assertThat(unused.opened.get()).isFalse()
+            assertThat(retry.sentBody()).isEqualTo(first.sentBody())
+            assertThat(retry.requestProperties).isEqualTo(first.requestProperties)
+        }
+    }
+
+    @Test
+    fun membershipWritesWithoutExactReceiptsNeverReplayALostResponse() = runBlocking {
+        val requestId = "request-00000000000000000000000001"
+        val operations: List<suspend (HttpSyncBackend) -> Unit> = listOf(
+            { it.createMemberLoginGrant(directSession(), TrustedEndpointProfile.systemPki(directSession().baseUrl), "member") },
+            { it.approveNewMemberLogin(directSession(), requestId) },
+            { it.bindExistingMemberLogin(directSession(), requestId, "member") },
+            { it.rejectMemberLogin(directSession(), requestId) },
+            { it.updateMyDisplayName(directSession(), "奶奶") },
+            { it.approveMemberRename(directSession(), requestId) },
+            { it.rejectMemberRename(directSession(), requestId) },
+            { it.cancelMyMemberRename(directSession()) },
+            { it.addFamilyMember(directSession(), "奶奶") },
+        )
+        for (operation in operations) {
+            val lost = JsonDeadlineConnection(responseFailure = SocketTimeoutException("committed response lost"))
+            val duplicate = JsonDeadlineConnection(body = "{}")
+            val backend = familyHttpBackend(ArrayDeque(listOf(lost, duplicate)))
+            assertThat(runCatching { operation(backend) }.exceptionOrNull())
+                .isInstanceOf(FamilyHttpException::class.java)
+            assertThat(lost.opened.get()).isTrue()
+            assertThat(duplicate.opened.get()).isFalse()
+        }
+    }
+
+    @Test
+    fun memberApplicationConnectFailureHasPositiveNotSentEvidence() = runBlocking {
+        val connection = JsonDeadlineConnection(connectFailure = SocketTimeoutException("connect failed"))
+        val backend = familyHttpBackend(ArrayDeque(listOf(connection)))
+        val failure = runCatching {
+            backend.requestMemberLogin("https://family.example.com", "爸爸", "Phone")
+        }.exceptionOrNull()
+        assertThat(failure).isInstanceOf(com.lezi.babylog.sync.backend.MemberLoginRequestNotSentException::class.java)
+        assertThat(connection.sentBody()).isEmpty()
+    }
+
+    @Test
+    fun memberRequestResponseLossDoesNotCreateASecondApplication() = runBlocking {
+        for (trustedOverload in listOf(false, true)) {
+            val committedButLost = JsonDeadlineConnection(
+                responseFailure = SocketTimeoutException("response lost after commit"),
+            )
+            val duplicate = JsonDeadlineConnection(status = 201, body = "{}")
+            val backend = familyHttpBackend(ArrayDeque(listOf(committedButLost, duplicate)))
+            val failure = runCatching {
+                if (trustedOverload) {
+                    backend.requestMemberLogin(TrustedEndpointProfile.systemPki("https://family.example.com"), "奶奶", "Phone")
+                } else {
+                    backend.requestMemberLogin("https://family.example.com", "奶奶", "Phone")
+                }
+            }.exceptionOrNull()
+            assertThat(failure).isInstanceOf(FamilyHttpException::class.java)
+            assertThat(duplicate.opened.get()).isFalse()
+        }
+    }
+
+    @Test
     fun addFamilyMemberDoesNotRetryAfterAConnectTimeout() = runBlocking {
         val first = JsonDeadlineConnection(
             connectFailure = SocketTimeoutException("connect timed out"),
@@ -437,6 +612,7 @@ private class JsonDeadlineConnection(
     private val connectFailure: Throwable? = null,
     private val writeBlocksUntilDisconnect: Boolean = false,
     private val slowResponseBytes: Boolean = false,
+    private val onResponse: () -> Unit = {},
 ) : HttpURLConnection(URL("https://family.example.com:8765/test")) {
     private val bytes = body.toByteArray(Charsets.UTF_8)
     private val requestBytes = ByteArrayOutputStream()
@@ -450,6 +626,7 @@ private class JsonDeadlineConnection(
     }
 
     override fun getResponseCode(): Int {
+        onResponse()
         connectFailure?.let { throw it }
         responseFailure?.let { throw it }
         if (slowResponseBytes) {
@@ -502,6 +679,8 @@ private class JsonDeadlineConnection(
         disconnected.set(true)
         released.countDown()
     }
+
+    fun sentBody(): String = requestBytes.toString(Charsets.UTF_8.name())
 
     override fun usingProxy(): Boolean = false
 }

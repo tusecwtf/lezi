@@ -1,7 +1,7 @@
 package com.lezi.babylog.feature.family
 
 import com.lezi.babylog.sync.session.FamilyRole
-import com.lezi.babylog.sync.session.SyncSession
+import com.lezi.babylog.sync.session.SyncSessionPresentation
 
 /**
  * Identity reloads when the joined session identity changes, or when a local
@@ -16,7 +16,7 @@ internal data class LocalFamilyIdentityReloadKey(
     val reauthRequired: Boolean,
 )
 
-internal fun localFamilyIdentityReloadKey(session: SyncSession): LocalFamilyIdentityReloadKey =
+internal fun localFamilyIdentityReloadKey(session: SyncSessionPresentation): LocalFamilyIdentityReloadKey =
     LocalFamilyIdentityReloadKey(
         familyId = session.familyId,
         deviceId = session.deviceId,

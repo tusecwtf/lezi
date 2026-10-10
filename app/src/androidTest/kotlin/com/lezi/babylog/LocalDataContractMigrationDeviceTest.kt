@@ -1,5 +1,9 @@
 package com.lezi.babylog
 
+// 192.168.77.10 is a synthetic RFC1918 LAN test endpoint, never a deployment default.
+
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.preferencesDataStoreFile
 import androidx.room.Room
@@ -29,6 +33,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -85,7 +91,7 @@ class LocalDataContractMigrationDeviceTest {
     }
 
     @Test
-    fun contractOneGateRunsAdjacentStepsAndRoom26Opens() = runBlocking {
+    fun contractOneGateRunsPermanentAdjacentChainThroughSevenAndRoom29Opens() = runBlocking {
         migrationHelper.createDatabase(DATABASE_NAME, 24).apply {
             execSQL(
                 """
@@ -202,7 +208,7 @@ class LocalDataContractMigrationDeviceTest {
             storage = storage,
         )
         val gate = DefaultLocalDataGate(
-            currentContractVersion = 6,
+            currentContractVersion = 7,
             minimumMigratableContractVersion = 1,
             steps = setOf(
                 customItemStep,
@@ -210,13 +216,14 @@ class LocalDataContractMigrationDeviceTest {
                 CausalRoomUpgradeStep(storage.database, storage.recordMedia, context.filesDir),
                 FinalCausalRoomUpgradeStep(storage.database),
                 MediaSha256ColumnUpgradeStep(storage.database),
+                RestoreAuthorityContractUpgradeStep(),
             ),
             environment = environment,
         )
 
         val ready = gate.ensureReady()
         assertWithMessage(gate.diagnosticReport()).that(ready).isTrue()
-        assertThat(gate.state.value).isEqualTo(LocalDataUpgradeState.Ready(6))
+        assertThat(gate.state.value).isEqualTo(LocalDataUpgradeState.Ready(7))
 
         val room = Room.databaseBuilder(
             context,
@@ -265,6 +272,75 @@ class LocalDataContractMigrationDeviceTest {
     }
 
     @Test
+    fun contractSixToSevenPreservesRoom29MetadataLegacyRestoreAndUnknownAttemptsAfterRestart() = runBlocking {
+        val mimeValues = listOf<String?>(null, "", "  ", "😀".repeat(255))
+        migrationHelper.createDatabase(DATABASE_NAME, 29).apply {
+            execSQL("INSERT INTO babies(id,familyId,nickname,birthdayEpochDay,themeColorArgb,clientUuid,updatedAt) VALUES(1,1,'宝宝',20000,0,?,100)", arrayOf(BABY_UUID))
+            execSQL("INSERT INTO records(id,clientUuid,babyId,type,timestamp,payloadJson,schemaVersion,updatedAt,createdByMembershipId) VALUES(1,?,1,'formula',100,'{}',2,120,'old-owner')", arrayOf(RECORD_UUID))
+            mimeValues.forEachIndexed { index, mime ->
+                execSQL("INSERT INTO media_assets(id,recordId,clientUuid,kind,localUri,mime,byteSize,createdAt,updatedAt) VALUES(?,1,?,'log',?,?,4,120,120)",
+                    arrayOf<Any?>(index + 1, "00000000-0000-4000-8000-00000000010$index", "retained-$index.jpg", mime))
+            }
+            execSQL("INSERT INTO causal_transport_journal(journalKey,payloadJson,contentEpoch) VALUES('frozen-mutation:record:old','{\"mime\":null,\"width\":null,\"height\":null}',120)")
+            close()
+        }
+        val retainedFile = File(storage.recordMedia, "retained-0.jpg").apply {
+            parentFile?.mkdirs(); writeBytes(byteArrayOf(1, 2, 3, 4))
+        }
+        var dataStore = PreferenceDataStoreFactory.create(scope = storeScope, produceFile = { settingsFile })
+        val credentials = InMemorySecureRefreshTokenStore()
+        val prefs = DataStoreSyncPreferences(dataStore, credentials)
+        val endpoint = TrustedEndpointProfile.systemPki("https://replacement.example.test")
+        val checkpoint = com.lezi.babylog.sync.session.DisasterRestoreCheckpoint(
+            batchId = "11111111-1111-4111-8111-111111111111", endpoint = endpoint, familyId = "family-a",
+            startRequestId = "22222222-2222-4222-8222-222222222222",
+            manifestRequestId = "33333333-3333-4333-8333-333333333333",
+            commitRequestId = "44444444-4444-4444-8444-444444444444",
+            expiresAtEpochSeconds = 9_999_999_999, status = "commit_uncertain", entityVersions = emptyList(),
+        )
+        prefs.saveDisasterRestoreCheckpoint(checkpoint, "synthetic-recovery-token")
+        val attempts = listOf("sync_member_login_attempt_v1", "sync_member_reconnect_attempt_v1")
+        val attemptJson = """{"version":1,"operation_id":"55555555-5555-4555-8555-555555555555","origin":"https://replacement.example.test","display_name":"家长","device_name":"手机"}"""
+        dataStore.edit { values -> attempts.forEach { values[stringPreferencesKey(it)] = attemptJson } }
+        fun environment() = AndroidLocalDataUpgradeEnvironment(context, Lazy { dataStore },
+            Lazy { credentials }, storage)
+        environment().commitContract(6)
+        fun gate() = DefaultLocalDataGate(currentContractVersion = 7, minimumMigratableContractVersion = 1,
+            steps = setOf(RestoreAuthorityContractUpgradeStep()), environment = environment())
+        val firstGate = gate()
+        assertWithMessage(firstGate.diagnosticReport()).that(firstGate.ensureReady()).isTrue()
+        assertThat(firstGate.state.value).isEqualTo(LocalDataUpgradeState.Ready(7))
+        assertThat(prefs.disasterRestoreCheckpoint.first()).isEqualTo(checkpoint)
+        assertThat(prefs.disasterRestoreToken()).isEqualTo("synthetic-recovery-token")
+        SQLiteDatabase.openDatabase(storage.database.path, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
+            assertThat(sqlite.version).isEqualTo(29)
+            sqlite.rawQuery("SELECT mime,width,height FROM media_assets ORDER BY id", null).use { cursor ->
+                mimeValues.forEach { mime ->
+                    assertThat(cursor.moveToNext()).isTrue()
+                    assertThat(if (cursor.isNull(0)) null else cursor.getString(0)).isEqualTo(mime)
+                    assertThat(cursor.isNull(1) && cursor.isNull(2)).isTrue()
+                }
+            }
+            sqlite.rawQuery("SELECT payloadJson FROM causal_transport_journal WHERE journalKey='frozen-mutation:record:old'", null).use {
+                assertThat(it.moveToFirst()).isTrue()
+                assertThat(it.getString(0)).isEqualTo("""{"mime":null,"width":null,"height":null}""")
+            }
+        }
+        assertThat(retainedFile.readBytes()).isEqualTo(byteArrayOf(1, 2, 3, 4))
+        storeScope.coroutineContext[Job]!!.cancelAndJoin()
+        storeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        dataStore = PreferenceDataStoreFactory.create(scope = storeScope, produceFile = { settingsFile })
+        assertThat(environment().inspect().contractVersion).isEqualTo(7)
+        assertThat(gate().ensureReady()).isTrue()
+        val restarted = DataStoreSyncPreferences(dataStore, credentials)
+        assertThat(restarted.disasterRestoreCheckpoint.first()).isEqualTo(checkpoint)
+        attempts.forEach { assertThat(dataStore.data.first()[stringPreferencesKey(it)]).isEqualTo(attemptJson) }
+        val room = Room.databaseBuilder(context, LeziDatabase::class.java, DATABASE_NAME).build()
+        openedDatabase = room
+        assertThat(room.recordDao().getByClientUuid(RECORD_UUID)?.createdByMembershipId).isEqualTo("old-owner")
+    }
+
+    @Test
     fun everyReleasedProductionVersionMapsToACompleteForwardContractBoundary() {
         val catalog = JSONObject(
             InstrumentationRegistry.getInstrumentation().context.assets
@@ -276,7 +352,7 @@ class LocalDataContractMigrationDeviceTest {
         val versionCodes = mutableListOf<Int>()
         val observedBoundaries = mutableSetOf<Pair<Int, Int>>()
         val planner = LocalDataUpgradePlanner(
-            currentContractVersion = 6,
+            currentContractVersion = 7,
             minimumMigratableContractVersion = 1,
             steps = setOf(
                 CatalogMigrationStep(1, 2),
@@ -284,6 +360,7 @@ class LocalDataContractMigrationDeviceTest {
                 CatalogMigrationStep(3, 4),
                 CatalogMigrationStep(4, 5),
                 CatalogMigrationStep(5, 6),
+                RestoreAuthorityContractUpgradeStep(),
             ),
         )
 
@@ -298,7 +375,7 @@ class LocalDataContractMigrationDeviceTest {
             val inspection = detectLocalDataInspection(
                 markerVersion = contract,
                 roomSchema = roomSchema,
-                currentContractVersion = 6,
+                currentContractVersion = 7,
                 roomSchemasByContract = mapOf(
                     1 to 24,
                     2 to 25,
@@ -306,18 +383,19 @@ class LocalDataContractMigrationDeviceTest {
                     4 to 27,
                     5 to 28,
                     6 to 29,
+                    7 to 29,
                 ),
             )
             val plan = planner.planFrom(inspection.contractVersion)
-            if (contract == 6) {
+            if (contract == 7) {
                 assertThat(plan).isEqualTo(LocalDataUpgradePlan.Ready)
             } else {
                 assertThat((plan as LocalDataUpgradePlan.Upgrade).steps.last().toContractVersion)
-                    .isEqualTo(6)
+                    .isEqualTo(7)
             }
         }
 
-        assertThat(versionCodes).containsExactlyElementsIn(6..33).inOrder()
+        assertThat(versionCodes).containsExactlyElementsIn(6..34).inOrder()
         assertThat(observedBoundaries).containsExactly(
             1 to 24,
             2 to 25,
@@ -328,9 +406,9 @@ class LocalDataContractMigrationDeviceTest {
         )
 
         val target = catalog.getJSONObject("upgrade_target")
-        assertThat(target.getInt("version_code")).isEqualTo(34)
+        assertThat(target.getInt("version_code")).isEqualTo(35)
         assertThat(target.getInt("room_schema")).isEqualTo(29)
-        assertThat(target.getInt("local_data_contract")).isEqualTo(6)
+        assertThat(target.getInt("local_data_contract")).isEqualTo(7)
 
     }
 
@@ -612,7 +690,7 @@ class LocalDataContractMigrationDeviceTest {
             storage = storage,
         )
         val gate = DefaultLocalDataGate(
-            currentContractVersion = 6,
+            currentContractVersion = 7,
             minimumMigratableContractVersion = 1,
             steps = setOf(
                 CustomItemClientUuidIndexUpgradeStep(
@@ -623,6 +701,7 @@ class LocalDataContractMigrationDeviceTest {
                 CausalRoomUpgradeStep(storage.database, storage.recordMedia, context.filesDir),
                 FinalCausalRoomUpgradeStep(storage.database),
                 MediaSha256ColumnUpgradeStep(storage.database),
+                RestoreAuthorityContractUpgradeStep(),
             ),
             environment = environment,
         )
@@ -630,7 +709,7 @@ class LocalDataContractMigrationDeviceTest {
         val ready = gate.ensureReady()
 
         assertWithMessage(gate.diagnosticReport()).that(ready).isTrue()
-        assertThat(gate.state.value).isEqualTo(LocalDataUpgradeState.Ready(6))
+        assertThat(gate.state.value).isEqualTo(LocalDataUpgradeState.Ready(7))
         val room = Room.databaseBuilder(
             context,
             LeziDatabase::class.java,
@@ -838,19 +917,20 @@ class LocalDataContractMigrationDeviceTest {
             storage = storage,
         )
         val gate = DefaultLocalDataGate(
-            currentContractVersion = 6,
+            currentContractVersion = 7,
             minimumMigratableContractVersion = 1,
             steps = setOf(
                 CausalRoomUpgradeStep(storage.database, storage.recordMedia, context.filesDir),
                 FinalCausalRoomUpgradeStep(storage.database),
                 MediaSha256ColumnUpgradeStep(storage.database),
+                RestoreAuthorityContractUpgradeStep(),
             ),
             environment = environment,
         )
 
         val ready = gate.ensureReady()
         assertWithMessage(gate.diagnosticReport()).that(ready).isTrue()
-        assertThat(gate.state.value).isEqualTo(LocalDataUpgradeState.Ready(6))
+        assertThat(gate.state.value).isEqualTo(LocalDataUpgradeState.Ready(7))
 
         val room = Room.databaseBuilder(
             context,

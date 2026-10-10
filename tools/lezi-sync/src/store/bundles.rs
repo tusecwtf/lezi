@@ -291,38 +291,44 @@ fn load_family_custom_items(
     Ok(existing)
 }
 
-fn load_family_media(
+fn load_validation_media(
     transaction: &Transaction<'_>,
     family_id: &str,
+    package: &[Entity],
 ) -> Result<HashMap<EntityKey, ExistingEntity>, StoreError> {
-    let mut statement = transaction.prepare(
-        "
-        SELECT client_uuid, updated_at, deleted_at, payload_json
-        FROM entities
-        WHERE family_id = ?1 AND entity_type = 'media'
-        ",
-    )?;
-    let rows = statement.query_map(params![family_id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, Option<i64>>(2)?,
-            row.get::<_, String>(3)?,
-        ))
-    })?;
-    let mut existing = HashMap::new();
-    for row in rows {
-        let (client_uuid, updated_at, deleted_at, payload_json) = row?;
-        existing.insert(
-            ("media".to_owned(), client_uuid),
-            ExistingEntity {
-                updated_at,
-                deleted_at,
-                payload: parse_payload(&payload_json)?,
-            },
+    let mut keys = validation_reference_keys(package)
+        .into_iter()
+        .filter(|(entity_type, _)| entity_type == "media")
+        .collect::<BTreeSet<_>>();
+    let mut roots = BTreeSet::new();
+    for entity in package {
+        if entity.entity_type == "media" {
+            // Load even deleted incoming UUIDs: immutable ownership is not
+            // limited to the current root's live manifest.
+            keys.insert(entity_key(entity));
+            if let Some(root) = media_root_key(&media_association(&entity.payload)?) {
+                roots.insert(root);
+            }
+        } else if matches!(
+            entity.entity_type.as_str(),
+            "baby" | "record" | "care_plan" | "wake_observation"
+        ) {
+            roots.insert(entity_key(entity));
+        }
+    }
+    for (entity_type, client_uuid) in roots {
+        keys.extend(
+            super::media_associations::live_ids_for_root(
+                transaction,
+                family_id,
+                &entity_type,
+                &client_uuid,
+            )?
+            .into_iter()
+            .map(|id| ("media".to_owned(), id)),
         );
     }
-    Ok(existing)
+    load_existing_entities(transaction, family_id, &keys)
 }
 
 /// Rewrite or drop `sync_bundles` rows that still reference a departed membership.
@@ -1612,7 +1618,11 @@ pub(in crate::store) fn validate_canonical_package_ingress(
     let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
     let mut existing = load_existing_entities(transaction, &principal.family_id, &incoming_keys)?;
     existing.extend(load_family_custom_items(transaction, &principal.family_id)?);
-    existing.extend(load_family_media(transaction, &principal.family_id)?);
+    existing.extend(load_validation_media(
+        transaction,
+        &principal.family_id,
+        package,
+    )?);
     let reference_keys = validation_reference_keys(package);
     let missing_references = reference_keys
         .difference(&incoming_keys)
@@ -1843,6 +1853,7 @@ impl Store {
         }
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::causal::require_current_principal(&transaction, principal)?;
 
         // Canonicalize every server-owned field before hashing so forged client
         // claims never become part of the durable package identity.
@@ -1852,7 +1863,7 @@ impl Store {
         let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
         let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
         existing.extend(load_family_custom_items(&transaction, family_id)?);
-        existing.extend(load_family_media(&transaction, family_id)?);
+        existing.extend(load_validation_media(&transaction, family_id, &package)?);
         stamp_and_authorize_custom_items(role, membership_id, &mut package, &existing)?;
         // CarePlan collision authorization must inspect the caller's creator
         // claim before equal-LWW canonicalization replaces it with the published
@@ -2070,6 +2081,7 @@ impl Store {
         } = principal;
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::causal::require_current_principal(&transaction, principal)?;
         let row = load_bundle_row(&transaction, family_id, bundle_id)?
             .ok_or(StoreError::BundleNotFound)?;
 
@@ -2123,6 +2135,13 @@ impl Store {
             ));
         }
 
+        // Durable legacy replay above is still a valid terminal receipt. An
+        // uncommitted legacy causal root must never overwrite today's head via
+        // the retired LWW path. Preserve its staging row for explicit recovery.
+        if row.root_type != "fulfillment_candidate" {
+            return Err(StoreError::LegacyBundleCausalRootUnsupported(row.root_type));
+        }
+
         let root = Entity {
             entity_type: row.root_type.clone(),
             client_uuid: row.root_client_uuid.clone(),
@@ -2162,7 +2181,7 @@ impl Store {
         let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
         let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
         existing.extend(load_family_custom_items(&transaction, family_id)?);
-        existing.extend(load_family_media(&transaction, family_id)?);
+        existing.extend(load_validation_media(&transaction, family_id, &package)?);
         stamp_and_authorize_custom_items(role, membership_id, &mut package, &existing)?;
         // A competing CarePlan can publish after this bundle was staged. Inspect
         // the complete staged package before LWW removes an equal/stale root so a

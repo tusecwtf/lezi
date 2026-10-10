@@ -54,7 +54,7 @@ class CareLogSearchRepository @Inject constructor(
 ) : SearchRepository {
     override suspend fun search(query: String): List<SearchResult> {
         val baby = careLog.getCurrentBaby() ?: return emptyList()
-        val session = syncPort.session().first()
+        val session = syncPort.sessionPresentation().first()
         val actorMembershipId = session.membershipId
         val actorIsAdmin = session.role == FamilyRole.Owner
         return careLog.search(baby.id, query).map { record ->

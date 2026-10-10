@@ -235,9 +235,9 @@ class RealSyncPortPushPullTest {
         }
         rig.backend.afterCommit = { rig.foreground.setForeground(false) }
 
-        val result = rig.port.sync(SyncTrigger.LocalWrite)
+        val failure = runCatching { rig.port.sync(SyncTrigger.LocalWrite) }.exceptionOrNull()
 
-        assertThat(result.isFailure).isTrue()
+        assertThat(failure).isInstanceOf(CancellationException::class.java)
         assertThat(rig.backend.causalCommittedUnits).hasSize(1)
         assertThat(rig.babies.listPendingSync()).hasSize(141)
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)

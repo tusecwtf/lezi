@@ -56,9 +56,10 @@ pub(crate) fn migrate_v11_database(
     }
 
     let parent = dest_db.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-    let temp = temp_dest_path(dest_db);
-    remove_db_files(&temp);
+    super::private_output::private_directories(parent)?;
+    let owned_temp = super::private_output::PrivateDirectory::new(parent, "v11-migrating")?;
+    let temp = owned_temp.path().join("lezi.db");
+    super::private_output::private_file(&temp)?;
 
     let result = (|| {
         let mut dest = Connection::open(&temp)?;
@@ -125,7 +126,7 @@ pub(crate) fn migrate_v11_data_dir(
             format!("source database missing: {}", source_db.display()),
         )));
     }
-    fs::create_dir_all(dest_data_dir)?;
+    super::private_output::private_directories(dest_data_dir)?;
 
     if dest_db.try_exists()? {
         return Err(MigrateError::Internal(format!(
@@ -159,7 +160,7 @@ pub(crate) fn migrate_v11_data_dir(
     let src_secret = source_data_dir.join("server.secret");
     if src_secret.is_file() {
         let dest_secret = dest_data_dir.join("server.secret");
-        if let Err(error) = fs::copy(&src_secret, &dest_secret) {
+        if let Err(error) = super::private_output::copy_private(&src_secret, &dest_secret) {
             super::media::cleanup_migrator_data_dir_outputs(dest_data_dir);
             return Err(MigrateError::Io(error));
         }
@@ -189,7 +190,7 @@ fn copy_dir_recursive(
     to: &Path,
     report: &mut MigrateReport,
 ) -> Result<(), MigrateError> {
-    fs::create_dir_all(to)?;
+    super::private_output::private_directories(to)?;
     for entry in fs::read_dir(from)? {
         let entry = entry?;
         let ft = entry.file_type()?;
@@ -197,7 +198,7 @@ fn copy_dir_recursive(
         if ft.is_dir() {
             copy_dir_recursive(&entry.path(), &dest_path, report)?;
         } else if ft.is_file() && !dest_path.exists() {
-            fs::copy(entry.path(), &dest_path)?;
+            super::private_output::copy_private(&entry.path(), &dest_path)?;
             report.media_files_copied += 1;
         }
     }

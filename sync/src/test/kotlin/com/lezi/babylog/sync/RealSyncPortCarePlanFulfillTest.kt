@@ -42,6 +42,10 @@ class RealSyncPortCarePlanFulfillTest {
                 SyncEntity(
                     type = "media",
                     clientUuid = testMediaUuid("remote-plan-media-1"),
+                    mediaIdentity = com.lezi.babylog.sync.backend.PullMediaIdentity(
+                        testMediaUuid("remote-plan-media-1"), "plan",
+                        com.lezi.babylog.core.common.MediaContentDigest.ofBytes(byteArrayOf(1, 2, 3)), 3,
+                    ),
                     payloadJson =
                         """{"kind":"log","record_client_uuid":null,"care_plan_client_uuid":"remote-plan-1","baby_client_uuid":"$babyUuid","mime":"image/jpeg","width":null,"height":null,"byte_size":3}""",
                     updatedAt = 500,
@@ -53,14 +57,14 @@ class RealSyncPortCarePlanFulfillTest {
             hasMore = false,
         )
         rig.backend.mediaBytes = byteArrayOf(1, 2, 3)
-        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        rig.port.sync(SyncTrigger.Foreground).getOrThrow()
         val plan = rig.carePlans.getByClientUuid("remote-plan-1")
         assertThat(plan).isNotNull()
         assertThat(plan!!.syncDirty).isFalse()
         assertThat(plan.status).isEqualTo("pending")
         val media = rig.media.listForCarePlan(plan.id).single()
-        assertThat(media.localUri)
-            .isEqualTo("downloaded/${testMediaUuid("remote-plan-media-1")}")
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(media.localUri)).readBytes())
+            .isEqualTo(byteArrayOf(1, 2, 3))
         assertThat(media.recordId).isNull()
         assertThat(media.babyId).isNull()
         assertThat(applied).containsExactly("remote-plan-1")

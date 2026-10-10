@@ -1,8 +1,10 @@
 package com.lezi.babylog.sync.conflict
 
+import com.lezi.babylog.sync.media.parseCanonicalMediaMime
+import com.lezi.babylog.sync.media.requireCanonicalMediaMime
 import com.lezi.babylog.sync.engine.SyncWireMapper
 import com.lezi.babylog.core.model.RecordType
-import com.lezi.babylog.core.model.isNextFeedPlanNote
+import com.lezi.babylog.core.model.carePlanAllowsIntentOnlyFeed
 import com.lezi.babylog.sync.backend.CausalMediaItem
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -327,7 +329,7 @@ private fun validateCanonicalMedia(
         require(item.role == entityType.mediaRole) { "$itemContext.role 无效" }
         require(LOWER_SHA.matches(item.sha256)) { "$itemContext.sha256 无效" }
         require(item.byteSize > 0) { "$itemContext.byte_size 无效" }
-        ConflictSnapshotValidation.requireBounded(item.mime, 1, 255, "$itemContext.mime")
+        requireCanonicalMediaMime(item.mime)
         item.width?.also {
             require(it in 1..Int.MAX_VALUE.toLong()) { "$itemContext.width 无效" }
         }
@@ -482,7 +484,7 @@ private fun JsonObject.toRoot(type: ConflictRootType, context: String): Conflict
             payload = SyncWireMapper.requireCurrentTransportPayload(
                 type = recordType,
                 payload = requiredObject("payload_json", context),
-                allowIntentOnlyFeed = isNextFeedPlanNote(note),
+                allowIntentOnlyFeed = carePlanAllowsIntentOnlyFeed(recordType, note),
             ),
             schemaVersion = schemaVersion,
             status = status,
@@ -557,9 +559,7 @@ private fun JsonObject.toSnapshotMedia(context: String): CausalMediaItem {
         role = requiredString("role", context),
         sha256 = sha,
         byteSize = requiredLong("byte_size", context).also { require(it > 0) },
-        mime = ConflictSnapshotValidation.requireBounded(
-            requiredString("mime", context), 1, 255, "$context.mime",
-        ),
+        mime = parseCanonicalMediaMime(get("mime")),
         width = nullableLong("width", context)?.also {
             require(it in 1..Int.MAX_VALUE.toLong()) { "$context.width 无效" }
         },
@@ -718,7 +718,10 @@ private fun JsonObject.nonNegativeLong(key: String, context: String): Long =
     ConflictSnapshotValidation.requireNonNegative(requiredLong(key, context), "$context.$key")
 
 private fun JsonObject.boundedMembership(key: String, context: String): String =
-    ConflictSnapshotValidation.requireBounded(requiredString(key, context), 1, 64, "$context.$key")
+    // ADR-0025 redacts historical roots without changing their version identity.
+    // Missing keys, malformed types, and empty string stamps remain invalid.
+    if (get(key) === JsonNull) ""
+    else ConflictSnapshotValidation.requireBounded(requiredString(key, context), 1, 64, "$context.$key")
 
 private fun JsonObject.boundedNote(context: String): String? = nullableString("note", context)?.also {
     require(it.length <= ConflictSnapshotValidation.MAX_NOTE_CHARS) { "$context.note 过长" }

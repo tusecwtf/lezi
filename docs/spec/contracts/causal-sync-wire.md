@@ -1,9 +1,16 @@
-# 乐记 — 0.4.0 因果同步 Wire 合同（conflict-v2 冻结）
+# 乐记 — 因果同步 Wire 合同
 
-> **状态：** 本文是 **协议冻结** 合同：Android/server **0.4.0**、versionCode **21**、Room **28**、本地数据契约
-> **5**、server schema **13**、同步 floor **21**。0.3.13/code 20/Room 27/server schema 12 是升级源。
-> **当前 tree** 是 0.5.4 / versionCode **34** / Room **29** / 本地数据契约 **6**；Room 28→29 只加空列
-> `media_assets.sha256`，0.5.0/0.5.1/0.5.2/0.5.3/0.5.4 零 schema，不改本 wire、不抬 floor。
+> **当前批准候选：wire0.5.0 / app0.5.5 code35 / server0.5.5 / Room29 / local contract7 / server schema13。**
+> 零分钟母乳计划意图要求手机/服务器配套升级，固定 floor35 独立于更新渠道；生产渠道与NAS仍为真实0.5.4/code34，候选未部署。历史golden release身份不改写。
+
+## 0. Schema13-compatible restore authority
+
+- Ordinary authenticated handshake is exactly `["causal_sync_v2","nursing_plan_intent_v1"]`, protocol_version1. Authoritative data routes require versionCode≥35 and the nursing capability independently of optional verified app-update metadata. New Android health/setup also requires this capability. This is a wire/value-domain revision without SQL DDL
+- Normal requests send `X-Lezi-Sync-Capabilities: nursing_plan_intent_v1`; restore requests additionally declare `restore_authority_v1`. Setup advertises both capabilities; upgraded restore routes require both. New clients refuse restore against old servers and recheck before resume/commit. Start/manifest/commit JSON requires `restore_authority:"v1"`; old servers reject that unknown field. Commit success additionally requires the same marker after server baseline verification, including replay
+- Canonical media `mime` remains the historical required nonempty string of at most128 UTF8 bytes. Preserve exact supported whitespace/Unicode; never normalize a raw value to fit
+- RawEntity null/empty/long MIME remains valid local data but cannot yet continue losslessly through schema13 canonical authority. Client preflight before uploads and server pre-activation defense stop that operation with `restore_lossless_unsupported`; preserve all inputs, no partial activation or omitted photos
+- Exact schema13 SQL shape, no new indexes/tables/columns, converter or startup backfill. Existing data upgrades losslessly; old software is not promised to read new zero-minute nursing-plan values, and old-binary rollback after such writes is unsupported. Ordinary no-head overwrite remains forbidden. Legacy provenance is accepted only through precise validated evidence, never an arbitrary parent
+- Authenticated batch-scoped deterministic baselines, durable Android switching and the accepted compatibility boundary are specified in [ADR0026](../../adr/0026-durable-restore-authority-generation.md). The preserved schema14 comparison candidate is not this release contract
 
 > 历史 0.3.9–0.3.12 叙述见
 > [`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md) 与 [`data-model.md`](./data-model.md)。
@@ -24,14 +31,14 @@
 
 | 项 | 合同 |
 |----|------|
-| 新 capability（认证握手 `capabilities` 数组，字面量冻结） | `causal_sync_v2`；服务端与客户端只 advertise/接受该单项；旧 `causal_versions`/`wake_observation`/`source_relations` 集合只标识 0.3.13 source wire，不等价于 v2，mixed generation mutation 前拒绝 |
-| setup-status capabilities（**增量语义**，0.4.8 起明确） | `/v1/setup-status` 的 `capabilities` 列表按**增量语义**演进：新版本可追加新键（如 0.4.8 `sync_heartbeat_v1`），客户端必须忽略不认识的键；只有 §1.2 认证握手的 `capabilities` 键集是冻结精确匹配（多键即 mismatch）。两个列表不得混淆，新能力**不得**加进握手键集 |
-| minSupported | 当前 floor 为 versionCode **21**；能力、schema、floor 已一并激活。再抬 floor 须先原子发布可安装、签名与 hash 匹配的 APK + metadata |
+| 当前 capability（认证握手 `capabilities` 数组，字面量冻结） | 精确集合 `["causal_sync_v2","nursing_plan_intent_v1"]`；缺项、额外项、重复项或旧代集合均在权威数据访问前拒绝。`restore_authority_v1` 仅属恢复能力，不加入普通握手 |
+| setup-status capabilities（**增量语义**，0.4.8 起明确） | `/v1/setup-status` 的 `capabilities` 列表按**增量语义**演进：新版本可追加新键（如 0.4.8 `sync_heartbeat_v1`），客户端必须忽略不认识的键；只有 §1.2 认证握手的当前两项集合采用冻结精确匹配；增量能力不得擅自改变握手。`nursing_plan_intent_v1` 是本次明确批准的 wire0.5 值域切换，不是任意增量探针 |
+| minSupported | 候选运行时固定 floor 为 versionCode **35**，独立于更新渠道并与 nursing 能力一起检查；生产仍是历史 code34/floor21。实际发布须先具备真实可安装、签名与 hash 匹配的 APK35 + metadata，本任务未部署 |
 | 旧客户端 / mixed generation | mutation 前 `capability_mismatch`；无 dual-read、dual-write、downgrade 或 skip-unknown |
-| Android upgrade | Room **27→28** 相邻非破坏迁移；永久 code 6/Room 24 链连续到当前 Room；facts/tombstone/pending/frozen envelope/conflict/media/spool/session/credentials/endpoint/TLS trust 全保留 |
+| Android upgrade | 永久 code6/Room24 链连续到当前 **Room29 / contract7**，保留每个历史相邻非破坏步骤；facts/tombstone/pending/frozen envelope/conflict/media/spool/session/credentials/endpoint/TLS trust 全保留 |
 | Server startup | 只接受精确 `user_version=13` 或空 fresh root；不在 startup/ordinary CD 自动迁移 |
 | Server source | 维护窗 copy-out `offline-migrate` 只接受完整且 shape 匹配的 **11 或 12**，写独立 staging root；其它版本/WAL/SHM/media 不完整 fail closed；实际生产 source 须在 stop/rm 前只读测量 |
-| CD / rollback | schema 11/12→13 走已授权维护窗 copy-out；普通 CD 只替换同 schema 13 镜像，必须复用 TLS 身份 |
+| CD / rollback | 历史11/12→13 copy-out 不构成本任务部署授权；任何维护须单独批准并复用TLS身份。相同SQL13不代表旧二进制能读取新增零分钟计划值，写入新值后不得宣称可回退0.5.4 |
 
 HTTP 路径前缀字符串（如 `/v1/families/...`）可由实现贴合现有路由树，但 **职责、方法语义与 body shape 以本节为准**，不得另起竞争 API。
 
@@ -48,7 +55,7 @@ endpoint trust 与家庭 session 已成立后，每个普通同步周期只发�
 ```json
 {
   "protocol_version": 1,
-  "required_capabilities": ["causal_sync_v2"]
+  "required_capabilities": ["causal_sync_v2", "nursing_plan_intent_v1"]
 }
 ```
 
@@ -57,7 +64,7 @@ endpoint trust 与家庭 session 已成立后，每个普通同步周期只发�
 | 字段 | 合同 |
 |------|------|
 | `protocol_version` / `server_version` / `ready` | 协议字面量、服务端发布版本与当前同步 readiness |
-| `capabilities` | 0.4.0 精确单项 `causal_sync_v2`；旧三项、额外项、缺项、重复项与 mixed generation 均 mismatch |
+| `capabilities` | 当前0.5.0精确两项 `causal_sync_v2`、`nursing_plan_intent_v1`；旧单项/三项、额外项、缺项、重复项与 mixed generation 均 mismatch |
 | `principal` | `{membership_id, device_id, role}`；全部从 session/ACL 派生，客户端不得提供 |
 | `directory_generation` | 成员/设备目录结构 generation；认证活动时间不得使它变化 |
 | `limits` | `{pull_page_max_entities:200,pull_page_max_encoded_bytes:9437184,pull_page_max_decoded_bytes:8388608,pull_max_pages:500,commit_batch_max_units,media_max_bytes}` |
@@ -110,8 +117,8 @@ snapshot 等外部状态改变。
 `cursor`、`generation` 与从 0 单调递增的 `page_index`。客户端进程重启或本轮失败后，以最后耐久
 checkpoint 的 cursor 开始新一轮，`page_index` 重新从 0 计数。服务端响应是 closed object：
 `{entities,cursor,generation,page_index,has_more,family_name}`，其中 `page_index` 必须精确回显。
-H16 客户端始终显式发送 `page_index`。**0.5.0 注记：** 旧 source 客户端缺省 `page_index=0` 已退役；
-缺该参数 → 422。握手键集与 pull 信封形状不变。
+H16 客户端始终显式发送 `page_index`；已发布0.5.4/schema13也要求此字段，缺失返回422。
+当前候选保留该请求语法与pull信封；握手能力变更单独见§1.2。
 
 **0.4.8 家庭改名注记：** owner 改名（`POST /v1/family/name`）属会推进水位的变更——它与改名
 同事务推进 `family_meta.rev`（§1.5 `head_rev` 与 pull cursor 的同一源头，与各因果写路径同语义），
@@ -391,7 +398,7 @@ bytes/半页事实；可解析子集提交不是部分页写入。不得对未�
 | `role` | 是 | `avatar` \| `log` \| `plan` \| `wake` |
 | `sha256` | 是 | 64 lowercase hex；tombstone 媒体行另见既有 media 实体规则 |
 | `byte_size` | 是 | 正整数；tombstone 规范 0 |
-| `mime` | 是 | |
+| `mime` | 是 | schema13 canonical: nonempty≤128 UTF8 bytes；raw broader values stop losslessly before restore upload/activation |
 | `width` | 是 (可为 null) | |
 | `height` | 是 (可为 null) | |
 
@@ -436,7 +443,7 @@ durable preimage receipt，然后**只调用一次** `POST …/commit`。安全�
 `mutation_id`、canonical `request_hash`、`base_version` 与持久终态；不得先调用普通
 `/reconcile`，不得推进 pull cursor。
 
-0.3.13 runtime 的 `/reconcile` 与 `confirmed|publish|conflict_preview|rejected` 是升级源合同，不是 v2 fallback。当前两端只 advertise/接受 `causal_sync_v2`，不得再调用普通 reconcile。
+0.3.13 runtime 的 `/reconcile` 与 `confirmed|publish|conflict_preview|rejected` 是升级源合同，不是 v2 fallback。当前两端要求§1.2的 `causal_sync_v2` 与 `nursing_plan_intent_v1` 精确集合，不得再调用普通 reconcile。
 
 ---
 
@@ -512,8 +519,51 @@ Commit（以及其它要把已存版本再读成因果基线的认证路径）�
 | `version_id` | 否 | 因果根的稳定版本。`media`、`fulfillment_candidate`，以及没有 head 的投影省略该键 |
 | `conflict_summary` | 否 | 有未解决并发分支（open 且分支集合非空）时**必填**；稳定墓碑或空分支集合**禁止**携带 |
 | `source_relation_summary` | 否 | §12.3；没有关系时省略 |
+| `media_identity` | 协商后 live media 必填 | §7.1；其它实体与媒体墓碑省略，未协商时禁止发送 |
 
-普通 pull 不携带媒体字节。媒体是 `type=media` 的独立实体，内容在 `payload`。客户端容忍可选的 `media` 数组；当前服务端 pull 实体不发送该键。
+普通 pull 不携带媒体字节。媒体是 `type=media` 的独立实体，内容在 `payload`。客户端容忍历史可选的 `media` 数组；当前服务端不新增该字段，媒体字节身份按 §7.1 单独协商。
+
+### 7.1 Negotiated media byte identity
+
+`causal_media_identity_v1` 只追加到 `/v1/setup-status` 与 `/health` 的增量 capability 列表。
+该能力在历史0.4代引入时使用 schema13/floor21 与单项 `causal_sync_v2` 握手；这是引入背景，
+不是当前版本下限。当前wire0.5/floor35/两项握手以§1为准；G1本身不修改 causal mutation / stable / conflict manifest 的闭合键与 MIME 规则。
+
+客户端在每一页 `GET /v1/pull` 上发送 `X-Lezi-Media-Identity: v1` 才启用扩展。
+header 名大小写不敏感，值必须精确 `v1`；未知、空或重复值返回 422。未发送时
+response body 保持旧形状，禁止新增 `media_identity`。响应 `Vary` 同时包含
+`Accept-Encoding, X-Lezi-Media-Identity`，不能跨协商状态复用 HTTP response。
+
+协商成功后的每个 live `type=media` 行携带一个闭合 `media_identity` 对象：
+
+| 键 | 约束 |
+|----|------|
+| `media_uuid` | canonical UUID，与外层 `client_uuid` 相同 |
+| `role` | `avatar` / `log` / `plan` / `wake`，与 payload 的 owner 类型一致 |
+| `sha256` | 64 位 lowercase hex，来自当前 owner 稳定版本保存的该 UUID 媒体证据 |
+| `byte_size` | 正整数，与 payload 的 `byte_size` 相等 |
+
+该对象不带 MIME 或宽高：原 payload 原样保留合法的缺省、null、空、最长 255 字符
+MIME 与已有维度语义，不能借用 causal manifest 的非空且最多 128-byte MIME 约束
+截断、补默认或拒绝这些旧值。它不是 causal manifest，禁止用它构造新的发表信封。
+
+服务端在分页数量／字节预算与 cursor 决策之前装入身份并序列化；identity bytes 计入
+既有 8 MiB decoded / 9 MiB encoded 上限，不降低其它字段校验。证据绑定当前 owner
+head 与其 `entity_version_media`，不得从任意历史分支、staging receipt 或另一 owner 借用。
+`migration_base` 若保存的是旧媒体 payload，则验证它与投影一致，再从已发表普通文件
+按保存的长度计算真实 SHA；不生成默认摘要。证据缺失或非法时整页失败，不发送部分成功
+与已推进 cursor。媒体墓碑、非媒体行不携带身份。
+
+兼容矩阵：
+- 旧客户端／新服务端：不发 header，得到旧 response body；setup 增量能力按既有规则忽略
+- 新客户端／新服务端：发送 header，验证四键、self-binding、owner role 与长度，再校验下载字节
+- 新客户端／旧服务端：旧服务忽略未知 header；无照片与已有 legacy record photo 流程保留。
+  只有确实需要而缺失 wake 身份时提示升级家庭服务器，保留本机事实／dirty／cursor
+- 已广播能力却返回缺失、畸形或错绑身份：协议错误，不能伪装成升级提示或静默跳过
+
+恢复依赖：当前灾难恢复入口尚未为所有恢复根建立 stable head（B02）。这些合法旧恢复媒体
+不能借此被当成空根或补造 canonical 证据；此组合仍是明确未闭合依赖，不能仅凭普通
+commit→pull 的测试宣布恢复＋后续媒体同步已完成。
 
 **conflict_summary closed keys：**
 
@@ -942,6 +992,39 @@ pull 无需改写 Record body 即可立即隐藏 source、保留可展开 proven
 fingerprint 精确一致，并在同一事务替换为恰有一个 display 的完整 canonical component。
 底层 relation/member 写方法不对产品层公开，所有写入只能经过上述 canonical transition。
 
+
+### 12.4 当前来源组只读投影（加性端点）
+
+`POST /v1/source-relations/current` 不改 §12.1/12.2 请求和静态回执，也不改 §12.3 普通 pull。
+用于已确认操作后读取**当前**分组/不存在证明；静态成功回执不代表现在仍采用同一展示版。
+同 pull 家庭鉴权/客户端门槛，家庭锁后重验会话；请求 family/generation 必须精确匹配。
+
+请求为闭合对象：`{protocol_version:1, family_id, generation, record_client_uuids[]}`。
+请求 UUID 1–64 个、规范且不重复；UTF-8 body ≤64 KiB。所有标识符 ≤128 UTF-8 字节，
+record/relation ID 另须规范 UUID。响应为闭合对象：
+`{protocol_version:1, family_id, generation, head_rev, requested_record_client_uuids[], records[], source_relations[]}`。
+
+- `requested_record_client_uuids`：精确请求集合，规范排序
+- `records`：精确请求与所有返回组成员的并集，按 UUID 排序；每项闭合为
+  `{record_client_uuid, record_state:live|deleted|missing, relation_id:string|null}`
+- `source_relations`：按 relation ID 排序；每项闭合为
+  `{relation_id, display_client_uuid, source_client_uuids[], media_retained:true, auto_aligned:boolean}`，
+  source UUID 排序，完整 2–64 成员且恰一个 display，不返回无成员旧表头
+- 删除状态与成员身份独立；missing 请求 UUID 必须显式返回。成员引用不存在 record、
+  表头/角色/展示版不一致等不可信投影，拒绝整个响应
+- 一个只读事务内读取真实 `family_meta.rev` 及全部投影；`head_rev` 不是时间戳，无业务写入、
+  无回执修改、无 pull cursor 推进。最多 64 组、4096 个 record，最终 JSON ≤2 MiB；超限拒绝，
+  不截断组、不返回局部分页供客户端拼接不同快照
+
+沿用既有错误 envelope。422 `invalid_source_relation_scope` 或
+`source_relation_protocol_unsupported`；403 `source_relation_family_mismatch`；409
+`generation_mismatch` 或 `source_relation_projection_invalid`；容量超限 413
+`source_relation_projection_limit_exceeded`。旧服务端 404/501 须保留 confirmed-refresh 状态并
+明确提示升级原服务器；禁止把普通 pull 页或旧回执当作当前完整关系证明。
+客户端最终对账还须覆盖旧本地组 peers，且仅采用一次完整范围的同快照响应。
+
+SQL schema13、Room29、既有握手 capability 与普通同步 wire 均不因此改变。
+
 ---
 
 ## 13. LocalWrite no-pull
@@ -965,6 +1048,8 @@ conflation、零进度熔断与单轮上限全部复用既有前台轮机制。
 ---
 
 ## 14. 与升级源 wire 对照（禁止双读双写）
+
+以下表格仅记录0.3.13→0.4.0的历史切换与golden身份；当前能力、floor、Room/contract以§1为准。
 
 | 主题 | 0.3.13 tree/source | 0.4.0 `causal_sync_v2` |
 |------|---------------------|------------|

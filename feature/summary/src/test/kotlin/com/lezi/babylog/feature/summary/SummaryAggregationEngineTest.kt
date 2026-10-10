@@ -27,6 +27,36 @@ class SummaryAggregationEngineTest {
     private val zone = ZoneOffset.UTC
 
     @Test
+    fun openSleepAdvancesWithoutAnotherRecordEmission() = runBlocking {
+        val start = anchor.atTime(10, 0).toInstant(zone).toEpochMilli()
+        val firstResult = kotlinx.coroutines.channels.Channel<Unit>(1)
+        val ticks = kotlinx.coroutines.flow.flow {
+            emit(start + 10 * 60_000)
+            firstResult.receive()
+            emit(start + 20 * 60_000)
+        }
+        val request = SummaryAggregationRequest(
+            records = listOf(
+                record(1, RecordType.SLEEP, start, payloadJson = """{"anomaly_flag":false}"""),
+            ),
+            range = SummaryRange.Day,
+            anchorDate = anchor,
+            showAvgSleep = false,
+            babyName = "测试宝宝",
+            zone = zone,
+        )
+        val totals = mutableListOf<Long>()
+        kotlinx.coroutines.flow.flowOf(request)
+            .calculateLatest(SummaryAggregationEngine(), ticks)
+            .take(2)
+            .collect {
+                totals += it.totals.sleepMin
+                firstResult.trySend(Unit)
+            }
+        assertThat(totals).containsExactly(10L, 20L).inOrder()
+    }
+
+    @Test
     fun largeSummaryCalculationRunsOnProvidedComputationDispatcher() {
         Executors.newSingleThreadExecutor { task ->
             Thread(task, "summary-computation")
@@ -55,6 +85,49 @@ class SummaryAggregationEngineTest {
                 records.readerThreads.all { it.startsWith("summary-computation") },
             ).isTrue()
         }
+    }
+
+    @Test
+    fun tickerEligibilityRunsOnProvidedComputationDispatcher() {
+        var computationThread: Thread? = null
+        Executors.newSingleThreadExecutor { task ->
+            Thread(task, "summary-ticker-eligibility").also { computationThread = it }
+        }.asCoroutineDispatcher().use { dispatcher ->
+            val records = ThreadRecordingList(
+                List(2_000) { index -> record(index.toLong(), anchor, amountMl = 1) },
+            )
+            val engine = SummaryAggregationEngine(dispatcher)
+
+            val result = runBlocking {
+                kotlinx.coroutines.flow.flowOf(request(records))
+                    .calculateLatest(engine)
+                    .first()
+            }
+
+            assertThat(result.totals.feedMl).isEqualTo(2_000)
+            // Coroutine debug mode decorates thread names with @coroutine#N.
+            // Thread identity proves dispatch without relying on that display label.
+            assertThat(records.readerThreadIdentities).containsExactly(computationThread)
+        }
+    }
+
+    @Test
+    fun closedSleepDoesNotSubscribeToMinuteTicks() = runBlocking {
+        val start = anchor.atTime(10, 0).toInstant(zone).toEpochMilli()
+        val records = listOf(
+            record(
+                1, RecordType.SLEEP, start, endTimestamp = start + 10 * 60_000,
+                payloadJson = """{"anomaly_flag":false}""",
+            ),
+        )
+        val result = kotlinx.coroutines.flow.flowOf(request(records))
+            .calculateLatest(
+                SummaryAggregationEngine(),
+                kotlinx.coroutines.flow.flow { error("closed snapshot must not start a ticker") },
+            )
+            .first()
+
+        assertThat(result.totals.sleepMin).isEqualTo(10L)
     }
 
     @Test
@@ -663,11 +736,13 @@ private class ThreadRecordingList(
     private val records: List<Record>,
 ) : AbstractList<Record>() {
     val readerThreads = linkedSetOf<String>()
+    val readerThreadIdentities = linkedSetOf<Thread>()
 
     override val size: Int get() = records.size
 
     override fun get(index: Int): Record {
         readerThreads += Thread.currentThread().name
+        readerThreadIdentities += Thread.currentThread()
         return records[index]
     }
 }

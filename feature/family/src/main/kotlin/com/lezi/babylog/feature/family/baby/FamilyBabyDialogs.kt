@@ -59,6 +59,7 @@ internal fun FamilyBabyDialog(
     onMoveLocal: (babyId: Long, delta: Int, onDone: (String?) -> Unit) -> Unit,
     onSetCurrent: (Long) -> Unit,
     destructiveBusy: Boolean = false,
+    createError: String? = null,
 ) {
     when (dialog) {
         is FamilyDialog.DeleteBaby -> DeleteBabyDialog(
@@ -104,6 +105,7 @@ internal fun FamilyBabyDialog(
         }
         is FamilyDialog.AddBaby -> BabyCreateDialog(
             busy = createBusy,
+            error = createError,
             onDismiss = onDismiss,
             onCreate = onCreate,
         )

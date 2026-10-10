@@ -162,10 +162,16 @@ impl PullDependencyIndex {
                 FROM all_parents parent
                 JOIN scoped_media media
                   ON media.kind = 'log'
-                 AND ((parent.entity_type = 'record'
-                       AND media.record_client_uuid = parent.client_uuid)
-                      OR (parent.entity_type = 'care_plan'
-                       AND media.care_plan_client_uuid = parent.client_uuid))
+                 AND parent.entity_type = 'record'
+                 AND media.record_client_uuid = parent.client_uuid
+                UNION ALL
+                SELECT 'log_media', parent.entity_type, parent.client_uuid,
+                       media.client_uuid, media.rev
+                FROM all_parents parent
+                JOIN scoped_media media
+                  ON media.kind = 'log'
+                 AND parent.entity_type = 'care_plan'
+                 AND media.care_plan_client_uuid = parent.client_uuid
                 UNION ALL
                 SELECT 'wake_media', parent.entity_type, parent.client_uuid,
                        media.client_uuid, media.rev
@@ -229,6 +235,8 @@ impl PullDependencyIndex {
             )
             .collect::<Vec<_>>();
         let requested_json = serde_json::to_string(&requested)?;
+        // Keep candidate keys outside the entity lookup loop: an unconstrained
+        // join order can rescan the key-generating coroutine for every family row.
         let mut entity_statement = connection.prepare(
             "
             WITH base(entity_type, client_uuid, payload_json) AS (
@@ -291,7 +299,7 @@ impl PullDependencyIndex {
             SELECT entity.entity_type, entity.client_uuid, entity.updated_at,
                    entity.deleted_at, entity.payload_json, entity.rev
             FROM dependency_keys key
-            JOIN entities entity
+            CROSS JOIN entities entity
               ON entity.family_id = ?1
              AND entity.entity_type = key.entity_type
              AND entity.client_uuid = key.client_uuid
@@ -426,6 +434,7 @@ fn pulled_entity_from_row(row: &rusqlite::Row<'_>) -> Result<PulledEntity, Store
         version_id: None,
         conflict_summary: None,
         source_relation_summary: None,
+        media_identity: None,
     })
 }
 
@@ -470,6 +479,7 @@ fn load_pulled_entity(
                     version_id: None,
                     conflict_summary: None,
                     source_relation_summary: None,
+                    media_identity: None,
                 })
             },
         )
@@ -806,7 +816,7 @@ fn load_projected_sidecars(
             SELECT 'stable', k.entity_type, k.client_uuid,
                    h.version_id, NULL, NULL, NULL, NULL, NULL, NULL
             FROM page_keys k
-            JOIN entity_stable_heads h
+            CROSS JOIN entity_stable_heads h
               ON h.family_id = ?1
              AND h.entity_type = k.entity_type
              AND h.client_uuid = k.client_uuid
@@ -1037,6 +1047,8 @@ fn refresh_sidecar_wire_bytes(groups: &mut [PullGroup]) -> Result<(), StoreError
 }
 
 struct PullPlanner<'a> {
+    database_path: &'a std::path::Path,
+    include_media_identity: bool,
     connection: &'a Connection,
     family_id: &'a str,
     cursor: i64,
@@ -1090,6 +1102,16 @@ impl PullPlanner<'_> {
                     group: &mut entities,
                 }
                 .collect(self.cursor, entity)?;
+                if self.include_media_identity {
+                    for entity in &mut entities {
+                        attach_media_identity(
+                            self.connection,
+                            self.database_path,
+                            self.family_id,
+                            entity,
+                        )?;
+                    }
+                }
                 let wire = entities
                     .iter()
                     .map(pulled_entity_wire)
@@ -1224,6 +1246,7 @@ impl Store {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn pull_with_final_envelope_size_on(
         &self,
         connection: &Connection,
@@ -1231,6 +1254,28 @@ impl Store {
         cursor: i64,
         include_live_census: bool,
         live_key_types: &BTreeSet<&str>,
+        final_envelope_size: impl Fn(usize, usize, i64, &Option<String>) -> Result<usize, StoreError>,
+    ) -> Result<PullPage, StoreError> {
+        self.pull_with_media_identity_on(
+            connection,
+            family_id,
+            cursor,
+            include_live_census,
+            live_key_types,
+            false,
+            final_envelope_size,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn pull_with_media_identity_on(
+        &self,
+        connection: &Connection,
+        family_id: &str,
+        cursor: i64,
+        include_live_census: bool,
+        live_key_types: &BTreeSet<&str>,
+        include_media_identity: bool,
         final_envelope_size: impl Fn(usize, usize, i64, &Option<String>) -> Result<usize, StoreError>,
     ) -> Result<PullPage, StoreError> {
         let (current, family_name): (i64, Option<String>) = connection.query_row(
@@ -1290,6 +1335,8 @@ impl Store {
             });
         }
         PullPlanner {
+            database_path: &self.database_path,
+            include_media_identity,
             connection,
             family_id,
             cursor,
@@ -1407,3 +1454,68 @@ impl Store {
         Ok(census)
     }
 }
+
+pub(super) fn attach_media_identity(
+    connection: &Connection,
+    database_path: &std::path::Path,
+    family_id: &str,
+    entity: &mut PulledEntity,
+) -> Result<(), StoreError> {
+    if entity.entity_type != "media" || entity.deleted_at.is_some() {
+        return Ok(());
+    }
+    let (owner_type, owner_id) =
+        super::media_association_owner(&entity.payload)?.ok_or(StoreError::InvalidStoredPayload)?;
+    let evidence: Option<(String,String)> = connection.query_row(
+        "SELECT v.origin,m.media_payload_json FROM entity_stable_heads h JOIN entity_versions v ON v.family_id=h.family_id AND v.version_id=h.version_id AND v.entity_type=h.entity_type AND v.client_uuid=h.client_uuid JOIN entity_version_media m ON m.family_id=h.family_id AND m.version_id=h.version_id WHERE h.family_id=?1 AND h.entity_type=?2 AND h.client_uuid=?3 AND m.media_uuid=?4",
+        params![family_id,owner_type,owner_id,entity.client_uuid], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+    let (origin, raw) = evidence.ok_or(StoreError::InvalidStoredPayload)?;
+    let value: Value = serde_json::from_str(&raw)?;
+    let role = match owner_type {
+        "baby" => "avatar",
+        "care_plan" => "plan",
+        "wake_observation" => "wake",
+        "record" => "log",
+        _ => return Err(StoreError::InvalidStoredPayload),
+    };
+    let size = entity
+        .payload
+        .get("byte_size")
+        .and_then(Value::as_i64)
+        .filter(|size| *size > 0)
+        .ok_or(StoreError::InvalidStoredPayload)?;
+    let hash = if let Some(item) = super::CausalMediaItem::from_value(&value) {
+        item.validate_for_entity(owner_type)
+            .map_err(|_| StoreError::InvalidStoredPayload)?;
+        if item.media_uuid != entity.client_uuid
+            || item.role != role
+            || item.byte_size != size
+            || entity.payload.get("mime").and_then(Value::as_str) != Some(item.mime.as_str())
+            || entity.payload.get("width").and_then(Value::as_i64) != item.width
+            || entity.payload.get("height").and_then(Value::as_i64) != item.height
+        {
+            return Err(StoreError::InvalidStoredPayload);
+        }
+        item.sha256
+    } else if origin == "migration_base" && value.as_object() == Some(&entity.payload) {
+        super::causal_media_staging::published_file_sha256(
+            &super::causal_media_staging::published_path(
+                database_path,
+                family_id,
+                &entity.client_uuid,
+            ),
+            size as u64,
+        )?
+        .ok_or(StoreError::InvalidStoredPayload)?
+    } else {
+        return Err(StoreError::InvalidStoredPayload);
+    };
+    entity.media_identity = Some(
+        serde_json::json!({"media_uuid":entity.client_uuid,"role":role,"sha256":hash,"byte_size":size}),
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "tests/pull_dependency_tests.rs"]
+mod dependency_tests;

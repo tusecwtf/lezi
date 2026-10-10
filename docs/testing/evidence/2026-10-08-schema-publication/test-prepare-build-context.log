@@ -1,0 +1,15 @@
+cargo vendor: reused host crates.io cache (docker build will be --offline)
+cargo vendor: host crates.io cache incomplete; fetching via sparse+https://rsproxy.cn/index/
+cargo vendor: fetched missing crates via sparse+https://rsproxy.cn/index/ (docker build will be --offline)
+cargo vendor: host crates.io cache incomplete; fetching via sparse+https://rsproxy.cn/index/
+mock cargo fetch failed
+warning: cargo fetch attempt 1/2 failed; retrying
+mock cargo fetch failed
+error: cargo fetch failed after 2 attempts
+warning: could not vendor crates; Dockerfile will fetch via sparse+https://rsproxy.cn/index/
+cargo vendor: skipped (LEZI_CARGO_VENDOR=0)
+cargo vendor: host crates.io cache incomplete; fetching via sparse+https://index.crates.io/
+cargo vendor: fetched missing crates via sparse+https://index.crates.io/ (docker build will be --offline)
+mock cargo fetch fail-once
+warning: cargo fetch attempt 1/3 failed; retrying
+docker cargo build-context smoke passed

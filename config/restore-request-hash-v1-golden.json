@@ -1,0 +1,110 @@
+[
+  {
+    "name": "null_metadata",
+    "input": {
+      "entity_type": "record",
+      "client_uuid": "22222222-2222-4222-8222-222222222222",
+      "base_version": "e0bec011-0509-5e15-98e1-0f7e7a49ee87",
+      "deleted": false,
+      "root": {
+        "baby_client_uuid": "33333333-3333-4333-8333-333333333333",
+        "type": "formula",
+        "custom_item_client_uuid": null,
+        "timestamp": 100,
+        "end_timestamp": null,
+        "note": null,
+        "payload_json": {
+          "amount_ml": 120
+        },
+        "schema_version": 2,
+        "created_by_membership_id": "44444444-4444-4444-8444-444444444444",
+        "updated_at": 1000
+      },
+      "media": [
+        {
+          "media_uuid": "55555555-5555-4555-8555-555555555555",
+          "role": "log",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "byte_size": 3,
+          "mime": null,
+          "width": null,
+          "height": null
+        }
+      ]
+    },
+    "canonical_json": "{\"base_version\":\"e0bec011-0509-5e15-98e1-0f7e7a49ee87\",\"client_uuid\":\"22222222-2222-4222-8222-222222222222\",\"deleted\":false,\"entity_type\":\"record\",\"media\":[{\"byte_size\":3,\"height\":null,\"media_uuid\":\"55555555-5555-4555-8555-555555555555\",\"mime\":null,\"role\":\"log\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"width\":null}],\"root\":{\"baby_client_uuid\":\"33333333-3333-4333-8333-333333333333\",\"created_by_membership_id\":\"44444444-4444-4444-8444-444444444444\",\"custom_item_client_uuid\":null,\"end_timestamp\":null,\"note\":null,\"payload_json\":{\"amount_ml\":120},\"schema_version\":2,\"timestamp\":100,\"type\":\"formula\",\"updated_at\":1000}}",
+    "request_hash": "c3f102b572cc67fe34fe3a8b770326f585b2e75f895400287db439123c0fa0ae"
+  },
+  {
+    "name": "empty_mime",
+    "input": {
+      "entity_type": "record",
+      "client_uuid": "22222222-2222-4222-8222-222222222222",
+      "base_version": "e0bec011-0509-5e15-98e1-0f7e7a49ee87",
+      "deleted": false,
+      "root": {
+        "baby_client_uuid": "33333333-3333-4333-8333-333333333333",
+        "type": "formula",
+        "custom_item_client_uuid": null,
+        "timestamp": 100,
+        "end_timestamp": null,
+        "note": null,
+        "payload_json": {
+          "amount_ml": 120
+        },
+        "schema_version": 2,
+        "created_by_membership_id": "44444444-4444-4444-8444-444444444444",
+        "updated_at": 1000
+      },
+      "media": [
+        {
+          "media_uuid": "55555555-5555-4555-8555-555555555555",
+          "role": "log",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "byte_size": 3,
+          "mime": "",
+          "width": null,
+          "height": null
+        }
+      ]
+    },
+    "canonical_json": "{\"base_version\":\"e0bec011-0509-5e15-98e1-0f7e7a49ee87\",\"client_uuid\":\"22222222-2222-4222-8222-222222222222\",\"deleted\":false,\"entity_type\":\"record\",\"media\":[{\"byte_size\":3,\"height\":null,\"media_uuid\":\"55555555-5555-4555-8555-555555555555\",\"mime\":\"\",\"role\":\"log\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"width\":null}],\"root\":{\"baby_client_uuid\":\"33333333-3333-4333-8333-333333333333\",\"created_by_membership_id\":\"44444444-4444-4444-8444-444444444444\",\"custom_item_client_uuid\":null,\"end_timestamp\":null,\"note\":null,\"payload_json\":{\"amount_ml\":120},\"schema_version\":2,\"timestamp\":100,\"type\":\"formula\",\"updated_at\":1000}}",
+    "request_hash": "ccf72c4f80fd16c47f9a952d63b1c2c4291b47d80ce2bac3f7b20ef1b36949ac"
+  },
+  {
+    "name": "unicode255_mime",
+    "input": {
+      "entity_type": "record",
+      "client_uuid": "22222222-2222-4222-8222-222222222222",
+      "base_version": "e0bec011-0509-5e15-98e1-0f7e7a49ee87",
+      "deleted": false,
+      "root": {
+        "baby_client_uuid": "33333333-3333-4333-8333-333333333333",
+        "type": "formula",
+        "custom_item_client_uuid": null,
+        "timestamp": 100,
+        "end_timestamp": null,
+        "note": null,
+        "payload_json": {
+          "amount_ml": 120
+        },
+        "schema_version": 2,
+        "created_by_membership_id": "44444444-4444-4444-8444-444444444444",
+        "updated_at": 1000
+      },
+      "media": [
+        {
+          "media_uuid": "55555555-5555-4555-8555-555555555555",
+          "role": "log",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "byte_size": 3,
+          "mime": "🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼",
+          "width": null,
+          "height": null
+        }
+      ]
+    },
+    "canonical_json": "{\"base_version\":\"e0bec011-0509-5e15-98e1-0f7e7a49ee87\",\"client_uuid\":\"22222222-2222-4222-8222-222222222222\",\"deleted\":false,\"entity_type\":\"record\",\"media\":[{\"byte_size\":3,\"height\":null,\"media_uuid\":\"55555555-5555-4555-8555-555555555555\",\"mime\":\"🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼🍼\",\"role\":\"log\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"width\":null}],\"root\":{\"baby_client_uuid\":\"33333333-3333-4333-8333-333333333333\",\"created_by_membership_id\":\"44444444-4444-4444-8444-444444444444\",\"custom_item_client_uuid\":null,\"end_timestamp\":null,\"note\":null,\"payload_json\":{\"amount_ml\":120},\"schema_version\":2,\"timestamp\":100,\"type\":\"formula\",\"updated_at\":1000}}",
+    "request_hash": "8b351787e6314ffdd74ee30e2ffea914c20f1eaa7c5f14d57749382126ffe722"
+  }
+]

@@ -1,6 +1,13 @@
 # Design tokens & OD sync
 
-## Source of truth
+## Historical design references
+
+`prototype/` and `design/template-v2/` are dated interaction demonstrations, not
+current product or persistence authority. Current behavior is defined by
+`docs/spec/`, accepted ADRs and the Android implementation. Static prototype
+checks do not prove Android feature coverage or device behavior.
+
+## Visual references
 
 - Open Design project: `leji-prd-prototype`
 - Checked-in snapshot: `prototype/`
@@ -22,7 +29,7 @@ illustrations or icon assets.
 
 Both templates also share the one-handed interaction contract: a fixed bottom
 quick-record dock, a persisted left/right thumb preference, one-tap pee and
-sleep actions, two-tap nursing/formula paths, a scroll-safe “more” sheet, and a
+sleep entries that open a prefilled Composer (every new record requires Save confirmation), nursing/formula entry paths, a scroll-safe “more” sheet, and a
 fixed full-width save action on long record forms. Visual style may restyle the
 dock, but must not move it back into scrolling content.
 

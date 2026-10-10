@@ -296,6 +296,27 @@ async fn request_with_source(
     transport: RequestTransport<'_>,
 ) -> axum::response::Response {
     let mut builder = Request::builder().method(method).uri(uri);
+    if !transport
+        .extra_headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("x-lezi-client-version-code"))
+    {
+        builder = builder.header("x-lezi-client-version-code", "35");
+    }
+    if !transport
+        .extra_headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("x-lezi-sync-capabilities"))
+    {
+        builder = builder.header(
+            "x-lezi-sync-capabilities",
+            if uri.starts_with("/v1/disaster-restore/") {
+                "nursing_plan_intent_v1,restore_authority_v1"
+            } else {
+                "nursing_plan_intent_v1"
+            },
+        );
+    }
     if let Some(token) = token {
         builder = builder.header(AUTHORIZATION, format!("Bearer {token}"));
     }
@@ -330,6 +351,20 @@ async fn json_request_with_headers(
     mut body: Value,
     extra_headers: &[(&str, &str)],
 ) -> (StatusCode, Value) {
+    if uri.starts_with("/v1/disaster-restore/batches")
+        && matches!(method, Method::POST | Method::PUT)
+    {
+        if let Some(object) = body.as_object_mut() {
+            object
+                .entry("restore_authority")
+                .or_insert_with(|| json!("v1"));
+            if uri.ends_with("/manifest") {
+                object
+                    .entry("source_relations")
+                    .or_insert_with(|| json!([]));
+            }
+        }
+    }
     if method == Method::POST {
         if let Some(session) = token.and_then(test_client_session) {
             if uri == "/v1/bundles" || uri.ends_with("/commit") {
@@ -687,7 +722,10 @@ async fn liveness_and_readiness_initialize_private_single_data_root() {
             "record_membership_author",
             "device_disaster_restore_v1",
             "validated_deferred_fulfillment_v1",
-            "causal_sync_v2"
+            "causal_sync_v2",
+            "causal_media_identity_v1",
+            "nursing_plan_intent_v1",
+            "restore_authority_v1"
         ])
     );
     let (ready_status, ready_body) = get_json(&rig.app, "/ready", None).await;
@@ -775,17 +813,17 @@ async fn schema_cutover_read_only_gate_keeps_health_open_and_rejects_mutations()
 fn lan_apk_download_origin_rejects_everything_except_bare_http_port_8767() {
     let directory = TempDir::new().unwrap();
     for origin in [
-        "https://192.168.77.4:8767",
-        "http://user@192.168.77.4:8767",
-        "http://192.168.77.4",
-        "http://192.168.77.4:8765",
-        "http://192.168.77.4:8767/",
-        "http://192.168.77.4:8767/join",
-        "http://192.168.77.4:8767?source=qr",
-        "http://192.168.77.4:8767#invite",
+        "https://192.168.77.10:8767",
+        "http://user@192.168.77.10:8767",
+        "http://192.168.77.10",
+        "http://192.168.77.10:8765",
+        "http://192.168.77.10:8767/",
+        "http://192.168.77.10:8767/join",
+        "http://192.168.77.10:8767?source=qr",
+        "http://192.168.77.10:8767#invite",
         "http://:8767",
         "http://[2001:db8::1]:8767",
-        "192.168.77.4:8767",
+        "192.168.77.10:8767",
     ] {
         let mut config = ServerConfig::new(directory.path());
         config.lan_apk_download_origin = Some(origin.to_owned());
@@ -800,7 +838,7 @@ fn lan_apk_download_origin_rejects_everything_except_bare_http_port_8767() {
 async fn lan_install_router_is_optional_and_exposes_no_sync_or_health_surface() {
     let directory = TempDir::new().unwrap();
     let mut config = ServerConfig::new(directory.path());
-    config.lan_apk_download_origin = Some("http://192.168.77.4:8767".to_owned());
+    config.lan_apk_download_origin = Some("http://192.168.77.10:8767".to_owned());
     let apps = build_server_apps(config).unwrap();
     let lan = apps
         .lan_apk_download
@@ -924,7 +962,7 @@ fn https_invite_origin_rejects_anything_except_the_public_host() {
 fn https_and_lan_invite_origins_cannot_both_be_set() {
     let directory = TempDir::new().unwrap();
     let mut config = ServerConfig::new(directory.path());
-    config.lan_apk_download_origin = Some("http://192.168.77.4:8767".to_owned());
+    config.lan_apk_download_origin = Some("http://192.168.77.10:8767".to_owned());
     config.invite_install_origin = Some("https://invite.example.invalid".to_owned());
     assert!(build_app(config).is_err());
 }
@@ -966,7 +1004,7 @@ async fn neither_invite_origin_leaves_no_install_surface() {
 async fn lan_invite_origin_stays_only_on_the_8767_router() {
     let directory = TempDir::new().unwrap();
     let mut config = ServerConfig::new(directory.path());
-    config.lan_apk_download_origin = Some("http://192.168.77.4:8767".to_owned());
+    config.lan_apk_download_origin = Some("http://192.168.77.10:8767".to_owned());
     let apps = build_server_apps(config).unwrap();
     let lan = apps
         .lan_apk_download
@@ -1112,7 +1150,7 @@ async fn lan_install_page_uses_only_verified_release_metadata_and_clears_the_inv
     )
     .unwrap();
     let mut config = ServerConfig::new(directory.path());
-    config.lan_apk_download_origin = Some("http://192.168.77.4:8767".to_owned());
+    config.lan_apk_download_origin = Some("http://192.168.77.10:8767".to_owned());
     let lan = build_server_apps(config).unwrap().lan_apk_download.unwrap();
 
     let response = request(&lan, Method::GET, "/join", None, Body::empty(), None).await;
@@ -1176,7 +1214,7 @@ async fn lan_install_page_honestly_disables_download_for_missing_or_unverified_a
             fs::write(directory.path().join("app-release.apk"), bytes).unwrap();
         }
         let mut config = ServerConfig::new(directory.path());
-        config.lan_apk_download_origin = Some("http://192.168.77.4:8767".to_owned());
+        config.lan_apk_download_origin = Some("http://192.168.77.10:8767".to_owned());
         let lan = build_server_apps(config).unwrap().lan_apk_download.unwrap();
 
         let response = request(&lan, Method::GET, "/join", None, Body::empty(), None).await;
@@ -1247,7 +1285,7 @@ async fn lan_apk_download_is_anonymous_integrity_checked_and_non_cacheable() {
     )
     .unwrap();
     let mut config = ServerConfig::new(directory.path());
-    config.lan_apk_download_origin = Some("http://192.168.77.4:8767".to_owned());
+    config.lan_apk_download_origin = Some("http://192.168.77.10:8767".to_owned());
     let lan = build_server_apps(config).unwrap().lan_apk_download.unwrap();
 
     let response = request(
@@ -1320,7 +1358,7 @@ async fn every_released_android_version_keeps_apk_recovery_independent_of_sync_f
     )
     .unwrap();
     let mut config = ServerConfig::new(directory.path());
-    config.lan_apk_download_origin = Some("http://192.168.77.4:8767".to_owned());
+    config.lan_apk_download_origin = Some("http://192.168.77.10:8767".to_owned());
     let apps = build_server_apps(config).unwrap();
     let public = apps.public;
     let lan = apps.lan_apk_download.unwrap();
@@ -1410,6 +1448,9 @@ async fn setup_status_exposes_only_the_empty_instance_contract() {
                 "validated_deferred_fulfillment_v1",
                 "causal_sync_v2",
                 "sync_heartbeat_v1",
+                "causal_media_identity_v1",
+                "nursing_plan_intent_v1",
+                "restore_authority_v1",
             ],
             "family_state": "empty",
         })
@@ -1444,6 +1485,9 @@ async fn setup_status_switches_to_configured_without_exposing_family_metadata() 
                 "validated_deferred_fulfillment_v1",
                 "causal_sync_v2",
                 "sync_heartbeat_v1",
+                "causal_media_identity_v1",
+                "nursing_plan_intent_v1",
+                "restore_authority_v1",
             ],
             "family_state": "configured",
         })
@@ -1468,7 +1512,7 @@ async fn authenticated_sync_handshake_derives_principal_and_transport_contract()
         Some(token),
         json!({
             "protocol_version": 1,
-            "required_capabilities": ["causal_sync_v2"],
+            "required_capabilities": ["causal_sync_v2", "nursing_plan_intent_v1"],
         }),
     )
     .await;
@@ -1500,7 +1544,10 @@ async fn authenticated_sync_handshake_derives_principal_and_transport_contract()
         json!(["gzip", "identity"]),
     );
     assert_eq!(body["retry_hints"]["retry_after"], json!(true));
-    assert_eq!(body["capabilities"], json!(["causal_sync_v2"]),);
+    assert_eq!(
+        body["capabilities"],
+        json!(["causal_sync_v2", "nursing_plan_intent_v1"]),
+    );
 }
 
 #[tokio::test]
@@ -1613,7 +1660,7 @@ async fn heartbeat_returns_the_closed_three_key_probe_snapshot() {
         Some(token),
         json!({
             "protocol_version": 1,
-            "required_capabilities": ["causal_sync_v2"],
+            "required_capabilities": ["causal_sync_v2", "nursing_plan_intent_v1"],
         }),
     )
     .await;
@@ -1815,7 +1862,10 @@ async fn ordinary_pull_negotiates_equivalent_bounded_gzip_and_identity_pages() {
     .await;
     assert_eq!(identity.status(), StatusCode::OK);
     assert!(identity.headers().get(CONTENT_ENCODING).is_none());
-    assert_eq!(identity.headers()[VARY], "Accept-Encoding");
+    assert_eq!(
+        identity.headers()[VARY],
+        "Accept-Encoding, X-Lezi-Media-Identity"
+    );
     let identity_bytes = identity.into_body().collect().await.unwrap().to_bytes();
 
     let gzip = request_with_headers(
@@ -1830,7 +1880,10 @@ async fn ordinary_pull_negotiates_equivalent_bounded_gzip_and_identity_pages() {
     .await;
     assert_eq!(gzip.status(), StatusCode::OK);
     assert_eq!(gzip.headers()[CONTENT_ENCODING], "gzip");
-    assert_eq!(gzip.headers()[VARY], "Accept-Encoding");
+    assert_eq!(
+        gzip.headers()[VARY],
+        "Accept-Encoding, X-Lezi-Media-Identity"
+    );
     let gzip_bytes = gzip.into_body().collect().await.unwrap().to_bytes();
     assert!(gzip_bytes.len() <= 9 * 1024 * 1024);
     let mut decoded = Vec::new();
@@ -2669,7 +2722,7 @@ async fn authenticated_sync_handshake_fails_closed_before_sync_work() {
         None,
         json!({
             "protocol_version": 1,
-            "required_capabilities": ["causal_sync_v2"],
+            "required_capabilities": ["causal_sync_v2", "nursing_plan_intent_v1"],
         }),
     )
     .await;
@@ -2677,6 +2730,7 @@ async fn authenticated_sync_handshake_fails_closed_before_sync_work() {
 
     for required_capabilities in [
         json!([]),
+        json!(["causal_sync_v2"]),
         json!(["causal_versions", "source_relations", "wake_observation"]),
         json!(["causal_sync_v2", "future_extra"]),
         json!([
@@ -2712,7 +2766,7 @@ async fn authenticated_sync_handshake_fails_closed_before_sync_work() {
         Some(token),
         json!({
             "protocol_version": 1,
-            "required_capabilities": ["causal_sync_v2"],
+            "required_capabilities": ["causal_sync_v2", "nursing_plan_intent_v1"],
         }),
     )
     .await;
@@ -2738,7 +2792,7 @@ async fn member_directory_generation_changes_only_with_directory_structure() {
     let token = owner["access_token"].as_str().unwrap();
     let handshake_body = json!({
         "protocol_version": 1,
-        "required_capabilities": ["causal_sync_v2"],
+        "required_capabilities": ["causal_sync_v2", "nursing_plan_intent_v1"],
     });
 
     let (_, first) = json_request(
@@ -2851,7 +2905,7 @@ async fn disaster_restore_write_paths_require_supported_client_version() {
     });
 
     // Missing version header → same client_update_required as sync gate.
-    let (missing_status, missing_body) = json_request_with_headers(
+    let (missing_status, missing_body) = json_request_without_version(
         &rig.app,
         Method::POST,
         "/v1/disaster-restore/batches",
@@ -2872,7 +2926,7 @@ async fn disaster_restore_write_paths_require_supported_client_version() {
         start_body.clone(),
         &[
             ("x-lezi-bootstrap-secret", root),
-            ("x-lezi-client-version-code", "7"),
+            ("x-lezi-client-version-code", "34"),
         ],
     )
     .await;
@@ -2888,7 +2942,7 @@ async fn disaster_restore_write_paths_require_supported_client_version() {
         start_body,
         &[
             ("x-lezi-bootstrap-secret", root),
-            ("x-lezi-client-version-code", "8"),
+            ("x-lezi-client-version-code", "35"),
         ],
     )
     .await;
@@ -2929,8 +2983,8 @@ async fn disaster_restore_write_paths_require_supported_client_version() {
 }
 
 #[tokio::test]
-async fn disaster_restore_write_paths_fail_open_without_verified_channel() {
-    // No app-update pair → same fail-open as sync version gate.
+async fn disaster_restore_paired_generation_works_without_verified_channel() {
+    // App35 with required capabilities works without optional update metadata.
     let root = "restore-failopen-root-password";
     let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
 
@@ -4556,8 +4610,15 @@ async fn client_update_required_rejects_pull_when_version_header_missing_or_belo
     .await;
 
     // Missing header → gate.
-    let (missing_status, missing_body) =
-        get_json(&rig.app, "/v1/pull?cursor=0", Some(&token)).await;
+    let (missing_status, missing_body) = json_request_without_version(
+        &rig.app,
+        Method::GET,
+        "/v1/pull?cursor=0",
+        Some(&token),
+        json!({}),
+        &[],
+    )
+    .await;
     assert_eq!(missing_status, StatusCode::FORBIDDEN, "{missing_body}");
     assert_eq!(missing_body["code"], json!("client_update_required"));
 
@@ -4568,7 +4629,7 @@ async fn client_update_required_rejects_pull_when_version_header_missing_or_belo
         "/v1/pull?cursor=0&generation=generation-a&page_index=0",
         Some(&token),
         json!({}),
-        &[("x-lezi-client-version-code", "7")],
+        &[("x-lezi-client-version-code", "34")],
     )
     .await;
     assert_eq!(low_status, StatusCode::FORBIDDEN, "{low_body}");
@@ -4581,7 +4642,7 @@ async fn client_update_required_rejects_pull_when_version_header_missing_or_belo
         "/v1/pull?cursor=0&generation=generation-a&page_index=0",
         Some(&token),
         json!({}),
-        &[("x-lezi-client-version-code", "8")],
+        &[("x-lezi-client-version-code", "35")],
     )
     .await;
     assert_eq!(ok_status, StatusCode::OK, "{ok_body}");
@@ -4594,7 +4655,7 @@ async fn client_update_required_rejects_pull_when_version_header_missing_or_belo
         "/v1/pull?cursor=0&generation=generation-a&page_index=0",
         Some(&token),
         json!({}),
-        &[("x-lezi-client-version-code", "9")],
+        &[("x-lezi-client-version-code", "36")],
     )
     .await;
     assert_eq!(high_status, StatusCode::OK, "{high_body}");
@@ -4625,7 +4686,15 @@ async fn client_update_required_rejects_media_get_when_version_header_missing_or
     let media_path = format!("/v1/media/{}", Uuid::new_v4());
 
     // Missing header → gate before media lookup.
-    let (missing_status, missing_body) = get_json(&rig.app, &media_path, Some(&token)).await;
+    let (missing_status, missing_body) = json_request_without_version(
+        &rig.app,
+        Method::GET,
+        &media_path,
+        Some(&token),
+        json!({}),
+        &[],
+    )
+    .await;
     assert_eq!(missing_status, StatusCode::FORBIDDEN, "{missing_body}");
     assert_eq!(missing_body["code"], json!("client_update_required"));
 
@@ -4636,7 +4705,7 @@ async fn client_update_required_rejects_media_get_when_version_header_missing_or
         &media_path,
         Some(&token),
         json!({}),
-        &[("x-lezi-client-version-code", "7")],
+        &[("x-lezi-client-version-code", "34")],
     )
     .await;
     assert_eq!(low_status, StatusCode::FORBIDDEN, "{low_body}");
@@ -4662,7 +4731,7 @@ async fn client_update_required_rejects_media_get_when_version_header_missing_or
         &media_path,
         Some(&token),
         json!({}),
-        &[("x-lezi-client-version-code", "8")],
+        &[("x-lezi-client-version-code", "35")],
     )
     .await;
     assert_eq!(ok_status, StatusCode::NOT_FOUND, "{ok_body}");
@@ -4675,7 +4744,7 @@ async fn client_update_required_rejects_media_get_when_version_header_missing_or
         &media_path,
         Some(&token),
         json!({}),
-        &[("x-lezi-client-version-code", "9")],
+        &[("x-lezi-client-version-code", "36")],
     )
     .await;
     assert_eq!(high_status, StatusCode::NOT_FOUND, "{high_body}");
@@ -4753,7 +4822,7 @@ async fn client_update_required_still_allows_authenticated_app_update_download()
 }
 
 #[tokio::test]
-async fn client_version_gate_fail_open_without_app_update_metadata() {
+async fn client_version_gate_accepts_paired_generation_without_app_update_metadata() {
     let rig = Rig::new();
     let owner = create_family(
         &rig.app,
@@ -4763,7 +4832,7 @@ async fn client_version_gate_fail_open_without_app_update_metadata() {
     .await;
     let token = owner["access_token"].as_str().unwrap();
 
-    // No app-update.json → do not brick sync for older deploys without an update channel.
+    // Paired-generation clients remain usable without optional update metadata.
     let (status, body) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 }
@@ -4800,7 +4869,7 @@ async fn seed_unverified_channel_family(
 /// into `client_update_required` when the APK is missing (nothing installable).
 /// GET /v1/app-update must also refuse to advertise min_supported without a package.
 #[tokio::test]
-async fn client_version_gate_fail_open_when_metadata_present_but_apk_missing() {
+async fn client_version_gate_keeps_hard_floor_when_metadata_present_but_apk_missing() {
     let (rig, token) = seed_unverified_channel_family(
         "client-update-meta-only-owner",
         "client-update-meta-only-owner-req-001",
@@ -4818,9 +4887,8 @@ async fn client_version_gate_fail_open_when_metadata_present_but_apk_missing() {
         &[("x-lezi-client-version-code", "1")],
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_ne!(body["code"], json!("client_update_required"));
-    assert!(body.get("entities").is_some(), "{body}");
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], json!("client_update_required"));
 
     // Metadata-only must not return a 200 force floor clients would dual-tier on.
     let (meta_status, meta_body) = get_json(&rig.app, "/v1/app-update", Some(&token)).await;
@@ -4838,7 +4906,7 @@ async fn client_version_gate_fail_open_when_metadata_present_but_apk_missing() {
 /// Integrity-failing APK is not a verified channel: same fail-open as missing package.
 /// GET /v1/app-update must not return a 200 body clients treat as a force floor.
 #[tokio::test]
-async fn client_version_gate_fail_open_when_apk_sha256_mismatches_metadata() {
+async fn client_version_gate_keeps_hard_floor_when_apk_sha256_mismatches_metadata() {
     let (rig, token) = seed_unverified_channel_family(
         "client-update-bad-sha-owner",
         "client-update-bad-sha-owner-req-00001",
@@ -4856,9 +4924,8 @@ async fn client_version_gate_fail_open_when_apk_sha256_mismatches_metadata() {
         &[("x-lezi-client-version-code", "1")],
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_ne!(body["code"], json!("client_update_required"));
-    assert!(body.get("entities").is_some(), "{body}");
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], json!("client_update_required"));
 
     let (meta_status, meta_body) = get_json(&rig.app, "/v1/app-update", Some(&token)).await;
     assert_ne!(meta_status, StatusCode::OK, "{meta_body}");
@@ -6903,7 +6970,7 @@ async fn owner_member_login_grant_is_ten_minutes_single_use_and_target_bound() {
 #[tokio::test]
 async fn member_login_grant_advertises_only_the_configured_lan_install_page() {
     let rig = Rig::with_config(|config| {
-        config.lan_apk_download_origin = Some("http://192.168.77.4:8767".to_owned());
+        config.lan_apk_download_origin = Some("http://192.168.77.10:8767".to_owned());
     });
     let owner = create_family(
         &rig.app,
@@ -6924,7 +6991,7 @@ async fn member_login_grant_advertises_only_the_configured_lan_install_page() {
     .await;
 
     assert_eq!(status, StatusCode::CREATED, "{grant}");
-    assert_eq!(grant["landing_url"], "http://192.168.77.4:8767/join",);
+    assert_eq!(grant["landing_url"], "http://192.168.77.10:8767/join",);
 
     let without_landing = Rig::new();
     let owner = create_family(
@@ -9888,6 +9955,17 @@ async fn bootstrap_secret_gates_family_create_when_configured() {
     )
     .await;
     assert_eq!(wrong, StatusCode::TOO_MANY_REQUESTS);
+    let (blocked_correct, _) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        body.clone(),
+        &[("x-lezi-bootstrap-secret", secret)],
+    )
+    .await;
+    assert_eq!(blocked_correct, StatusCode::TOO_MANY_REQUESTS);
+    rig.now.fetch_add(61, Ordering::SeqCst);
     let (created, family) = json_request_with_headers(
         &rig.app,
         Method::POST,
@@ -9918,12 +9996,17 @@ async fn bootstrap_secret_gates_family_create_when_configured() {
 }
 
 #[tokio::test]
-async fn failed_root_passwords_share_a_per_source_budget_across_admin_endpoints() {
+async fn root_password_admission_is_shared_and_cannot_be_bypassed_by_valid_passwords() {
     let root = "production-root-password";
+    let verifications = Arc::new(AtomicUsize::new(0));
     let rig = Rig::with_config(|config| {
         config.bootstrap_secret = Some(root.to_owned());
+        let calls = verifications.clone();
+        config.root_password_verification_hook = Some(Arc::new(move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+        }));
         config.create_rate_limit = RateLimitConfig {
-            max_attempts: 2,
+            max_attempts: 3,
             window_seconds: 60,
         };
     });
@@ -9985,14 +10068,34 @@ async fn failed_root_passwords_share_a_per_source_budget_across_admin_endpoints(
             Method::POST,
             "/v1/owner/login",
             None,
-            login,
+            login.clone(),
             &[("x-lezi-bootstrap-secret", root)],
         )
         .await
         .0,
-        StatusCode::OK,
-        "a correct password is not locked out by failed-guess throttling",
+        StatusCode::TOO_MANY_REQUESTS,
+        "valid passwords must not bypass exhausted admission",
     );
+    assert_eq!(
+        verifications.load(Ordering::SeqCst),
+        3,
+        "exhausted requests must not verify either password"
+    );
+    rig.now.fetch_add(61, Ordering::SeqCst);
+    assert_eq!(
+        json_request_with_headers(
+            &rig.app,
+            Method::POST,
+            "/v1/owner/login",
+            None,
+            login,
+            &[("x-lezi-bootstrap-secret", root)]
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(verifications.load(Ordering::SeqCst), 4);
 }
 
 #[tokio::test]
@@ -10100,7 +10203,7 @@ fn protocol_cutover_requires_a_verified_forced_update_channel() {
     missing_config.require_protocol_cutover_release = true;
     assert!(
         build_app(missing_config).is_err(),
-        "0.4.0 production startup accepted a missing forced-update channel",
+        "0.5.0 production startup accepted a missing forced-update channel",
     );
 
     let valid = TempDir::new().unwrap();
@@ -10110,9 +10213,9 @@ fn protocol_cutover_requires_a_verified_forced_update_channel() {
         valid.path().join("app-update.json"),
         json!({
             "package_name": "com.lezi.babylog",
-            "version_code": 21,
-            "version_name": "0.4.0",
-            "min_supported_version_code": 21,
+            "version_code": 35,
+            "version_name": "0.5.5",
+            "min_supported_version_code": 35,
             "sha256": hex::encode(Sha256::digest(apk_bytes)),
         })
         .to_string(),
@@ -10122,7 +10225,7 @@ fn protocol_cutover_requires_a_verified_forced_update_channel() {
     valid_config.require_protocol_cutover_release = true;
     assert!(build_app(valid_config).is_ok());
 
-    // Floor 16 is not a valid 0.4.0 production cutover channel.
+    // Floor 16 is not a valid 0.5.0 production cutover channel.
     let too_low = TempDir::new().unwrap();
     let low_apk = b"stale-0.3.9-floor-must-fail";
     fs::write(too_low.path().join("app-release.apk"), low_apk).unwrap();
@@ -10142,7 +10245,7 @@ fn protocol_cutover_requires_a_verified_forced_update_channel() {
     low_config.require_protocol_cutover_release = true;
     assert!(
         build_app(low_config).is_err(),
-        "0.4.0 production must reject min_supported/version_code below 21"
+        "0.5.0 production must reject min_supported/version_code below 35"
     );
 }
 fn entity_wire(
@@ -11140,7 +11243,7 @@ async fn fulfillment_candidate_freeze_is_idempotent_and_arrival_order_independen
         cursor_before_cross
     );
 }
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn causal_protocol_smoke_create_pull_branch_and_resolve() {
     // Isolated in-process server: create → pull version_id → concurrent branch → resolve.
     let rig = Rig::new();
@@ -11566,6 +11669,50 @@ async fn causal_protocol_smoke_create_pull_branch_and_resolve() {
             |row| row.get(0),
         )
         .unwrap();
+    // This current-thread test observes the existing post-GC warning locally.
+    // A retained row count alone cannot prove a failed detached sweep ran.
+    #[derive(Default)]
+    struct RetentionEventFields {
+        message: String,
+        error: String,
+    }
+    impl tracing::field::Visit for RetentionEventFields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            match field.name() {
+                "message" => self.message = format!("{value:?}"),
+                "error" => self.error = format!("{value:?}"),
+                _ => {}
+            }
+        }
+    }
+    struct RetentionFailures(tokio::sync::mpsc::UnboundedSender<String>);
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RetentionFailures {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().level() != &tracing::Level::WARN
+                || event.metadata().target() != "lezi_sync::handlers::sync"
+            {
+                return;
+            }
+            let mut fields = RetentionEventFields::default();
+            event.record(&mut fields);
+            if fields.message == "bounded conflict retention sweep failed" {
+                let _ = self.0.send(fields.error);
+            }
+        }
+    }
+    use tracing_subscriber::layer::SubscriberExt;
+    let (failure_events, mut observed_failures) = tokio::sync::mpsc::unbounded_channel();
+    // Keep a thread-local guard across awaits on this explicitly current-thread
+    // runtime. Do not install a global subscriber or depend on blocking-pool logs.
+    let _retention_trace = tracing::subscriber::set_default(
+        tracing_subscriber::registry().with(RetentionFailures(failure_events)),
+    );
+    const RETENTION_OBSERVATION_BUDGET: Duration = Duration::from_secs(5);
+
     connection
         .execute(
             "UPDATE mutation_receipts SET receipt_json = '[]'
@@ -11595,6 +11742,16 @@ async fn causal_protocol_smoke_create_pull_branch_and_resolve() {
     assert_eq!(replay["status"], "accepted");
     assert_eq!(replay["replay"], true);
     assert_eq!(replay["stable_version_id"], resolved["stable_version_id"]);
+    // Any delayed sweep for this one-conflict Rig may observe the corruption;
+    // the event proves one actually failed, not which replay scheduled it.
+    let failed_sweep = tokio::time::timeout(RETENTION_OBSERVATION_BUDGET, observed_failures.recv())
+        .await
+        .expect("corrupt snapshot did not produce a completed failed retention sweep")
+        .expect("retention failure observer closed before a sweep completed");
+    assert!(
+        failed_sweep.contains("code: Some(\"invalid_stored_payload\")"),
+        "unexpected retention failure: {failed_sweep}",
+    );
     let connection = Connection::open(&database_path).unwrap();
     let retained_after_gc_failure: (i64, i64) = connection
         .query_row(
@@ -11626,17 +11783,34 @@ async fn causal_protocol_smoke_create_pull_branch_and_resolve() {
     assert_eq!(status, StatusCode::OK, "{retry_after_gc_failure}");
     assert_eq!(retry_after_gc_failure["replay"], true);
 
-    let compacted: (i64, i64) = Connection::open(&database_path)
-        .unwrap()
-        .query_row(
-            "SELECT
-                (SELECT COUNT(*) FROM conflict_branches WHERE conflict_id = ?1),
-                (SELECT COUNT(*) FROM mutation_receipts
-                  WHERE membership_id = '__conflict_snapshot_v2__' AND conflict_id = ?1)",
-            [&conflict_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
+    let compacted = tokio::time::timeout(RETENTION_OBSERVATION_BUDGET, async {
+        loop {
+            // All three values come from one read snapshot. Drop the connection
+            // before yielding so the asynchronous sweep can acquire its writer.
+            let observed: (i64, i64, i64) = {
+                let connection = Connection::open(&database_path).unwrap();
+                connection
+                    .query_row(
+                        "SELECT
+                            (SELECT COUNT(*) FROM conflict_branches WHERE conflict_id = ?1),
+                            (SELECT COUNT(*) FROM mutation_receipts
+                              WHERE membership_id = '__conflict_snapshot_v2__' AND conflict_id = ?1),
+                            (SELECT COUNT(*) FROM mutation_receipts
+                              WHERE membership_id = '__conflict_retention_v2__' AND conflict_id = ?1
+                                AND json_extract(receipt_json, '$.phase') = 'complete')",
+                        [&conflict_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .unwrap()
+            };
+            if observed == (0, 0, 1) {
+                break (observed.0, observed.1);
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("detached retention sweep did not commit complete compaction");
     assert_eq!(compacted, (0, 0));
 
     let restarted = rig.restart("generation-a");
@@ -19144,3 +19318,89 @@ async fn causal_forced_min_supported_from_catalog_blocks_legacy_client() {
     assert_eq!(status, StatusCode::OK, "{ok}");
     assert_eq!(ok["results"][0]["status"], "accepted", "{ok}");
 }
+
+async fn json_request_without_version(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    token: Option<&str>,
+    body: Value,
+    headers: &[(&str, &str)],
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(CONTENT_TYPE, "application/json")
+        .header(
+            "x-lezi-sync-capabilities",
+            "nursing_plan_intent_v1,restore_authority_v1",
+        );
+    if let Some(token) = token {
+        builder = builder.header(AUTHORIZATION, format!("Bearer {token}"));
+    }
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let mut request = builder.body(Body::from(body.to_string())).unwrap();
+    request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        43210,
+    )));
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+#[tokio::test]
+async fn hard_floor_and_nursing_capability_apply_without_update_metadata() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "hard-floor-owner",
+        "hard-floor-create-request-000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let path = "/v1/pull?cursor=0&generation=generation-a&page_index=0";
+    for version in ["1", "34", "", "-1"] {
+        let (status, body) = raw_json_request_with_headers(
+            &rig.app,
+            Method::GET,
+            path,
+            Some(token),
+            json!({}),
+            &[("x-lezi-client-version-code", version)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["code"], "client_update_required");
+    }
+    for capability in [
+        "",
+        "restore_authority_v1",
+        "future_unknown",
+        "nursing_plan_intent_v1,nursing_plan_intent_v1",
+    ] {
+        let (status, body) = raw_json_request_with_headers(
+            &rig.app,
+            Method::GET,
+            path,
+            Some(token),
+            json!({}),
+            &[
+                ("x-lezi-client-version-code", "999"),
+                ("x-lezi-sync-capabilities", capability),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["code"], "capability_mismatch");
+    }
+    assert_eq!(
+        get_json(&rig.app, path, Some(token)).await.0,
+        StatusCode::OK
+    );
+}
+
+include!("support/current_source_relations.rs");

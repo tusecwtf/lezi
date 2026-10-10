@@ -112,9 +112,10 @@ class RealSyncPortDeviceRemovalReceiptTest {
         var receiptSeenAtClear: DeviceRemovedCleanupReceipt? = null
         var receiptSnapshot: (() -> DeviceRemovedCleanupReceipt?)? = null
 
-        override suspend fun clearAllLocalFamilyData() {
+        override suspend fun localClearWorkflow(): LocalClearWorkflow {
             calls += 1
             receiptSeenAtClear = receiptSnapshot?.invoke()
+        return NoOpRemovedDeviceLocalClearGate().localClearWorkflow()
         }
     }
 }

@@ -114,8 +114,9 @@ fun settleCommitFirstAcceptedOrMerged(
     expectedMutationId: String,
     expectedContentEpoch: Long,
     newBaseVersion: String,
+    matchesBoundContent: Boolean = true,
 ): CommitFirstSettlement? {
-    if (current.contentEpoch == expectedContentEpoch) {
+    if (current.contentEpoch == expectedContentEpoch && matchesBoundContent) {
         val settled = acknowledgeAcceptedOrMerged(
             current = current,
             expectedMutationId = expectedMutationId,
@@ -140,8 +141,9 @@ fun settleCommitFirstBranched(
     conflictId: String,
     branchVersionId: String,
     stableBaseVersion: String,
+    matchesBoundContent: Boolean = true,
 ): CommitFirstSettlement? {
-    if (current.contentEpoch == expectedContentEpoch) {
+    if (current.contentEpoch == expectedContentEpoch && matchesBoundContent) {
         val settled = acknowledgeBranched(
             current = current,
             expectedMutationId = expectedMutationId,

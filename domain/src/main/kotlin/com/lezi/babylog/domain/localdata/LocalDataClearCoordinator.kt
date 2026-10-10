@@ -44,6 +44,7 @@ typealias LocalDataClearScope = com.lezi.babylog.core.database.LocalDataClearSco
 /** Deep module for local clear transactions, replica barriers, and recoverable cleanup. */
 interface LocalDataClearCoordinator {
     suspend fun clear(scope: LocalDataClearScope)
+    fun workflow(scope: LocalDataClearScope): LocalClearWorkflow
     /** @return the widest previously committed clear resumed to completion. */
     suspend fun recoverPendingReminderCleanup(): LocalDataClearScope?
 }
@@ -191,8 +192,13 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
     private val localDataMutationEpoch: LocalDataMutationEpoch,
 ) : LocalDataClearCoordinator {
     override suspend fun clear(scope: LocalDataClearScope) {
+        val failure = syncPort.clearLocalData(scope, workflow(scope)).exceptionOrNull() ?: return
+        throwClearFailure(failure)
+    }
+
+    override fun workflow(scope: LocalDataClearScope): LocalClearWorkflow {
         var capturedSettings: LocalClearSettingsSnapshot? = null
-        val workflow = object : LocalClearWorkflow {
+        return object : LocalClearWorkflow {
             override suspend fun <T> withLocalExclusion(block: suspend () -> T): T =
                 localDataMutationEpoch.withClearEpoch {
                     mutationGuard.withLock {
@@ -204,7 +210,7 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
             override suspend fun clearRoom() {
                 persistence.clear(
                     scope = scope,
-                    familyServerRetained = syncPort.session().first().familyId.isNotBlank(),
+                    familyServerRetained = syncPort.sessionPresentation().first().familyId.isNotBlank(),
                     settingsSnapshot = checkNotNull(capturedSettings) {
                         "Local clear settings must be captured under exclusion"
                     },
@@ -218,10 +224,6 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
                 throwClearFailure(finish.failure)
             }
         }
-
-        val failure = syncPort.clearLocalData(scope, workflow).exceptionOrNull()
-            ?: return
-        throwClearFailure(failure)
     }
 
     override suspend fun recoverPendingReminderCleanup(): LocalDataClearScope? =

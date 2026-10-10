@@ -163,8 +163,23 @@ class CalendarViewModel @Inject constructor(
     private val _conflictDetail = MutableStateFlow<ConflictNotAdoptedAudit?>(null)
     val conflictDetail = _conflictDetail.asStateFlow()
 
-    private val _conflictBusy = MutableStateFlow(false)
-    val conflictBusy = _conflictBusy.asStateFlow()
+    private val conversionCommand = ConflictConversionCommand(
+        convert = { careLog.convertConflictNotAdoptedToIndependentRecord(it) },
+        refresh = { candidateUuid ->
+            val detailAtStart = _conflictDetail.value
+            val planUuid = _conflictAudits.value.firstOrNull {
+                it.candidateClientUuid == candidateUuid
+            }?.carePlanClientUuid
+            val audits = planUuid?.let { careLog.listConflictNotAdoptedAudits(it) }
+            val detail = careLog.getConflictNotAdoptedAudit(candidateUuid)
+            // Closing or selecting a newer detail while reads are pending owns the screen.
+            if (_conflictDetail.value === detailAtStart && detailAtStart?.candidateClientUuid == candidateUuid) {
+                if (audits != null) _conflictAudits.value = audits
+                _conflictDetail.value = detail
+            }
+        },
+    )
+    internal val conversionState = conversionCommand.state
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val carePlans = combine(careLog.observeCurrentBaby(), visibleMonth) { baby, month ->
@@ -235,28 +250,11 @@ class CalendarViewModel @Inject constructor(
         onResult: (String?) -> Unit,
     ) {
         viewModelScope.launch {
-            if (_conflictBusy.value) return@launch
-            _conflictBusy.value = true
-            try {
-                careLog.convertConflictNotAdoptedToIndependentRecord(candidateClientUuid)
-                _status.value = "已转为独立护理记录"
-                // Refresh list + detail so converted badge and id show.
-                val planUuid = _conflictAudits.value
-                    .firstOrNull { it.candidateClientUuid == candidateClientUuid }
-                    ?.carePlanClientUuid
-                if (planUuid != null) {
-                    _conflictAudits.value = careLog.listConflictNotAdoptedAudits(
-                        carePlanClientUuid = planUuid,
-                    )
-                }
-                _conflictDetail.value = careLog.getConflictNotAdoptedAudit(candidateClientUuid)
-                onResult(null)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (err: Throwable) {
-                onResult(productUiError(err, "转换没有完成，这条记录保持原样，可重试"))
-            } finally {
-                _conflictBusy.value = false
+            conversionCommand.convert(candidateClientUuid)
+            val result = conversionState.value
+            if (result.candidateUuid == candidateClientUuid && !result.busy) {
+                if (result.recordId != null) _status.value = "已转为独立护理记录"
+                onResult(result.saveError)
             }
         }
     }
@@ -316,7 +314,8 @@ fun CalendarRoute(
     val conflictCountByPlanUuid by vm.conflictCountByPlanUuid.collectAsStateWithLifecycle()
     val conflictAudits by vm.conflictAudits.collectAsStateWithLifecycle()
     val conflictDetail by vm.conflictDetail.collectAsStateWithLifecycle()
-    val conflictBusy by vm.conflictBusy.collectAsStateWithLifecycle()
+    val conversionState by vm.conversionState.collectAsStateWithLifecycle()
+    val conflictBusy = conversionState.busy
     // Minute clock ticks only while RESUMED: behind dialogs or paused the
     // rendered minute is invisible; the first resumed write resyncs exactly.
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -451,16 +450,15 @@ fun CalendarRoute(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            // Non-essential selected-day fade: Fast tier; reduce-motion → 0.
-            val fadeMillis = leziMotionMillis(LeziMotion.Fast)
-            AnimatedContent(
-                targetState = monthState.selectedDate,
-                transitionSpec = {
-                    fadeIn(animationSpec = tween(durationMillis = fadeMillis)) togetherWith
-                        fadeOut(animationSpec = tween(durationMillis = fadeMillis))
-                },
-                label = "calendarSelectedDay",
-            ) { selectedDate ->
+            CalendarSelectedDayTransition(
+                CalendarSelectedDaySnapshot(monthState.selectedDate, selectedDayItems,
+                    canScheduleSelectedDate, systemCalendarUnsyncedPlanIds, conflictCountByPlanUuid),
+            ) { snapshot ->
+                val selectedDate = snapshot.date
+                val selectedDayItems = snapshot.items
+                val canScheduleSelectedDate = snapshot.canSchedule
+                val systemCalendarUnsyncedPlanIds = snapshot.unsyncedPlanIds
+                val conflictCountByPlanUuid = snapshot.conflictCounts
                 Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
                     Text(
                         "${selectedDate.monthValue}月${selectedDate.dayOfMonth}日",
@@ -738,23 +736,33 @@ fun CalendarRoute(
                             }
                         }
                     }
-                    if (detail.isConverted) {
+                    if (detail.isConverted || (conversionState.candidateUuid == detail.candidateClientUuid && conversionState.recordId != null)) {
                         Text("已转为独立护理记录", style = LeziTypography.Meta)
                     }
-                    conflictError?.let {
+                    conversionState.refreshWarning?.takeIf {
+                        conversionState.candidateUuid == detail.candidateClientUuid
+                    }?.let { warning ->
+                        Text(warning, style = LeziTypography.Meta)
+                        LeziTextButton("重试刷新详情", enabled = !conflictBusy, onClick = {
+                            vm.convertConflictToIndependentRecord(detail.candidateClientUuid) { }
+                        })
+                    }
+                    (conversionState.saveError.takeIf {
+                        conversionState.candidateUuid == detail.candidateClientUuid
+                    } ?: conflictError)?.let {
                         Text(it, style = LeziTypography.Meta, color = MaterialTheme.colorScheme.error)
                     }
                 }
             },
             confirmButton = {
-                if (!detail.isConverted) {
+                if (!detail.isConverted && !(conversionState.candidateUuid == detail.candidateClientUuid && conversionState.recordId != null)) {
                     LeziTextButton(label = "转为独立记录", onClick = { confirmConvertCandidate = detail.candidateClientUuid }, enabled = !conflictBusy, modifier = Modifier.testTag("conflict_convert_button"))
                 } else {
                     LeziTextButton(label = "关闭", onClick = { vm.clearConflictDetail() })
                 }
             },
             dismissButton = {
-                if (!detail.isConverted) {
+                if (!detail.isConverted && !(conversionState.candidateUuid == detail.candidateClientUuid && conversionState.recordId != null)) {
                     LeziTextButton(label = "返回", onClick = { vm.clearConflictDetail() })
                 }
             },
@@ -1038,4 +1046,29 @@ internal fun carePlanCalendarMetaLine(
         ""
     }
     return "$local · $statusLabel$zoneHint$unsyncedHint"
+}
+
+internal data class CalendarSelectedDaySnapshot(
+    val date: LocalDate,
+    val items: List<CalendarDayItem>,
+    val canSchedule: Boolean,
+    val unsyncedPlanIds: Set<Long>,
+    val conflictCounts: Map<String, Int>,
+)
+
+@Composable
+internal fun CalendarSelectedDayTransition(
+    snapshot: CalendarSelectedDaySnapshot,
+    content: @Composable (CalendarSelectedDaySnapshot) -> Unit,
+) {
+    val fadeMillis = leziMotionMillis(LeziMotion.Fast)
+    AnimatedContent(
+        targetState = snapshot,
+        contentKey = { it.date },
+        transitionSpec = {
+            fadeIn(animationSpec = tween(durationMillis = fadeMillis)) togetherWith
+                fadeOut(animationSpec = tween(durationMillis = fadeMillis))
+        },
+        label = "calendarSelectedDay",
+    ) { renderedDay -> content(renderedDay) }
 }

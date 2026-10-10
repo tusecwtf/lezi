@@ -36,7 +36,7 @@ class QuickRecordDraftSerializationTest {
 
         assertEquals(0, draft.amountMl)
         assertTrue(draft.canConfirm(nowMillis = tappedAt))
-        assertTrue(draft.toSaveCommand().payloadJson.contains("\"amount_ml\":0"))
+        assertTrue(draft.toSaveCommand().payloadJsonForTest.contains("\"amount_ml\":0"))
     }
 
     @Test
@@ -69,7 +69,7 @@ class QuickRecordDraftSerializationTest {
 
         assertEquals(tappedAt, command.timestamp)
         assertEquals("拍嗝顺利", command.note)
-        assertTrue(command.payloadJson.contains("\"amount_ml\":135"))
+        assertTrue(command.payloadJsonForTest.contains("\"amount_ml\":135"))
     }
 
     @Test
@@ -84,7 +84,7 @@ class QuickRecordDraftSerializationTest {
 
         assertEquals(
             """{"amount_ml":120,"prepared_ml":135,"duration_min":12}""",
-            command.payloadJson,
+            command.payloadJsonForTest,
         )
     }
 
@@ -101,7 +101,7 @@ class QuickRecordDraftSerializationTest {
 
         assertEquals(
             """{"amount_ml":135,"prepared_ml":135,"duration_min":8}""",
-            command.payloadJson,
+            command.payloadJsonForTest,
         )
     }
 
@@ -130,7 +130,7 @@ class QuickRecordDraftSerializationTest {
             val draft = QuickRecordDraft.fromRecord(source)
             val saved = com.lezi.babylog.core.model.RecordPayloadCodec.decode(
                 type = RecordType.NURSING,
-                payloadJson = draft.toSaveCommand().payloadJson,
+                payloadJson = draft.toSaveCommand().payloadJsonForTest,
                 schemaVersion = com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
             ).payload
 
@@ -192,7 +192,7 @@ class QuickRecordDraftSerializationTest {
             )
 
             assertTrue(draft.canConfirm(nowMillis = tappedAt + 2L))
-            assertEquals(payload, draft.toSaveCommand().payloadJson)
+            assertEquals(payload, draft.toSaveCommand().payloadJsonForTest)
         }
     }
 
@@ -207,7 +207,7 @@ class QuickRecordDraftSerializationTest {
         assertTrue(draft.canConfirm(nowMillis = tappedAt + 1L))
         assertEquals(
             """{"content":"南瓜泥","amount":"0.5碗"}""",
-            draft.toSaveCommand().payloadJson,
+            draft.toSaveCommand().payloadJsonForTest,
         )
     }
 
@@ -238,7 +238,7 @@ class QuickRecordDraftSerializationTest {
         )
 
         cases.forEach { (draft, expectedParts) ->
-            val payload = draft.toSaveCommand().payloadJson
+            val payload = draft.toSaveCommand().payloadJsonForTest
             expectedParts.forEach { expected ->
                 assertTrue("$payload should contain $expected", payload.contains(expected))
             }
@@ -251,7 +251,7 @@ class QuickRecordDraftSerializationTest {
             .copy(measurementValue = "6.35")
             .toSaveCommand()
 
-        assertEquals("""{"value":6350,"unit":"g"}""", command.payloadJson)
+        assertEquals("""{"value":6350,"unit":"g"}""", command.payloadJsonForTest)
     }
 
     @Test
@@ -278,10 +278,10 @@ class QuickRecordDraftSerializationTest {
         val command = draft.toSaveCommand()
 
         assertEquals(RecordType.CUSTOM, command.type)
-        assertTrue(command.payloadJson.contains("\"title\":\"抚触\""))
-        assertTrue(command.payloadJson.contains("\"detail\":\"睡前\""))
-        assertTrue(command.payloadJson.contains("\"custom_item_id\":42"))
-        assertTrue(command.payloadJson.contains("\"icon_slot\":3"))
+        assertTrue(command.payloadJsonForTest.contains("\"title\":\"抚触\""))
+        assertTrue(command.payloadJsonForTest.contains("\"detail\":\"睡前\""))
+        assertTrue(command.payloadJsonForTest.contains("\"custom_item_id\":42"))
+        assertTrue(command.payloadJsonForTest.contains("\"icon_slot\":3"))
         assertEquals("抚触", sheetTitle(draft))
     }
 }

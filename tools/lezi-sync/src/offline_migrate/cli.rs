@@ -289,19 +289,21 @@ fn run_migrate(input: &Path, output: &Path) -> CliOutcome {
 }
 
 fn run_dry_run(input: &Path) -> CliOutcome {
-    let temp_root = std::env::temp_dir().join(format!(
-        "lezi-offline-migrate-dry-run-{}-{}",
-        std::process::id(),
-        unique_suffix()
-    ));
-    if let Err(error) = fs::create_dir_all(&temp_root) {
-        return CliOutcome {
-            exit_code: EXIT_FAILURE,
-            stdout: String::new(),
-            stderr: format!("dry-run failed: cannot create temp dir: {error}\n"),
-        };
-    }
-    let temp_out = temp_root.join("out");
+    let temp_root = match super::private_output::PrivateDirectory::new(
+        &std::env::temp_dir(),
+        "lezi-offline-migrate-dry-run",
+    ) {
+        Ok(root) => root,
+        Err(error) => {
+            return CliOutcome {
+                exit_code: EXIT_FAILURE,
+                stdout: String::new(),
+                stderr: format!("dry-run failed: cannot create private temp dir: {error}\n"),
+            }
+        }
+    };
+    let temp_root_path = temp_root.path().to_owned();
+    let temp_out = temp_root.path().join("out");
 
     let mut outcome = migrate_and_validate(
         input,
@@ -311,20 +313,20 @@ fn run_dry_run(input: &Path) -> CliOutcome {
         /*durable_out=*/ false,
     );
     // Always attempt cleanup; success requires no durable residue.
-    if let Err(error) = fs::remove_dir_all(&temp_root) {
+    if let Err(error) = temp_root.close() {
         if outcome.exit_code == EXIT_OK {
             outcome = CliOutcome {
                 exit_code: EXIT_FAILURE,
                 stdout: outcome.stdout,
                 stderr: format!(
                     "dry-run cleanup failed (temp out may remain): {}: {error}\n",
-                    temp_root.display()
+                    temp_root_path.display()
                 ),
             };
         } else {
             outcome.stderr.push_str(&format!(
                 "also: dry-run cleanup failed (temp out may remain): {}: {error}\n",
-                temp_root.display()
+                temp_root_path.display()
             ));
         }
     }
@@ -338,7 +340,7 @@ fn migrate_and_validate(
     input: &Path,
     output: &Path,
     title_ok: &str,
-    cleanup_out_on_validate_fail: bool,
+    _cleanup_out_on_validate_fail: bool,
     durable_out: bool,
 ) -> CliOutcome {
     let migrate_result = migrate_v11_or_v12_data_dir_to_v13(input, output);
@@ -355,16 +357,15 @@ fn migrate_and_validate(
                 stderr: String::new(),
             },
             Err(message) => {
-                if cleanup_out_on_validate_fail {
-                    let _ = fs::remove_dir_all(output);
-                }
+                // The output has already been published. Never recursively delete
+                // a path that could have been replaced by a concurrent operator.
                 CliOutcome {
                     exit_code: EXIT_FAILURE,
                     // Do not emit success-shaped counters — not copy-back-ready.
                     stdout: String::new(),
                     stderr: format!(
                         "NOT copy-back-ready: validate failed after migrate: {message}\n\
-authoritative intent: AbortNoCopyBackWithReport (migrator outputs cleaned when durable out)\n"
+authoritative intent: AbortNoCopyBackWithReport (published output retained for inspection)\n"
                     ),
                 }
             }
@@ -407,8 +408,8 @@ pub(crate) fn validate_out_data_dir(out: &Path) -> Result<(), String> {
 
 /// Refuse equal paths and nested --in/--out (component-aware).
 fn refuse_in_place(input: &Path, output: &Path) -> Result<(), String> {
-    let in_norm = normalize_path(input);
-    let out_norm = normalize_path(output);
+    let in_norm = super::private_output::physical_path(input).map_err(|e| e.to_string())?;
+    let out_norm = super::private_output::physical_path(output).map_err(|e| e.to_string())?;
     if in_norm == out_norm {
         return Err(
             "refusing in-place migrate: --in and --out must be different directories (backup is read-only)"
@@ -575,13 +576,13 @@ pub(crate) fn copy_out_help_text() -> String {
 #
 # Does NOT stop the live container. Does NOT copy back (H29 owns cutover).
 #
-# Authoritative steps + defaults: {COPY_OUT_SCRIPT}
+# Authoritative steps + explicit configuration: {COPY_OUT_SCRIPT}
 #   bash {COPY_OUT_SCRIPT}
 #
-# Env table (script defaults):
-#   NAS_SSH              nas-account@192.168.77.4
+# Env table (required operator inputs; all values below are fictional examples):
+#   NAS_SSH              nas-operator@192.168.77.10
 #   NAS_SSH_PORT         10000
-#   LEZI_DATA_HOST_PATH  /tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data
+#   LEZI_DATA_HOST_PATH  /srv/lezi-example/data
 #   LEZI_BACKUP_ROOT     $HOME/lezi-nas-backups
 #   LEZI_BACKUP_DIR      optional explicit destination
 #   LEZI_COPY_OUT_RO     1 = chmod -R a-w backup after copy (fail closed)
@@ -1116,12 +1117,9 @@ mod tests {
         let text = &outcome.stdout;
         assert!(text.contains(COPY_BACK_RUNBOOK), "{text}");
         assert!(text.contains(COPY_BACK_SCRIPT), "{text}");
-        assert!(text.contains("https://192.168.77.4:8765"), "{text}");
-        assert!(
-            text.contains("/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data"),
-            "{text}"
-        );
-        assert!(text.contains("nas-account@192.168.77.4"), "{text}");
+        assert!(text.contains("https://192.168.77.10:8765"), "{text}");
+        assert!(text.contains("/srv/lezi-example/data"), "{text}");
+        assert!(text.contains("nas-operator@192.168.77.10"), "{text}");
         // Fixed order markers
         assert!(text.contains("stop live container"), "{text}");
         assert!(text.contains("dual backup"), "{text}");

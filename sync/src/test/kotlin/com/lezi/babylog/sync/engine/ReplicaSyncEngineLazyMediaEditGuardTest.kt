@@ -108,6 +108,7 @@ class ReplicaSyncEngineLazyMediaEditGuardTest {
     fun fullCycleStillBlocksInCycleLocalMediaEditFromRemoteOverwrite() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 3)
         val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        rig.backend.mediaBytes = ByteArray(12) { 1 } // Match existing and concurrently replaced file metadata.
         val babyId = rig.babies.seed(
             localReplicaBaby().copy(
                 syncDirty = false,
@@ -146,29 +147,52 @@ class ReplicaSyncEngineLazyMediaEditGuardTest {
                 ),
             )
         }
+        val replacementUuid = "37373737-3737-4737-8737-373737373737"
+        val replacementBytes = byteArrayOf(7, 8, 9)
+        rig.mediaFiles.preparedUploadBytes["photos/between-downloads.jpg"] = replacementBytes
         rig.mediaFiles.afterSaveDownloaded = {
             val current = requireNotNull(rig.media.getByClientUuid(peerUuid))
             rig.media.update(
                 current.copy(
-                    localUri = "photos/between-downloads.jpg",
-                    updatedAt = current.updatedAt + 1,
+                    deletedAt = 101,
+                    updatedAt = 101,
                     syncDirty = true,
                 ),
             )
+            rig.media.seed(MediaAssetEntity(
+                recordId = recordId, clientUuid = replacementUuid, kind = "log",
+                localUri = "photos/between-downloads.jpg", byteSize = 3, mime = "image/jpeg",
+                createdAt = 101, updatedAt = 101, syncDirty = true,
+            ))
         }
         rig.backend.nextPull = PullResult(
-            entities = emptyList(),
+            entities = listOf(mediaUuid, peerUuid).map { uuid ->
+                remoteReplicaMedia(uuid, "record-local").copy(
+                    updatedAt = 100,
+                    payloadJson = """{"kind":"log","record_client_uuid":"record-local","care_plan_client_uuid":null,"baby_client_uuid":null,"mime":"image/jpeg","width":null,"height":null,"byte_size":12}""",
+                ).withAuthenticatedMediaBytes(rig.backend.mediaBytes)
+            },
             cursor = 3,
             generation = session.pullGeneration,
             hasMore = false,
         )
 
         rig.engine.synchronize(session, SyncTrigger.Foreground)
+        assertThat(rig.media.getByClientUuid(peerUuid)?.deletedAt).isEqualTo(101)
+        rig.engine.synchronize(rig.preferences.current(), SyncTrigger.LocalWrite)
 
-        assertThat(rig.media.getByClientUuid(mediaUuid)?.localUri)
-            .isEqualTo("downloaded/$mediaUuid")
-        assertThat(rig.media.getByClientUuid(peerUuid)?.localUri)
-            .isEqualTo("photos/between-downloads.jpg")
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(
+            requireNotNull(rig.media.getByClientUuid(mediaUuid)).localUri,
+        )).readBytes()).isEqualTo(rig.backend.mediaBytes)
+        val relocated = requireNotNull(rig.media.getByClientUuid(replacementUuid))
+        assertThat(relocated.recordId).isEqualTo(recordId)
+        assertThat(relocated.updatedAt).isEqualTo(101)
+        assertThat(relocated.deletedAt).isNull()
+        assertThat(rig.mediaFiles.prepareUploadCounts["photos/between-downloads.jpg"]).isEqualTo(1)
+        assertThat(rig.media.getByClientUuid(peerUuid)?.deletedAt).isEqualTo(101)
+        assertThat(rig.mediaFiles.inspected).contains("photos/between-downloads.jpg")
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(relocated.localUri)).readBytes())
+            .isEqualTo(replacementBytes)
         assertThat(rig.backend.pullCount).isEqualTo(1)
     }
 

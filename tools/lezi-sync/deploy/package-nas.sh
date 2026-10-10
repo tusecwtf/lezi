@@ -26,7 +26,7 @@ if [[ "${image}" != "lezi-sync:${version}" ]]; then
   echo "error: LEZI_SYNC_IMAGE must be lezi-sync:${version}" >&2
   exit 1
 fi
-data_host_path="${LEZI_DATA_HOST_PATH:-/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data}"
+data_host_path="${LEZI_DATA_HOST_PATH:?Set LEZI_DATA_HOST_PATH to the explicitly approved absolute NAS data path}"
 if [[ "${data_host_path}" != /* \
     || "${data_host_path}" == "/" \
     || ! "${data_host_path}" =~ ^/[A-Za-z0-9._/-]+$ \
@@ -44,7 +44,7 @@ case "${data_host_path}" in
     exit 1
     ;;
 esac
-tls_host="${LEZI_TLS_HOST:-192.168.77.4}"
+tls_host="${LEZI_TLS_HOST:?Set LEZI_TLS_HOST to the explicitly approved certificate host}"
 if [[ ! "${tls_host}" =~ ^[A-Za-z0-9.:-]+$ ]] || [[ "${#tls_host}" -gt 253 ]]; then
   echo "error: LEZI_TLS_HOST must be a plain DNS name or IP address" >&2
   exit 1
@@ -234,10 +234,10 @@ validate_and_stage_app_update() {
   # pack with current helpers; they keep signer, identity, and metadata-hash gates.
   if [[ "${version}" != "0.3.12" && "${version}" != "0.3.13" ]]; then
   if ! contract_values="$(
-    python3 - "${local_data_contract_json}" "${manifest_file}" <<'PY'
+    python3 - "${local_data_contract_json}" "${manifest_file}" "${REPO_ROOT}/config/android-release-compatibility.json" "${version}" <<'PY'
 import json, re, sys
 
-ledger_path, manifest_path = sys.argv[1:]
+ledger_path, manifest_path, catalog_path, package_version = sys.argv[1:]
 with open(ledger_path, encoding="utf-8") as f:
     ledger = json.load(f)
 with open(manifest_path, encoding="utf-8") as f:
@@ -282,10 +282,17 @@ apk_current = manifest_int("com.lezi.babylog.LOCAL_DATA_CONTRACT_VERSION")
 apk_minimum = manifest_int(
     "com.lezi.babylog.MINIMUM_MIGRATABLE_LOCAL_DATA_CONTRACT_VERSION"
 )
-if [apk_current, apk_minimum] != [current, minimum]:
+catalog = json.load(open(catalog_path, encoding="utf-8"))
+expected_contracts = {entry["local_data_contract"] for entry in
+    catalog["released_versions"] + [catalog["upgrade_target"]]
+    if entry["version_name"] == package_version}
+if len(expected_contracts) != 1:
+    raise SystemExit("package version has no unambiguous local-data contract in release catalog")
+expected_contract = expected_contracts.pop()
+if [apk_current, apk_minimum] != [expected_contract, minimum]:
     raise SystemExit(
         "APK local-data contract does not match ledger "
-        f"(apk={apk_minimum}..{apk_current}, ledger={minimum}..{current})"
+        f"(apk={apk_minimum}..{apk_current}, release={minimum}..{expected_contract})"
     )
 print(apk_current)
 print(apk_minimum)
@@ -422,6 +429,11 @@ PY
     echo "  metadata: ${version_name}" >&2
     exit 1
   fi
+  if [[ "${version}" == "0.5.5" ]] && \
+      [[ "${version_code}" != "35" || "${min_supported}" != "35" ]]; then
+    echo "error: nursing plan intent requires versionCode35 and sync floor35" >&2
+    exit 1
+  fi
   if [[ "${meta_sha}" != "${apk_sha}" ]]; then
     echo "error: app-update.json sha256 does not match release APK" >&2
     echo "  metadata: ${meta_sha}" >&2
@@ -510,6 +522,7 @@ cp -a "${SCRIPT_DIR}/docker-compose.nas.yml.tpl" "${out_root}/docker-compose.nas
 cp -a "${SCRIPT_DIR}/remote-deploy.sh" "${out_root}/remote-deploy.sh"
 cp -a "${SCRIPT_DIR}/schema-cutover.sh" "${out_root}/schema-cutover.sh"
 cp -a "${SCRIPT_DIR}/schema-cutover-steps.sh" "${out_root}/schema-cutover-steps.sh"
+cp -a "${SCRIPT_DIR}/schema-update-pair.sh" "${out_root}/schema-update-pair.sh"
 cp -a "${SCRIPT_DIR}/export-nas-credentials.sh" "${out_root}/export-nas-credentials.sh"
 cp -a "${SCRIPT_DIR}/init-tls.sh" "${out_root}/init-tls.sh"
 cp -a "${SCRIPT_DIR}/promote-nas-package.sh" "${out_root}/promote-nas-package.sh"
@@ -520,6 +533,7 @@ cp -a "${SCRIPT_DIR}/DEPLOY.md" "${out_root}/DEPLOY.md"
 chmod +x "${out_root}/remote-deploy.sh"
 chmod +x "${out_root}/schema-cutover.sh"
 chmod +x "${out_root}/schema-cutover-steps.sh"
+chmod +x "${out_root}/schema-update-pair.sh"
 chmod +x "${out_root}/credential-deploy-lock.sh"
 chmod +x "${out_root}/export-nas-credentials.sh"
 chmod +x "${out_root}/init-tls.sh"
@@ -747,7 +761,7 @@ EOF
     credential-deploy-lock.sh docker-compose.nas.yml.tpl docker-compose.yml \
     export-nas-credentials.sh init-tls.sh \
     "${tar_name}" promote-nas-package.sh remote-deploy.sh \
-    schema-cutover.sh schema-cutover-steps.sh \
+    schema-cutover.sh schema-cutover-steps.sh schema-update-pair.sh \
     tls-certificate-sha256.sh tls-spki.sh \
     validate-nas-package.sh \
     > SHA256SUMS

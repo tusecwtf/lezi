@@ -1,5 +1,8 @@
 package com.lezi.babylog.feature.family
 
+// 192.168.77.10 is a synthetic RFC1918 LAN test endpoint, never a deployment default.
+
+import com.lezi.babylog.sync.session.toPresentation
 import com.lezi.babylog.feature.family.members.formatFamilyDeviceLastUsed
 import com.lezi.babylog.feature.family.members.formatMemberLastSync
 
@@ -42,7 +45,7 @@ class FamilyErrorCopyTest {
             "已重新连上家庭，数据恢复完成",
             familyWizardOutcomeCopy(
                 FamilyWizardOutcome.Reclaimed(
-                    session = session,
+                    session = session.toPresentation(),
                     dataRecovery = InitialFamilyDataRecovery.Complete,
                 ),
             ),
@@ -51,7 +54,7 @@ class FamilyErrorCopyTest {
             "已重新连上家庭，但数据同步失败，请在记录、汇总或成长页下拉重试",
             familyWizardOutcomeCopy(
                 FamilyWizardOutcome.Reclaimed(
-                    session = session,
+                    session = session.toPresentation(),
                     dataRecovery = InitialFamilyDataRecovery.RetryRequired(),
                 ),
             ),

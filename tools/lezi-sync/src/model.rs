@@ -1077,8 +1077,8 @@ fn validate_care_plan(payload: &mut Map<String, Value>) -> Result<(), ApiError> 
         ));
     }
     optional_nullable_string(payload, "note", 0, 20_000)?;
-    let allow_intent_only_feed =
-        is_next_feed_plan_note(payload.get("note").and_then(Value::as_str));
+    let allow_intent_only_feed = record_type == "nursing"
+        || is_next_feed_plan_note(payload.get("note").and_then(Value::as_str));
     validate_current_payload_json(
         &record_type,
         payload.get_mut("payload_json"),
@@ -2576,9 +2576,12 @@ mod tests {
             let mut unmarked_plan_payload = care_plan_payload();
             unmarked_plan_payload["type"] = json!(record_type);
             unmarked_plan_payload["payload_json"] = nested.clone();
-            assert!(care_plan(unmarked_plan_payload)
-                .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
-                .is_err());
+            assert_eq!(
+                care_plan(unmarked_plan_payload)
+                    .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+                    .is_ok(),
+                record_type == "nursing"
+            );
 
             let mut fact_payload = record_payload();
             fact_payload["type"] = json!(record_type);

@@ -7,7 +7,7 @@ use crate::model::normalized_device_name_key;
 
 use super::super::{
     CreateMemberLoginRequestInput, CreatedDeviceSession, CreatedMemberLoginGrant,
-    PendingMemberLoginRequest, Store, StoreError,
+    PendingMemberLoginRequest, Principal, Store, StoreError,
 };
 use super::{active_device_name_conflicts, replay_active_device_session, ACCESS_TOKEN_TTL_SECONDS};
 
@@ -148,11 +148,13 @@ impl Store {
     /// The result contains only unexpired pending and approved-but-unclaimed rows.
     pub fn pending_member_login_requests(
         &self,
-        family_id: &str,
+        principal: &Principal,
         now: i64,
     ) -> Result<Vec<PendingMemberLoginRequest>, StoreError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let family_id = principal.family_id.as_str();
+        super::require_identity_role(&transaction, principal, "owner")?;
         transaction.execute(
         "UPDATE member_login_requests SET status = 'expired' WHERE family_id = ?1 AND status IN ('pending', 'approved') AND expires_at <= ?2",
         params![family_id, now],
@@ -188,12 +190,14 @@ impl Store {
 
     pub fn approve_new_member_login_request(
         &self,
-        family_id: &str,
+        principal: &Principal,
         request_id: &str,
         now: i64,
     ) -> Result<(), StoreError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let family_id = principal.family_id.as_str();
+        super::require_identity_role(&transaction, principal, "owner")?;
         let (status, expires_at, display_name_key, approval_kind) = transaction
         .query_row(
             "SELECT status, expires_at, display_name_key, approval_kind FROM member_login_requests WHERE family_id = ?1 AND request_id = ?2",
@@ -257,13 +261,15 @@ impl Store {
 
     pub fn bind_existing_member_login_request(
         &self,
-        family_id: &str,
+        principal: &Principal,
         request_id: &str,
         membership_id: &str,
         now: i64,
     ) -> Result<(), StoreError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let family_id = principal.family_id.as_str();
+        super::require_identity_role(&transaction, principal, "owner")?;
         let (status, expires_at, approval_kind, current_target) = transaction
         .query_row(
             "SELECT status, expires_at, approval_kind, membership_id FROM member_login_requests WHERE family_id = ?1 AND request_id = ?2",
@@ -321,12 +327,14 @@ impl Store {
 
     pub fn reject_member_login_request(
         &self,
-        family_id: &str,
+        principal: &Principal,
         request_id: &str,
         now: i64,
     ) -> Result<(), StoreError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let family_id = principal.family_id.as_str();
+        super::require_identity_role(&transaction, principal, "owner")?;
         let (status, expires_at) = transaction
         .query_row(
             "SELECT status, expires_at FROM member_login_requests WHERE family_id = ?1 AND request_id = ?2",
@@ -527,7 +535,7 @@ impl Store {
 
     pub fn create_member_login_grant(
         &self,
-        family_id: &str,
+        principal: &Principal,
         membership_id: &str,
         grant: &str,
         now: i64,
@@ -535,6 +543,8 @@ impl Store {
     ) -> Result<CreatedMemberLoginGrant, StoreError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let family_id = principal.family_id.as_str();
+        super::require_identity_role(&transaction, principal, "owner")?;
         let target = transaction
             .query_row(
                 "

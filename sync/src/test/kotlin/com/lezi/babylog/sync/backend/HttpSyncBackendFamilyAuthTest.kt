@@ -31,6 +31,29 @@ import com.lezi.babylog.sync.session.requireMemberDisplayName
 
 class HttpSyncBackendFamilyAuthTest {
     @Test
+    fun committedStatusWithoutAuthorityProofCannotReturnNewSession() = runTest {
+        for (marker in listOf("", ",\"restore_authority\":\"old\"")) {
+            val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+            val responder = thread {
+                server.accept().use { socket ->
+                    readRequest(socket)
+                    val body = """{"protocol_version":1,"status":"committed"$marker}""".toByteArray()
+                    socket.getOutputStream().use { output ->
+                        output.write(("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n").toByteArray())
+                        output.write(body)
+                    }
+                }
+            }
+            try {
+                val result = runCatching { loopbackBackend(clientVersionCode = 35).commitDisasterRestore(
+                    TrustedEndpointProfile.systemPki("https://${server.inetAddress.hostAddress}:${server.localPort}"),
+                    "batch-a", "restore-token-00000000000000000000", "commit-request-000000000000000001", "test-root") }
+                assertThat(result.exceptionOrNull()?.message).contains("未证明新的家庭权威")
+            } finally { server.close(); responder.join(2_000) }
+        }
+    }
+
+    @Test
         fun disasterRestoreUsesRootOnlyAtBoundariesAndRecoveryTokenInTheMiddle() = runTest {
             val server = ServerSocket(0, 3, InetAddress.getByName("127.0.0.1"))
             val captured = mutableListOf<String>()
@@ -44,7 +67,7 @@ class HttpSyncBackendFamilyAuthTest {
                             request.startsWith("PUT /v1/disaster-restore/batches/batch-a/manifest ") ->
                                 """{"protocol_version":1,"batch_id":"batch-a","status":"ready_to_commit","expires_at":1753500000}"""
                             else ->
-                                """{"protocol_version":1,"batch_id":"batch-a","status":"committed","family_id":"00000000-0000-0000-0000-000000000001","family_name":"乐乐一家","membership_id":"membership-owner","device_id":"device-new","session_id":"session-new","role":"owner","access_token":"new-access","access_expires_at":1753419300,"refresh_token":"new-refresh","generation":"generation-new"}"""
+                                """{"protocol_version":1,"batch_id":"batch-a","status":"committed","restore_authority":"v1","family_id":"00000000-0000-0000-0000-000000000001","family_name":"乐乐一家","membership_id":"membership-owner","device_id":"device-new","session_id":"session-new","role":"owner","access_token":"new-access","access_expires_at":1753419300,"refresh_token":"new-refresh","generation":"generation-new"}"""
                         }.toByteArray(Charsets.UTF_8)
                         socket.getOutputStream().use { output ->
                             output.write(
@@ -89,6 +112,7 @@ class HttpSyncBackendFamilyAuthTest {
                         ),
                     ),
                     emptyList(),
+                    emptyList(),
                 )
                 val session = backend.commitDisasterRestore(
                     endpoint,
@@ -98,6 +122,10 @@ class HttpSyncBackendFamilyAuthTest {
                     "new-server-root",
                 )
 
+                captured.forEach { request ->
+                    assertThat(request).contains("\"restore_authority\":\"v1\"")
+                    assertThat(request).contains("X-Lezi-Sync-Capabilities: nursing_plan_intent_v1,restore_authority_v1")
+                }
                 assertThat(session.familyId).isEqualTo("00000000-0000-0000-0000-000000000001")
                 assertThat(session.role).isEqualTo(FamilyRole.Owner)
                 assertThat(captured[0]).contains("X-Lezi-Bootstrap-Secret: new-server-root")

@@ -52,6 +52,8 @@ internal fun testLocalClearWorkflow(
 internal class ClearRig(
     session: SyncSession = joinedClearSession(),
     val mediaFiles: TestMediaFileStore = TestMediaFileStore(),
+    private val reclaimRestoreFiles: suspend () -> Unit = {},
+    private val restoreOwnedPaths: suspend () -> Set<String> = { emptySet() },
 ) {
     val barrier = Mutex()
     val preferences = MemorySyncPreferences(session)
@@ -59,6 +61,7 @@ internal class ClearRig(
     val carePlans = MemoryCarePlanDao()
     val babies = MemoryBabyDao()
     val media = MemoryMediaDao()
+    val cache = com.lezi.babylog.sync.MemoryConflictSnapshotCacheDao()
     val transactions = ClearTransactionRunner()
     val pending = MemoryPendingReplicaCleanupStore { transactions.depth }
     val coordinator = newCoordinator()
@@ -69,8 +72,16 @@ internal class ClearRig(
         babyDao = babies,
         mediaDao = media,
         mediaFiles = mediaFiles,
+        mediaSpoolClear = com.lezi.babylog.sync.media.ScopedMediaSpoolClear(
+            babies,
+            cache,
+            com.lezi.babylog.sync.MemoryConflictSummaryDao(),
+            com.lezi.babylog.sync.TestImmutableMediaSpool(mediaFiles),
+        ),
         transactionRunner = transactions,
         pendingStore = pending,
+        reclaimRestoreFiles = reclaimRestoreFiles,
+        restoreOwnedPaths = restoreOwnedPaths,
     )
 }
 

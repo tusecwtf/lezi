@@ -172,6 +172,7 @@ interface CustomItemDao {
         expectedMutationId: String,
         expectedContentEpoch: Long,
         newBaseVersion: String,
+        matchesBoundContent: Boolean = true,
     ): CommitFirstSettlementEpoch? {
         val current = getByClientUuid(clientUuid) ?: return null
         val settled = com.lezi.babylog.core.database.causal.settleCommitFirstAcceptedOrMerged(
@@ -179,6 +180,7 @@ interface CustomItemDao {
             expectedMutationId = expectedMutationId,
             expectedContentEpoch = expectedContentEpoch,
             newBaseVersion = newBaseVersion,
+            matchesBoundContent = matchesBoundContent,
         ) ?: return null
         val cols = settled.state.toAppliedColumns()
         update(
@@ -201,6 +203,7 @@ interface CustomItemDao {
         conflictId: String,
         branchVersionId: String,
         stableBaseVersion: String,
+        matchesBoundContent: Boolean = true,
     ): CommitFirstSettlementEpoch? {
         val current = getByClientUuid(clientUuid) ?: return null
         val settled = com.lezi.babylog.core.database.causal.settleCommitFirstBranched(
@@ -210,6 +213,7 @@ interface CustomItemDao {
             conflictId = conflictId,
             branchVersionId = branchVersionId,
             stableBaseVersion = stableBaseVersion,
+            matchesBoundContent = matchesBoundContent,
         ) ?: return null
         val cols = settled.state.toAppliedColumns()
         update(

@@ -5,11 +5,14 @@ import android.appwidget.AppWidgetManager
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.animation.Crossfade
+import androidx.activity.viewModels
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -26,35 +29,30 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.semantics.Role
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
-import com.lezi.babylog.core.common.DefaultLocalDataGate
+import androidx.lifecycle.repeatOnLifecycle
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.core.ui.presentation
-import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.designsystem.LeziAlphas
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTheme
-import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziPrimaryButton
-import dagger.Lazy
 import dagger.hilt.android.AndroidEntryPoint
-import javax.inject.Inject
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 @AndroidEntryPoint
 class WidgetConfigurationActivity : ComponentActivity() {
-    @Inject lateinit var localDataGate: DefaultLocalDataGate
-    @Inject lateinit var careLog: Lazy<CareLog>
-    @Inject lateinit var controller: Lazy<CareWidgetRefreshController>
-
-    private var screenState by mutableStateOf<WidgetConfigurationScreenState?>(null)
+    private val model: WidgetConfigurationViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -68,89 +66,70 @@ class WidgetConfigurationActivity : ComponentActivity() {
             finish()
             return
         }
-        setContent {
-            LeziTheme {
-                Surface(
-                    Modifier
-                        .fillMaxSize()
-                        .safeDrawingPadding(),
-                ) {
-                    Crossfade(targetState = screenState, label = "widgetConfig") { state ->
-                        if (state == null) {
-                            Column(
-                                Modifier.fillMaxSize(),
-                                verticalArrangement = Arrangement.Center,
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                            ) {
-                                CircularProgressIndicator()
-                            }
-                        } else {
-                            WidgetConfigurationScreen(
-                                state = state,
-                                onStateChange = { screenState = it },
-                                onSave = { save(it) },
-                            )
-                        }
+        model.load(widgetId)
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                model.ui.collect { ui ->
+                    if (ui.saved) {
+                        setResult(Activity.RESULT_OK, Intent().putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, widgetId))
+                        finish()
+                    } else if (ui.close) {
+                        finish()
+                    } else if (ui.openApp) {
+                        packageManager.getLaunchIntentForPackage(packageName)?.let(::startActivity)
+                        finish()
                     }
                 }
             }
         }
-        lifecycleScope.launch {
-            // A clear racing this load (epoch exceptions from the controller)
-            // or a storage failure must not crash the configuration activity;
-            // staying on the spinner is the pre-existing failure surface.
-            runCatching {
-                if (!localDataGate.ensureReady()) {
-                    packageManager.getLaunchIntentForPackage(packageName)?.let(::startActivity)
-                    finish()
-                    return@launch
+        setContent {
+            // Do not render a default light/small-text frame before local preferences arrive.
+            val ui by model.ui.collectAsStateWithLifecycle()
+            if (ui.settings == null && ui.error == null) return@setContent
+            val settings = ui.settings ?: SettingsLocal()
+            val systemDark = isSystemInDarkTheme()
+            val dark = when (settings.darkMode) {
+                "dark" -> true
+                "light" -> false
+                else -> systemDark
+            }
+            LeziTheme(darkTheme = dark, visualStyle = settings.visualStyle, elderMode = settings.elderMode) {
+                val background = MaterialTheme.colorScheme.surface.toArgb()
+                SideEffect {
+                    val style = if (dark) SystemBarStyle.dark(background)
+                        else SystemBarStyle.light(background, background)
+                    enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
                 }
-                val readyCareLog = careLog.get()
-                val readyController = controller.get()
-                val babies = readyCareLog.listBabies()
-                    .map { WidgetBabyOption(it.id, it.nickname) }
-                if (babies.isEmpty()) {
-                    finish()
-                    return@launch
+                Surface(Modifier.fillMaxSize().safeDrawingPadding()) {
+                    WidgetConfigurationContent(ui, model::change, model::save, { model.load(widgetId) })
                 }
-                val existing = readyController.configuration(widgetId)
-                val selectedBabyId = existing?.babyId
-                    ?.takeIf { selected -> babies.any { it.id == selected } }
-                    ?: readyCareLog.getCurrentBaby()?.id
-                    ?: babies.first().id
-                screenState = WidgetConfigurationScreenState(
-                    widgetId = widgetId,
-                    babies = babies,
-                    selectedBabyId = selectedBabyId,
-                    selectedTypes = existing?.quickTypes ?: DEFAULT_WIDGET_QUICK_TYPES,
-                )
-            }.onFailure { error -> if (error is CancellationException) throw error }
+            }
         }
     }
+}
 
-    private fun save(state: WidgetConfigurationScreenState) {
-        if (!state.canSave) return
-        lifecycleScope.launch {
-            // On failure the config screen simply stays up (no result, no
-            // finish) instead of crashing — the user can retry the save.
-            val configured = runCatching {
-                if (!localDataGate.ensureReady()) return@launch
-                controller.get().configure(
-                    WidgetConfiguration(
-                        widgetId = state.widgetId,
-                        babyId = state.selectedBabyId,
-                        quickTypes = state.selectedTypes,
-                    ),
-                )
-            }.onFailure { error -> if (error is CancellationException) throw error }
-                .isSuccess
-            if (!configured) return@launch
-            val result = Intent().putExtra(
-                AppWidgetManager.EXTRA_APPWIDGET_ID,
-                state.widgetId,
-            )
-            setResult(Activity.RESULT_OK, result)
-            finish()
+@Composable
+internal fun WidgetConfigurationContent(
+    ui: WidgetConfigurationUi,
+    onStateChange: (WidgetConfigurationScreenState) -> Unit,
+    onSave: (WidgetConfigurationScreenState) -> Unit,
+    onRetry: () -> Unit,
+) {
+    val state = ui.selection
+    if (state != null) {
+        WidgetConfigurationScreen(state, onStateChange, onSave, ui.saving, ui.error)
+    } else {
+        Column(
+            Modifier.fillMaxSize().padding(LeziSpacing.Page),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            if (ui.error != null) {
+                Text(ui.error, style = LeziThemeExt.typography.Body)
+                LeziPrimaryButton(label = "重试", onClick = onRetry)
+            } else {
+                CircularProgressIndicator()
+            }
         }
     }
 }
@@ -189,6 +168,8 @@ internal fun WidgetConfigurationScreen(
     state: WidgetConfigurationScreenState,
     onStateChange: (WidgetConfigurationScreenState) -> Unit,
     onSave: (WidgetConfigurationScreenState) -> Unit,
+    saving: Boolean = false,
+    saveError: String? = null,
 ) {
     Column(
         Modifier
@@ -198,36 +179,45 @@ internal fun WidgetConfigurationScreen(
         verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
     ) {
         Text("设置乐记小组件", style = LeziThemeExt.typography.Title)
-        Text("选择宝宝", style = LeziTypography.TitleSm)
+        Text("选择宝宝", style = LeziThemeExt.typography.TitleSm)
         state.babies.forEach { baby ->
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = WidgetChrome.configRowMinHeight)
-                    .clickable { onStateChange(state.selectBaby(baby.id)) },
+                    .selectable(
+                        selected = state.selectedBabyId == baby.id,
+                        enabled = !saving,
+                        role = Role.RadioButton,
+                        onClick = { onStateChange(state.selectBaby(baby.id)) },
+                    ),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 RadioButton(
                     selected = state.selectedBabyId == baby.id,
+                    enabled = !saving,
                     onClick = null,
                 )
-                Text(baby.nickname, style = LeziTypography.Body)
+                Text(baby.nickname, style = LeziThemeExt.typography.Body)
             }
         }
         Text(
             "快捷记录（已选 ${state.selectedTypes.size}/$MAX_WIDGET_QUICK_TYPES）",
-            style = LeziTypography.TitleSm,
+            style = LeziThemeExt.typography.TitleSm,
         )
         CONFIGURABLE_WIDGET_QUICK_TYPES.forEach { type ->
-            val enabled = type in state.selectedTypes ||
-                state.selectedTypes.size < MAX_WIDGET_QUICK_TYPES
+            val enabled = !saving && (type in state.selectedTypes ||
+                state.selectedTypes.size < MAX_WIDGET_QUICK_TYPES)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = WidgetChrome.configRowMinHeight)
-                    .clickable(enabled = enabled) {
-                        onStateChange(state.toggle(type))
-                    },
+                    .toggleable(
+                        value = type in state.selectedTypes,
+                        enabled = enabled,
+                        role = Role.Checkbox,
+                        onValueChange = { onStateChange(state.toggle(type)) },
+                    ),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Checkbox(
@@ -237,7 +227,7 @@ internal fun WidgetConfigurationScreen(
                 )
                 Text(
                     type.presentation.label,
-                    style = LeziTypography.Body,
+                    style = LeziThemeExt.typography.Body,
                     color = if (enabled) {
                         MaterialTheme.colorScheme.onSurface
                     } else {
@@ -246,10 +236,11 @@ internal fun WidgetConfigurationScreen(
                 )
             }
         }
+        saveError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         LeziPrimaryButton(
-            label = "保存小组件",
+            label = if (saving) "保存中…" else "保存小组件",
             onClick = { onSave(state) },
-            enabled = state.canSave,
+            enabled = state.canSave && !saving,
             modifier = Modifier.fillMaxWidth(),
         )
     }

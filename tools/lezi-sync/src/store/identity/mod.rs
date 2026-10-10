@@ -13,7 +13,7 @@ pub(in crate::store) mod session;
 
 use rusqlite::{params, OptionalExtension, Transaction};
 
-use super::{CreatedDeviceSession, StoreError};
+use super::{CreatedDeviceSession, Principal, StoreError};
 
 const ACCESS_TOKEN_TTL_SECONDS: i64 = 15 * 60;
 
@@ -103,4 +103,18 @@ where
         family_name,
         role: "member".to_owned(),
     }))
+}
+
+/// Identity administration shares the same live membership/device check as causal writes.
+/// Run this inside the write transaction, before even request-expiry housekeeping.
+fn require_identity_role(
+    transaction: &Transaction<'_>,
+    principal: &Principal,
+    role: &str,
+) -> Result<(), StoreError> {
+    super::causal::require_current_principal(transaction, principal)?;
+    if principal.role != role {
+        return Err(StoreError::ForbiddenIdentityAdministration);
+    }
+    Ok(())
 }

@@ -38,6 +38,9 @@ COPY ${PROJECT_CARGO_CONFIG} /build/.cargo/config.toml
 COPY ${VENDOR_SRC}/ /build/vendor/
 COPY docker/fetch-and-build.sh /tmp/fetch-and-build.sh
 COPY Cargo.toml Cargo.lock ./
+ARG LEZI_SYNC_VERSION
+COPY docker/validate-version.sh /tmp/validate-version.sh
+RUN sh /tmp/validate-version.sh Cargo.toml "${LEZI_SYNC_VERSION}"
 COPY src ./src
 
 # Cache mounts keep crates/objects after a timed-out RUN so the next attempt
@@ -49,7 +52,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 
 FROM debian:bookworm-slim
 
-ARG LEZI_SYNC_VERSION=0.3.9
+ARG LEZI_SYNC_VERSION
 
 LABEL org.opencontainers.image.title="lezi-sync" \
       org.opencontainers.image.description="Rust home-LAN sync server for Lezi" \

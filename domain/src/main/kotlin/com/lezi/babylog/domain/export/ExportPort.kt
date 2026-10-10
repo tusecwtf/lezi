@@ -1,5 +1,4 @@
 package com.lezi.babylog.domain.export
-import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.displayLabel
 import com.lezi.babylog.core.model.visibleBusinessText
@@ -10,7 +9,9 @@ import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 import javax.inject.Singleton
 import com.lezi.babylog.domain.CareLog
-import com.lezi.babylog.domain.toModel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+
 
 interface ExportPort {
     suspend fun exportTxt(babyId: Long, from: LocalDate, to: LocalDate): String
@@ -30,9 +31,14 @@ data class ExportDocument(
     val recordCount: Int = -1,
 )
 
+internal data class ExportCareFact(
+    val record: Record,
+    val wakeNotes: List<String>,
+    val photoPaths: List<String>,
+)
+
 @Singleton
 class TxtExportPort @Inject constructor(
-    private val recordDao: RecordDao,
     private val careLog: CareLog,
 ) : ExportPort {
     override suspend fun exportTxt(babyId: Long, from: LocalDate, to: LocalDate): String =
@@ -43,14 +49,15 @@ class TxtExportPort @Inject constructor(
         from: LocalDate,
         to: LocalDate,
     ): ExportDocument {
+        val context = currentCoroutineContext()
+        context.ensureActive()
         require(!to.isBefore(from)) { "结束日期不能早于开始日期" }
         val zone = ZoneId.systemDefault()
-        val start = from.atStartOfDay(zone).toInstant().toEpochMilli()
-        val end = to.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-        val rows = recordDao.listRange(babyId, start, end)
-        // Surface export only: conflict-not-adopted fulfillment facts stay out.
-        val surface = careLog.filterSurfaceRecords(rows.map { it.toModel() })
-            .associateBy { it.clientUuid }
+        val rows = careLog.exportCareFacts(
+            babyId,
+            from.atStartOfDay(zone).toInstant().toEpochMilli(),
+            to.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli(),
+        )
         val baby = careLog.listBabies().find { it.id == babyId }
         val dt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(zone)
         val sb = StringBuilder()
@@ -58,18 +65,32 @@ class TxtExportPort @Inject constructor(
         sb.appendLine("宝宝：${baby?.nickname ?: babyId}")
         sb.appendLine("范围：$from ~ $to")
         sb.appendLine("---")
-        val exportedIds = ArrayList<Long>(rows.size)
-        var recordCount = 0
-        for (r in rows) {
-            val model = surface[r.clientUuid] ?: continue
-            recordCount += 1
+        for (fact in rows) {
+            context.ensureActive()
+            val model = fact.record
             val type = exportRecordLabel(model)
-            val whenStr = dt.format(Instant.ofEpochMilli(r.timestamp))
+            val whenStr = dt.format(Instant.ofEpochMilli(model.timestamp))
             val summary = model.visibleBusinessText().ifBlank { "-" }
-            sb.appendLine("$whenStr\t$type\t$summary")
-            exportedIds += r.id
+            val wakeText = if (fact.wakeNotes.isEmpty()) "" else buildString {
+                append("\t醒来：")
+                fact.wakeNotes.forEachIndexed { index, note ->
+                    if ((index and 127) == 0) context.ensureActive()
+                    if (index > 0) append("；")
+                    append(note)
+                }
+            }
+            sb.appendLine("$whenStr\t$type\t$summary$wakeText")
         }
-        val photoPaths = careLog.listRecordPhotoPaths(exportedIds).distinct()
+        val photoPaths = buildSet {
+            for (fact in rows) {
+                context.ensureActive()
+                fact.photoPaths.forEachIndexed { index, path ->
+                    if ((index and 127) == 0) context.ensureActive()
+                    add(path)
+                }
+            }
+        }.toList()
+        val recordCount = rows.size
         return ExportDocument(sb.toString(), photoPaths, recordCount)
     }
 

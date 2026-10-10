@@ -18,6 +18,7 @@
 //! `offline_migrate/` is **not** part of this package.
 
 mod authority_graph;
+pub(crate) use authority_graph::validate_authority_graph_on;
 mod bundles;
 mod causal;
 mod causal_admission;
@@ -25,11 +26,16 @@ mod causal_media_staging;
 mod causal_merge;
 mod conflict_retention;
 mod conflict_snapshots;
+pub(crate) mod current_source_relations;
 mod identity;
 mod live_census_cache;
 mod media;
+mod media_associations;
 mod pull;
 mod restore;
+mod restore_authority;
+pub(crate) use restore_authority::validate_restore_relations;
+pub use restore_authority::{RestoreAuthorityInput, RestoreSourceRelation};
 mod schema;
 mod source_relations;
 mod suspected_duplicates;
@@ -61,6 +67,8 @@ pub use causal_media_staging::{
     CausalMediaStageStatus, CausalMediaStagingLimits, VerifiedCausalMediaPreimage,
     DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS,
 };
+#[cfg(test)]
+pub(crate) use causal_merge::mutation_content_hash as test_mutation_content_hash;
 pub use causal_merge::CausalMediaItem;
 pub use conflict_snapshots::{ConflictDetailPage, ConflictDetailPageRequest};
 pub(crate) use media::media_association_owner;
@@ -198,6 +206,8 @@ pub struct PendingMemberRenameRequest {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PulledEntity {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_identity: Option<Value>,
     #[serde(rename = "type")]
     pub entity_type: String,
     pub client_uuid: String,
@@ -389,6 +399,8 @@ pub enum StoreError {
     ForbiddenRecord,
     #[error("only the family owner may manage an anonymous shared fact")]
     ForbiddenAnonymousFact,
+    #[error("identity administration is forbidden for this actor")]
+    ForbiddenIdentityAdministration,
     #[error("deleted custom item cannot be resurrected")]
     CustomItemTombstoneResurrection,
     #[error("deleted care plan cannot be resurrected")]
@@ -525,6 +537,9 @@ pub(in crate::store) struct CachedSession {
     pub last_used_synced_at: i64,
 }
 
+#[cfg(test)]
+type AuthCacheReadHook = Arc<dyn Fn() + Send + Sync>;
+
 #[derive(Clone)]
 pub struct Store {
     database_path: PathBuf,
@@ -540,6 +555,9 @@ pub struct Store {
     /// reaches every handle; see `live_census_cache` for the contract.
     live_census_cache: Arc<live_census_cache::LiveCensusCache>,
     pub(in crate::store) auth_cache: Arc<std::sync::RwLock<HashMap<String, CachedSession>>>,
+    auth_cache_generation: Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(test)]
+    pub(in crate::store) auth_cache_read_hook: Arc<std::sync::Mutex<Option<AuthCacheReadHook>>>,
     /// Tests opt in; production always auto-aligns after a successful record commit.
     #[cfg(test)]
     pub(crate) auto_align_enabled: Arc<AtomicBool>,
@@ -592,6 +610,8 @@ impl Store {
         let mut connection = connection;
         #[cfg(test)]
         connection.trace(Some(tests::test_support::trace_counted_pull_statement));
+        #[cfg(test)]
+        tests::test_support::install_sql_work_probe(&connection);
         crate::secure_file(&self.database_path)?;
         connection.busy_timeout(Duration::from_secs(10))?;
         // synchronous=FULL is explicit. NORMAL is a durability decision (power
@@ -630,9 +650,13 @@ impl Store {
         Ok(())
     }
     pub fn invalidate_auth_cache(&self) {
-        if let Ok(mut cache) = self.auth_cache.write() {
-            cache.clear();
-        }
+        let mut cache = self
+            .auth_cache
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.auth_cache_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        cache.clear();
     }
 
     /// Test probe: the head rev a live cache entry claims for this family, or

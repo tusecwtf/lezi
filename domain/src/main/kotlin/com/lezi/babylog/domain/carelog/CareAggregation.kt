@@ -52,6 +52,7 @@ object CareAggregation {
         dayCount: Int,
         zone: ZoneId = ZoneId.systemDefault(),
         now: Long = RecordTime.currentTimeMillis(),
+        factEndExclusive: Long = Long.MAX_VALUE,
     ): CareRange {
         require(dayCount > 0) { "dayCount must be positive" }
         // Single pass shared with window(): the old per-day aggregateDay loop
@@ -67,7 +68,8 @@ object CareAggregation {
             startDate = startDate,
             zone = zone,
             now = now,
-            recordStartBefore = Long.MAX_VALUE,
+            recordStartBefore = factEndExclusive,
+            intervalEndExclusive = factEndExclusive,
         ) {}
         return CareRange(startDate = startDate, days = days)
     }
@@ -114,6 +116,7 @@ object CareAggregation {
         zone: ZoneId,
         now: Long,
         recordStartBefore: Long,
+        intervalEndExclusive: Long = Long.MAX_VALUE,
         checkActive: () -> Unit,
     ): List<CareDay> {
         val days = Array(dayStarts.size - 1) { offset ->
@@ -127,7 +130,7 @@ object CareAggregation {
             val payload = record.payload.payload
             if (payload is UnknownPayload) return@forEach
             if (record.type == RecordType.SLEEP) {
-                val intervalEnd = sleepIntervalEnd(record, now)
+                val intervalEnd = minOf(sleepIntervalEnd(record, now), intervalEndExclusive)
                 if (intervalEnd < dayStarts.first() || record.timestamp >= dayStarts.last()) {
                     return@forEach
                 }

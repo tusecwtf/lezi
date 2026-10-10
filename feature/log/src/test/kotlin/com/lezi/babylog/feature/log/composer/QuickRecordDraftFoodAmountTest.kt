@@ -48,7 +48,7 @@ class QuickRecordDraftFoodAmountTest {
             "３。５碗" to "\"amount\":\"3.5碗\"",
             "５０g" to "\"amount\":\"50g\"",
         ).forEach { (amount, expectedJson) ->
-            assertTrue(foodDraft(amount).toSaveCommand().payloadJson.contains(expectedJson))
+            assertTrue(foodDraft(amount).toSaveCommand().payloadJsonForTest.contains(expectedJson))
         }
     }
 
@@ -56,7 +56,7 @@ class QuickRecordDraftFoodAmountTest {
     fun `digit-prefixed amounts save unchanged`() {
         val command = foodDraft("50g").toSaveCommand()
 
-        assertEquals(true, command.payloadJson.contains("\"amount\":\"50g\""))
+        assertEquals(true, command.payloadJsonForTest.contains("\"amount\":\"50g\""))
     }
 
     @Test

@@ -46,11 +46,17 @@ import com.lezi.babylog.domain.canManageCreatorOwnedFamilyEntity
 import com.lezi.babylog.domain.carelog.ConflictAuditQueries
 import com.lezi.babylog.domain.carelog.PhotoAttachmentOwner
 import com.lezi.babylog.domain.carelog.PhotoAttachmentReconciler
+import com.lezi.babylog.domain.carelog.requireExpectedCareType
 import com.lezi.babylog.domain.carelog.RecordMutationCoordinator
+import com.lezi.babylog.domain.carelog.WakeObservationCoordinator
+import com.lezi.babylog.domain.carelog.closedSleepWakeUuid
+import com.lezi.babylog.core.model.WakeObservationFact
+import com.lezi.babylog.core.model.projectSleepInterval
 import com.lezi.babylog.domain.localdata.CalendarReminderMutationGuard
 import com.lezi.babylog.domain.nextSyncUpdatedAt
 import com.lezi.babylog.domain.requireCurrentPayloadDocument
 import com.lezi.babylog.domain.requireCurrentPayloadJson
+import com.lezi.babylog.domain.requireValidCarePlanPayload
 import com.lezi.babylog.domain.stampCustomItemSnapshotIntoPayload
 import com.lezi.babylog.domain.toModel
 import com.lezi.babylog.domain.validateSleepInterval
@@ -85,6 +91,7 @@ internal class CarePlanCoordinator(
     private val calendarReminderMutationGuard: CalendarReminderMutationGuard,
     private val syncPort: SyncPort,
     private val recordMutations: RecordMutationCoordinator,
+    private val wakeObservations: WakeObservationCoordinator,
     private val nextFeedPlanMutationMutex: Mutex,
     private val sleepMutationMutex: Mutex,
     private val hasOpenSleep: suspend (Long) -> Boolean,
@@ -93,7 +100,7 @@ internal class CarePlanCoordinator(
     private val requestLocalSync: () -> Unit,
 ) {
     internal suspend fun currentMembershipActorId(): String =
-        syncPort.session().first().membershipId.trim()
+        syncPort.sessionPresentation().first().membershipId.trim()
 
     suspend fun createCarePlan(
         babyId: Long,
@@ -166,6 +173,21 @@ internal class CarePlanCoordinator(
                     }
                     return@run existing.id
                 }
+                requireActiveBaby(babyId)
+                val currentPayload = if (resolvedCustomItemId != null) {
+                    val currentDefinition = customItemDao.getById(resolvedCustomItemId)
+                        ?: error("自定义项目不存在或已删除")
+                    check(currentDefinition.deletedAt == null) { "自定义项目已删除" }
+                    stampCustomItemSnapshotIntoPayload(
+                        payloadJson = persistedPayload,
+                        customItemId = resolvedCustomItemId,
+                        titleSnapshot = currentDefinition.name,
+                        iconSlot = currentDefinition.iconSlot,
+                    )
+                } else {
+                    persistedPayload
+                }
+                requireValidCarePlanPayload(type, currentPayload, schemaVersion, note)
                 val planId = carePlanDao.upsert(
                     CarePlanEntity(
                         clientUuid = clientUuid,
@@ -175,7 +197,7 @@ internal class CarePlanCoordinator(
                         scheduledAt = scheduledAt,
                         scheduledZoneId = zone.id,
                         note = note,
-                        payloadJson = persistedPayload,
+                        payloadJson = currentPayload,
                         schemaVersion = schemaVersion,
                         status = CarePlanStatus.PENDING.storageKey,
                         createdByMembershipId = currentMembershipActorId(),
@@ -234,7 +256,7 @@ internal class CarePlanCoordinator(
     ): Long {
         require(feedType in NEXT_FEED_TYPES) { "仅喂养记录可安排下次喂养" }
         require(scheduledAt > nowMillis) { "下次喂养须选择未来时刻" }
-        val baby = requireActiveBaby(babyId)
+        requireActiveBaby(babyId)
         val payload = when (feedType) {
             RecordType.NURSING -> NursingPayload()
             RecordType.FORMULA, RecordType.PUMPED_FEED -> MilkPayload(feedType)
@@ -249,6 +271,7 @@ internal class CarePlanCoordinator(
         )
         val (id, duplicateIds) = nextFeedPlanMutationMutex.withLock {
             transactionRunner.run {
+                val baby = requireActiveBaby(babyId)
                 val open = carePlanDao.listOpenNextFeedForBaby(
                     babyId,
                     NEXT_FEED_PLAN_MARKER,
@@ -349,6 +372,7 @@ internal class CarePlanCoordinator(
         photoLocalPaths: List<String> = emptyList(),
         nowMillis: Long = System.currentTimeMillis(),
         clientUuid: String = newClientUuid(),
+        expectedPayloadType: RecordType? = null,
     ): Long {
         // Fulfill actual times (start + closed sleep end) allow device-now + 5 minutes.
         RecordTime.intervalError(
@@ -384,6 +408,7 @@ internal class CarePlanCoordinator(
                 val plan = carePlanDao.get(carePlanId)
                     ?: error("护理计划不存在")
                 if (plan.deletedAt != null) error("护理计划已删除")
+                requireExpectedCareType(expectedPayloadType, plan.type)
                 val existingRecord = recordDao.getByClientUuid(clientUuid)
                 if (existingRecord != null) {
                     check(existingRecord.deletedAt == null) {
@@ -460,7 +485,7 @@ internal class CarePlanCoordinator(
                     babyId = plan.babyId,
                     type = type.key,
                     timestamp = actualTimestamp,
-                    endTimestamp = resolvedEnd,
+                    endTimestamp = if (type == RecordType.SLEEP) null else resolvedEnd,
                     note = recordNote,
                     payloadJson = persistedPayload,
                     schemaVersion = schemaVersion,
@@ -476,6 +501,17 @@ internal class CarePlanCoordinator(
                     now,
                     contentDigests,
                 )
+                if (type == RecordType.SLEEP && resolvedEnd != null) {
+                    wakeObservations.recordWakeInCallerTransaction(
+                        babyId = plan.babyId,
+                        at = resolvedEnd,
+                        note = null,
+                        photoLocalPaths = emptyList(),
+                        photoDigests = emptyMap(),
+                        sleepRecordId = inserted,
+                        clientUuid = closedSleepWakeUuid(recordClientUuid),
+                    )
+                }
                 // Manager (creator/owner) may LWW-push completed plan status. Non-managers
                 // complete only locally — server forbids care_plan rewrites for them;
                 // peers re-link via fulfillment_candidate + FulfillmentAuthoritySettlement.
@@ -586,7 +622,7 @@ internal class CarePlanCoordinator(
         actualTimestamp: Long,
         confirmedAt: Long,
     ) {
-        val session = syncPort.session().first()
+        val session = syncPort.sessionPresentation().first()
         // Offline trail for multi-device authority until server freeze lands on pull.
         // Server overwrites membership/role/confirmed_at on first accept; we still
         // stamp local role so admin fulfills adjudicate correctly on the originator.
@@ -635,7 +671,7 @@ internal class CarePlanCoordinator(
 
     /** True when the joined session is family owner/admin. */
     suspend fun isFamilyAdmin(): Boolean {
-        val session = syncPort.session().first()
+        val session = syncPort.sessionPresentation().first()
         return session.role == com.lezi.babylog.sync.session.FamilyRole.Owner
     }
 
@@ -683,12 +719,18 @@ internal class CarePlanCoordinator(
             }
         }.orEmpty()
         val sourceType = sourcePeek?.type
+        val wakeSnapshot = if (sourceType == RecordType.SLEEP.key) {
+            wakeObservations.listForSleep(requireNotNull(sourcePeek).clientUuid)
+        } else {
+            emptyList()
+        }
+        val wakePhotoPaths = wakeSnapshot.flatMap { it.photoLocalPaths }
         // Global lock order: path gate → sleepMutationMutex → Room (never invert).
         val recordId = photoAttachmentReconciler.withInvolvedPaths(
             owner = null,
-            additionalPaths = photoPaths,
+            additionalPaths = photoPaths + wakePhotoPaths,
         ) {
-            val contentDigests = photoAttachmentReconciler.digestReadablePaths(photoPaths)
+            val contentDigests = photoAttachmentReconciler.digestReadablePaths(photoPaths + wakePhotoPaths)
             suspend fun writeConvert(): Long = transactionRunner.run {
                 val candidate = fulfillmentCandidateDao.getByClientUuid(candidateClientUuid)
                     ?: error("冲突未采纳履行不存在")
@@ -719,14 +761,43 @@ internal class CarePlanCoordinator(
                         .filter(String::isNotBlank)
                         .distinct()
                 }
+                // The path lease covers this exact graph; do not clone a stale attachment set.
+                val currentWakes = if (source.type == RecordType.SLEEP.key) {
+                    wakeObservations.listForSleep(source.clientUuid)
+                } else {
+                    emptyList()
+                }
+                check(source == sourcePeek && photos == photoPaths && currentWakes == wakeSnapshot) {
+                    "原护理事实已变化，请重试"
+                }
+                val interval = if (source.type == RecordType.SLEEP.key) {
+                    projectSleepInterval(
+                        sleepClientUuid = source.clientUuid,
+                        startTimestamp = source.timestamp,
+                        effectiveWakeObservationClientUuid = source.effectiveWakeObservationClientUuid,
+                        observations = currentWakes.map {
+                            WakeObservationFact(
+                                clientUuid = it.clientUuid, wakeTimestamp = it.wakeTimestamp,
+                                withdrawn = it.withdrawn, observerMembershipId = it.observerMembershipId,
+                                note = it.note, deleted = it.deletedAt != null,
+                            )
+                        },
+                        legacyEndTimestamp = source.endTimestamp,
+                    )
+                } else {
+                    null
+                }
+                val selectedWake = currentWakes.firstOrNull {
+                    it.clientUuid == interval?.endObservationClientUuid
+                }
                 val targetUuid = existingPointer.ifEmpty { newClientUuid() }
                 val at = nowMillis.coerceAtLeast(source.updatedAt + 1)
                 val type = RecordType.fromKey(source.type) ?: error("未知记录类型")
                 if (type == RecordType.SLEEP) {
-                    validateSleepInterval(type, source.timestamp, source.endTimestamp)
+                    validateSleepInterval(type, source.timestamp, interval?.endTimestamp)
                 }
                 requireActiveBaby(source.babyId)
-                if (type == RecordType.SLEEP && source.endTimestamp == null) {
+                if (type == RecordType.SLEEP && interval?.endTimestamp == null) {
                     // Open sleep from a fulfill is unexpected; still guard open-sleep invariants.
                     if (hasOpenSleep(source.babyId)) {
                         throw SleepStateChangedException()
@@ -739,8 +810,11 @@ internal class CarePlanCoordinator(
                     babyId = source.babyId,
                     type = source.type,
                     timestamp = source.timestamp,
-                    endTimestamp = source.endTimestamp,
+                    endTimestamp = if (type == RecordType.SLEEP) null else source.endTimestamp,
                     note = source.note,
+                    effectiveWakeObservationClientUuid = if (
+                        interval?.endSource == com.lezi.babylog.core.model.SleepEndSource.EFFECTIVE
+                    ) closedSleepWakeUuid(targetUuid) else null,
                     payloadJson = source.payloadJson,
                     schemaVersion = source.schemaVersion,
                     updatedAt = at,
@@ -754,6 +828,20 @@ internal class CarePlanCoordinator(
                     at,
                     contentDigests,
                 )
+
+                interval?.endTimestamp?.let { end ->
+                    // This is the converter's independent observation, not a reassignment of
+                    // the original observer. The candidate pointer preserves source provenance.
+                    wakeObservations.recordWakeInCallerTransaction(
+                        babyId = source.babyId,
+                        at = end,
+                        note = selectedWake?.note,
+                        photoLocalPaths = selectedWake?.photoLocalPaths.orEmpty(),
+                        photoDigests = contentDigests,
+                        sleepRecordId = inserted,
+                        clientUuid = closedSleepWakeUuid(targetUuid),
+                    )
+                }
 
                 // Pointer only — never touch adoptionStatus or plan authority.
                 if (candidate.convertedRecordClientUuid != targetUuid) {
@@ -788,7 +876,7 @@ internal class CarePlanCoordinator(
     )
 
     suspend fun canManageCarePlan(plan: CarePlan): Boolean {
-        val session = syncPort.session().first()
+        val session = syncPort.sessionPresentation().first()
         return canManageCreatorOwnedFamilyEntity(
             creatorMembershipId = plan.createdByMembershipId,
             actorMembershipId = session.membershipId.trim(),
@@ -801,7 +889,7 @@ internal class CarePlanCoordinator(
     }
 
     private suspend fun actorCanManageCarePlan(plan: CarePlanEntity): Boolean {
-        val session = syncPort.session().first()
+        val session = syncPort.sessionPresentation().first()
         return canManageCreatorOwnedFamilyEntity(
             creatorMembershipId = plan.createdByMembershipId,
             actorMembershipId = session.membershipId.trim(),
@@ -832,6 +920,7 @@ internal class CarePlanCoordinator(
         zone: ZoneId? = null,
         nowMillis: Long = System.currentTimeMillis(),
         projectToSystemCalendar: Boolean? = null,
+        expectedPayloadType: RecordType? = null,
     ) {
         val photos = photoLocalPaths
         val planOwner = PhotoAttachmentOwner.CarePlan(carePlanId)
@@ -843,6 +932,7 @@ internal class CarePlanCoordinator(
             transactionRunner.run {
                 val plan = carePlanDao.get(carePlanId) ?: error("护理计划不存在")
                 if (plan.deletedAt != null) error("护理计划已删除")
+                requireExpectedCareType(expectedPayloadType, plan.type)
                 val status = CarePlanStatus.fromStorage(plan.status)
                 require(status == CarePlanStatus.PENDING || status == CarePlanStatus.MISSED) {
                     "已完成或已跳过的计划不可编辑"
@@ -884,6 +974,7 @@ internal class CarePlanCoordinator(
                 } else {
                     note
                 }
+                requireValidCarePlanPayload(type, nextPayload, nextSchemaVersion, persistedNote)
                 val sharedChanged =
                     plan.scheduledAt != scheduledAt ||
                         plan.scheduledZoneId != nextZoneId ||

@@ -1,5 +1,7 @@
 # lezi-sync
 
+隐私说明：本文的 LAN 地址、SSH 账号和个人宿主路径均为虚构示例，不是生产默认值或操作授权。历史验证结果不代表这些示例地址；实际目标和维护窗口须由 owner 单独确认。
+
 乐记家庭局域网同步服务的 Rust 实现。Android 端使用当前 `/v1/*`
 HTTPS interface；服务端以 Axum + Tokio + rustls + rusqlite 运行，NAS 上只需要一个
 Docker 容器和一个持久化目录。
@@ -69,15 +71,26 @@ VPS 部署工具链已按 owner 决定删除（2026-09-06）；脚本只存于 g
 
 ## NAS / Docker Compose（冻结回滚）
 
-NAS 脚本家族的真实目标保存在未跟踪的 `deploy/env.local`（`NAS_SSH` 等，合成示例
-`nas-operator@192.168.77.10:10000`），只作回滚和只读
-copy-out。不能靠改 `NAS_SSH` 把同一套脚本切到 VPS。zdocker 打包 + scp +
+NAS 脚本家族只作已授权目标的回滚和只读 copy-out，不内置私人部署默认值。
+SSH 命令显式提供 `NAS_SSH` / `NAS_SSH_PORT`，数据相关命令显式提供
+`LEZI_DATA_HOST_PATH`，打包 / 部署与 LAN 探测分别显式提供 `LEZI_TLS_HOST` /
+`LEZI_LAN_HOST`。配置须来自 owner 单独确认的目标；不能靠改 `NAS_SSH`
+把同一套脚本切到 VPS。可用 `ZDOCKER_COMPOSE` 显式指定已核验的厂商 Compose 路径；
+未设置或不可用时沿用 `docker run` 回退。打包 + scp +
 仓库外 age（根密码 + NAS 自签 TLS）见
 [`deploy/DEPLOY.md`](deploy/DEPLOY.md)：
+
+普通 Android/Gradle 与 Cargo 构建无需 NAS 参数。隔离 fixture 和 app-update check-only
+检查可显式使用虚构参数；实际 NAS 打包 / 部署须使用明确的已授权目标配置。
+示例不授权网络访问或容器替换，后者仍需单独确认维护窗口。
 
 ```bash
 # 可选：先构建镜像；镜像标识默认读取 Cargo.toml
 ./build-image.sh
+: "${NAS_SSH:?须显式设置已授权的 NAS SSH 目标}"
+: "${NAS_SSH_PORT:?须显式设置已授权的 NAS SSH 端口}"
+: "${LEZI_DATA_HOST_PATH:?须显式设置已授权的 NAS 数据路径}"
+: "${LEZI_TLS_HOST:?须显式设置已授权的 NAS TLS 主机}"
 ./deploy/push-and-deploy.sh
 ```
 
@@ -103,12 +116,12 @@ release_id="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
 ./build-image.sh
 
 # 数据目录需可被 uid 10001 写；示例：
-mkdir -p /volume1/docker/lezi
-sudo chown -R 10001:10001 /volume1/docker/lezi
+mkdir -p /srv/lezi-example/data
+sudo chown -R 10001:10001 /srv/lezi-example/data
 
 # Compose 必填：长随机 bootstrap（≥16 字符）。APK 建家时输入同一一次性口令。
 export LEZI_BOOTSTRAP_SECRET="$(openssl rand -hex 24)"
-export LEZI_DATA_HOST_PATH=/volume1/docker/lezi
+export LEZI_DATA_HOST_PATH=/srv/lezi-example/data
 
 # 仅首次、已确认全新空数据根：显式授权生成；以后不设置该变量，只验证并复用。
 LEZI_ALLOW_TLS_BOOTSTRAP=1 \
@@ -125,11 +138,11 @@ curl --cacert "${LEZI_DATA_HOST_PATH}/tls/server.crt" -fsS https://127.0.0.1:876
 默认只绑定宿主 loopback。手机要直连时，显式发布 LAN/全接口（仍勿映射公网）：
 
 ```bash
-# 仅示例：192.168.77.10 是这台宿主的 LAN IP。
+# 仅虚构示例：192.168.77.10 不代表实际宿主或生产默认值。
 LEZI_SYNC_PUBLISH=0.0.0.0:8765 \
   LEZI_LAN_APK_DOWNLOAD_PUBLISH=0.0.0.0:8767 \
   LEZI_LAN_APK_DOWNLOAD_ORIGIN=http://192.168.77.10:8767 \
-  LEZI_DATA_HOST_PATH=/volume1/docker/lezi \
+  LEZI_DATA_HOST_PATH=/srv/lezi-example/data \
   LEZI_BOOTSTRAP_SECRET=... \
   docker compose up -d
 ```
@@ -144,7 +157,7 @@ LEZI_SYNC_PUBLISH=0.0.0.0:8765 \
 （与默认 `lezi-sync` 二选一，勿共用同一数据目录同时启动）：
 
 ```bash
-LEZI_DATA_HOST_PATH=/volume1/docker/lezi \
+LEZI_DATA_HOST_PATH=/srv/lezi-example/data \
   LEZI_BOOTSTRAP_SECRET=... \
   docker compose --profile nas-root up -d lezi-sync-nas-root
 ```
@@ -539,7 +552,7 @@ accepted/merged/branched manifest 标记为 `consumed`；commit 后才 no-replac
 
 ```bash
 docker compose stop
-cp -a /volume1/docker/lezi /volume1/backup/lezi-$(date +%F)
+cp -a /srv/lezi-example/data /volume1/backup/lezi-$(date +%F)
 docker compose start
 ```
 

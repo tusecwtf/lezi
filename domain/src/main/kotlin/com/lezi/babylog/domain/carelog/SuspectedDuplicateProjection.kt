@@ -70,15 +70,13 @@ object SuspectedDuplicateProjection {
             }
         }
         val bounds = SuspectedDuplicateBounds.range(
-            records = projected.filter { record ->
-                context.ensureActive()
-                record.timestamp < targetEnd
-            },
+            records = projected,
             openGroups = groups,
             startDate = startDate,
             dayCount = dayCount,
             zone = zone,
-            now = minOf(now, targetEnd - 1L),
+            now = now,
+            factEndExclusive = targetEnd,
             checkActive = context::ensureActive,
         )
         return SuspectedDuplicateProjectionResult(

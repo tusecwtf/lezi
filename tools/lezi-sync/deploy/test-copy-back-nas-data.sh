@@ -8,6 +8,10 @@ COPY_BACK="${SCRIPT_DIR}/copy-back-nas-data.sh"
 test -x "${COPY_BACK}" || chmod +x "${COPY_BACK}"
 
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/lezi-copy-back-test.XXXXXX")"
+# Explicit synthetic operator configuration; never inherit a real deployment target.
+export NAS_SSH=fixture@example.invalid NAS_SSH_PORT=10000
+export LEZI_DATA_HOST_PATH="${test_root}/nas-data"
+export LEZI_TLS_HOST=192.168.77.10 LEZI_LAN_HOST=192.168.77.10
 cleanup() {
   rm -rf -- "${test_root}"
 }

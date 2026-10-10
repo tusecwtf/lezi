@@ -1,4 +1,5 @@
 package com.lezi.babylog.domain.family
+import com.lezi.babylog.sync.session.toPresentation
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.sync.CreateFamilyResult
 import com.lezi.babylog.sync.session.CertificateTrustCandidate
@@ -41,7 +42,7 @@ class FamilyWizardControllerCreateLoginTest {
 
             val completed = controller.state.value as FamilyWizardState.Completed
             assertThat(completed.outcome)
-                .isEqualTo(FamilyWizardOutcome.Created(ownerSession()))
+                .isEqualTo(FamilyWizardOutcome.Created(ownerSession().toPresentation()))
             assertThat(controller.consumeCompletion()).isEqualTo(completed.outcome)
             assertThat(controller.consumeCompletion()).isNull()
             gateway.request
@@ -72,11 +73,11 @@ class FamilyWizardControllerCreateLoginTest {
 
         assertThat(outcomes).containsExactly(
             FamilyWizardOutcome.Reclaimed(
-                ownerSession(),
+                ownerSession().toPresentation(),
                 InitialFamilyDataRecovery.Complete,
             ),
             FamilyWizardOutcome.Reclaimed(
-                ownerSession(),
+                ownerSession().toPresentation(),
                 InitialFamilyDataRecovery.Complete,
             ),
         )
@@ -109,7 +110,7 @@ class FamilyWizardControllerCreateLoginTest {
                 val completed = controller.state.value as FamilyWizardState.Completed
                 assertThat(completed.outcome).isEqualTo(
                     FamilyWizardOutcome.OwnerLoggedIn(
-                        ownerSession(),
+                        ownerSession().toPresentation(),
                         InitialFamilyDataRecovery.Complete,
                     ),
                 )
@@ -189,7 +190,7 @@ class FamilyWizardControllerCreateLoginTest {
         gateway.createResult = Result.success(CreateFamilyResult(ownerSession(), reclaimed = false))
         controller.submit(valid.copy(familyName = "新家庭"), "new-secret")
         assertThat((controller.state.value as FamilyWizardState.Completed).outcome)
-            .isEqualTo(FamilyWizardOutcome.Created(ownerSession()))
+            .isEqualTo(FamilyWizardOutcome.Created(ownerSession().toPresentation()))
     }
 
     @Test
@@ -235,7 +236,7 @@ class FamilyWizardControllerCreateLoginTest {
         val failure = controller.state.value as FamilyWizardState.RetryableFailure
         assertThat(failure.committedOutcome).isEqualTo(
             FamilyWizardOutcome.Created(
-                ownerSession(),
+                ownerSession().toPresentation(),
                 InitialFamilyDataRecovery.RetryRequired(),
             ),
         )
@@ -248,7 +249,7 @@ class FamilyWizardControllerCreateLoginTest {
 
         assertThat((controller.state.value as FamilyWizardState.Completed).outcome).isEqualTo(
             FamilyWizardOutcome.Created(
-                ownerSession(),
+                ownerSession().toPresentation(),
                 InitialFamilyDataRecovery.NotRequired,
             ),
         )
@@ -280,7 +281,7 @@ class FamilyWizardControllerCreateLoginTest {
         val failure = controller.state.value as FamilyWizardState.RetryableFailure
         assertThat(failure.committedOutcome).isEqualTo(
             FamilyWizardOutcome.Created(
-                ownerSession(),
+                ownerSession().toPresentation(),
                 InitialFamilyDataRecovery.RetryRequired(),
             ),
         )
@@ -305,7 +306,7 @@ class FamilyWizardControllerCreateLoginTest {
         controller.submit(anotherCreate, "twice")
 
         assertThat((controller.state.value as FamilyWizardState.Completed).outcome)
-            .isEqualTo(FamilyWizardOutcome.Created(ownerSession()))
+            .isEqualTo(FamilyWizardOutcome.Created(ownerSession().toPresentation()))
         assertThat(gateway.createCalls).isEqualTo(2)
     }
 
@@ -393,7 +394,7 @@ class FamilyWizardControllerCreateLoginTest {
 
         assertThat(gateway.createCalls).isEqualTo(2)
         assertThat((controller.state.value as FamilyWizardState.Completed).outcome)
-            .isEqualTo(FamilyWizardOutcome.Created(ownerSession()))
+            .isEqualTo(FamilyWizardOutcome.Created(ownerSession().toPresentation()))
     }
 
     @Test

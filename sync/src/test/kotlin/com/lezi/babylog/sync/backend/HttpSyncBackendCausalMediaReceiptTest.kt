@@ -11,6 +11,29 @@ import org.junit.Test
 
 class HttpSyncBackendCausalMediaReceiptTest {
     @Test
+    fun restoredMetadataIsNotUsedAsAnHttpHeader() = runTest {
+        for (mime in listOf(null, "", "  ", "\r\nX-Injected: true", "😀".repeat(255))) {
+            val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+            val captured = CompletableFuture<String>()
+            val responder = receiptResponder(server,
+                """{"media_uuid":"$MEDIA_ID","status":"staged","byte_size":3,"sha256":"$SHA","expires_at":999}""",
+                captured)
+            try {
+                loopbackBackend().putCausalMediaPreimage(testSession(server), MEDIA_ID,
+                    TestMediaUploadSource(byteArrayOf(1, 2, 3), mime), SHA)
+                val request = captured.get(2, TimeUnit.SECONDS)
+                assertThat(request).contains("Content-Type: application/octet-stream")
+                assertThat(request).doesNotContain("X-Injected")
+                assertThat(request).contains("X-Lezi-Sync-Capabilities: nursing_plan_intent_v1")
+                assertThat(request).doesNotContain(",restore_authority_v1")
+            } finally {
+                server.close()
+                responder.join(2_000)
+            }
+        }
+    }
+
+    @Test
     fun preimageUploadReturnsOnlyAnExactClosedDurableReceipt() = runTest {
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
         val captured = CompletableFuture<String>()

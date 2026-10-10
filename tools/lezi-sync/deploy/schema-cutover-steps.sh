@@ -8,9 +8,10 @@ REPO_ROOT="$(cd "${SYNC_ROOT}/../.." && pwd)"
 phase="${1:-}"
 state_dir="${LEZI_SCHEMA_CUTOVER_STATE_DIR:?}"
 
-NAS_SSH="${NAS_SSH:-nas-account@192.168.77.4}"
-NAS_SSH_PORT="${NAS_SSH_PORT:-10000}"
-DATA_PATH="${LEZI_DATA_HOST_PATH:-/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data}"
+NAS_SSH="${NAS_SSH:?Set NAS_SSH to the explicitly approved user@NAS host}"
+NAS_SSH_PORT="${NAS_SSH_PORT:?Set NAS_SSH_PORT to the explicitly approved NAS port}"
+DATA_PATH="${LEZI_DATA_HOST_PATH:?Set LEZI_DATA_HOST_PATH to the explicitly approved absolute NAS data path}"
+LAN_HOST="${LEZI_LAN_HOST:?Set LEZI_LAN_HOST to the explicitly approved LAN host}"
 CONTAINER_NAME="${LEZI_CONTAINER_NAME:-lezi-sync}"
 PACKAGE_DIR="${LEZI_NAS_PACKAGE_DIR:-${REPO_ROOT}/dist/lezi-sync-0.4.0-nas}"
 ROLLBACK_PACKAGE_DIR="${LEZI_SCHEMA_CUTOVER_ROLLBACK_PACKAGE_DIR:-}"
@@ -174,38 +175,48 @@ app_update_prepublish() {
     "${PACKAGE_DIR}/." "${NAS_SSH}:${stage}/"
   ssh "${SSH_OPTS[@]}" "${NAS_SSH}" \
     "cd '${stage}' && chmod +x validate-nas-package.sh credential-deploy-lock.sh export-nas-credentials.sh && ./validate-nas-package.sh . 0.4.0 >/dev/null"
+  # Persist intent before SSH can mutate the pair. A signal or lost SSH result
+  # must not leave the outer cleanup believing that publication never started.
+  printf '%s\n' uncertain >"${state_dir}/app-update-mutation-started"
+  sync -f "${state_dir}/app-update-mutation-started"
   set +e
   ssh "${SSH_OPTS[@]}" "${NAS_SSH}" bash -s -- \
-    "${CONTAINER_NAME}" "${stage}" "${expected_sha}" "${DATA_PATH}" <<'REMOTE'
+    "${CONTAINER_NAME}" "${stage}" "${expected_sha}" "${DATA_PATH}" "$(<"${state_dir}/update-lease-token")" <<'REMOTE'
 set -euo pipefail
 container="$1"
 stage="$2"
 expected_sha="$3"
 data_path="$4"
+export LEZI_UPDATE_PUBLICATION_TOKEN="$5"
 image="$(docker inspect "${container}" --format '{{.Config.Image}}')"
 test "$(docker inspect "${container}" --format '{{.State.Running}}')" = true
-mkdir -m 700 "${stage}/rollback-app-update"
-docker cp "${container}:/data/app-release.apk" "${stage}/rollback-app-update/app-release.apk"
-docker cp "${container}:/data/app-update.json" "${stage}/rollback-app-update/app-update.json"
-install_pair() {
-  local src="$1"
-  docker run --rm --user 0 \
-    -v "${data_path}:/data" \
-    -v "${src}:/src:ro" \
-    --entrypoint /bin/sh \
-    "${image}" \
-    -ec 'cp /src/app-release.apk /data/app-release.apk.lezi-staging && cp /src/app-update.json /data/app-update.json.lezi-staging && chown 10001:10001 /data/app-release.apk.lezi-staging /data/app-update.json.lezi-staging && chmod 644 /data/app-release.apk.lezi-staging /data/app-update.json.lezi-staging && mv -f /data/app-release.apk.lezi-staging /data/app-release.apk && mv -f /data/app-update.json.lezi-staging /data/app-update.json && test ! -e /data/app-release.apk.lezi-staging && test ! -e /data/app-update.json.lezi-staging'
+helper="${stage}/schema-update-pair.sh"
+rollback_pending=0
+finish_publication() {
+  status=$?
+  trap - EXIT
+  trap '' HUP INT TERM
+  if [[ "${rollback_pending}" == 1 ]]; then
+    if ! "${helper}" rollback "${data_path}" "${image}" "${stage}"; then
+      echo "error: schema app-update rollback failed; preserve snapshots and publication lease" >&2
+    fi
+    [[ "${status}" != 0 ]] || status=1
+  fi
+  exit "${status}"
 }
-restore_pair() {
-  install_pair "${stage}/rollback-app-update"
-  printf '%s\n' complete >"${stage}/app-update-restore-complete"
-}
-trap restore_pair ERR
-printf '%s\n' ready >"${stage}/app-update-mutation-started"
-install_pair "${stage}/app-update"
+trap finish_publication EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+"${helper}" prepare "${data_path}" "${image}" "${stage}"
+rollback_pending=1
+"${helper}" publish "${data_path}" "${image}" "${stage}"
+"${helper}" verify "${data_path}" "${image}" "${stage}"
 served_sha="$(curl -fsS --max-time 30 http://127.0.0.1:8767/download/lezi.apk | sha256sum | awk '{print $1}')"
 test "${served_sha}" = "${expected_sha}"
-trap - ERR
+"${helper}" release "${data_path}" "${image}" "${stage}"
+rollback_pending=0
+trap - EXIT HUP INT TERM
 REMOTE
   publish_status=$?
   set -e
@@ -479,7 +490,7 @@ post_check() {
   ssh "${SSH_OPTS[@]}" "${NAS_SSH}" \
     "docker exec '${CONTAINER_NAME}' lezi-sync healthcheck"
   health="$(curl -k -fsS --connect-timeout 5 \
-    "https://${LEZI_LAN_HOST:-192.168.77.4}:8765/health")"
+    "https://${LAN_HOST}:8765/health")"
   python3 - "${health}" <<'PY'
 import json, sys
 body = json.loads(sys.argv[1])
@@ -581,23 +592,16 @@ rollback_preopen() {
       "${SCRIPT_DIR}/push-and-deploy.sh"
   fi
   ssh "${SSH_OPTS[@]}" "${NAS_SSH}" bash -s -- \
-    "${CONTAINER_NAME}" "${stage}" "${DATA_PATH}" <<'REMOTE'
+    "${CONTAINER_NAME}" "${stage}" "${DATA_PATH}" "$(<"${state_dir}/update-lease-token")" <<'REMOTE'
 set -euo pipefail
 container="$1"
 stage="$2"
 data_path="$3"
+export LEZI_UPDATE_PUBLICATION_TOKEN="$4"
 image="$(docker inspect "${container}" --format '{{.Config.Image}}')"
 running="$(docker inspect "${container}" --format '{{.State.Running}}')"
 test "${running}" = false || test "${running}" = true
-if [[ ! -d "${stage}/rollback-app-update" ]]; then
-  exit 0
-fi
-docker run --rm --user 0 \
-  -v "${data_path}:/data" \
-  -v "${stage}/rollback-app-update:/src:ro" \
-  --entrypoint /bin/sh \
-  "${image}" \
-  -ec 'cp /src/app-release.apk /data/app-release.apk.lezi-staging && cp /src/app-update.json /data/app-update.json.lezi-staging && chown 10001:10001 /data/app-release.apk.lezi-staging /data/app-update.json.lezi-staging && chmod 644 /data/app-release.apk.lezi-staging /data/app-update.json.lezi-staging && mv -f /data/app-release.apk.lezi-staging /data/app-release.apk && mv -f /data/app-update.json.lezi-staging /data/app-update.json && test ! -e /data/app-release.apk.lezi-staging && test ! -e /data/app-update.json.lezi-staging'
+"${stage}/schema-update-pair.sh" rollback "${data_path}" "${image}" "${stage}"
 REMOTE
   printf '%s\n' complete >"${state_dir}/app-update-restore-complete"
 }

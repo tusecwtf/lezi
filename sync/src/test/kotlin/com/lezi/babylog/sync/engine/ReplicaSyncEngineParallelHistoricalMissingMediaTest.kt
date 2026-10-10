@@ -77,10 +77,10 @@ class ReplicaSyncEngineParallelHistoricalMissingMediaTest {
     fun attemptAndByteCapsHoldWithTwoWorkersDownloadingConcurrently() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 1)
         val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
-        seedHistoricalMissing(rig, HISTORICAL_A, HISTORICAL_B, HISTORICAL_C, HISTORICAL_D)
         // Each in-flight response alone reaches the 8 MiB decoded-byte budget.
         rig.backend.mediaBytesByUuid[HISTORICAL_A] = ByteArray(8 * 1024 * 1024)
         rig.backend.mediaBytesByUuid[HISTORICAL_B] = ByteArray(8 * 1024 * 1024)
+        seedHistoricalMissing(rig, HISTORICAL_A, HISTORICAL_B, HISTORICAL_C, HISTORICAL_D)
         rig.backend.nextPull = PullResult(
             entities = emptyList(),
             cursor = 1,
@@ -221,7 +221,7 @@ class ReplicaSyncEngineParallelHistoricalMissingMediaTest {
                     localUri = "",
                     remoteUri = rig.preferences.current().receiptFor(uuid),
                     mime = "image/jpeg",
-                    byteSize = 12,
+                    byteSize = (rig.backend.mediaBytesByUuid[uuid] ?: rig.backend.mediaBytes).size.toLong(),
                     createdAt = 100,
                     updatedAt = 100,
                     syncDirty = false,

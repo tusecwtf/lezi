@@ -12,6 +12,7 @@ import org.junit.Test
 import com.lezi.babylog.sync.BootstrapSecretRejectedException
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
+import com.lezi.babylog.sync.PendingMemberLogin
 import com.lezi.babylog.sync.MemberLoginCheckResult
 import com.lezi.babylog.sync.OwnerRootPasswordRejectedException
 import com.lezi.babylog.sync.SyncPort
@@ -29,6 +30,101 @@ import com.lezi.babylog.sync.RecordingSyncBackend
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class FamilySessionCoordinatorMemberJoinQrTest {
+    @Test
+    fun lostMemberRequestResponseRetainsItsOperationAndNeverBlindlyResubmits() = runTest {
+        val preferences = MemorySyncPreferences(SyncSession(serverHost = "family.home"))
+        val backend = RecordingSyncBackend().apply {
+            memberLoginRequestFailure = java.io.IOException("response lost")
+        }
+        val first = coordinator(preferences, backend).execute(
+            FamilySessionCommand.RequestMemberLogin("爸爸", "Phone"),
+        ).getOrThrow() as FamilySessionOutcome.MemberLoginRequested
+        assertThat(first.request.remoteOutcomeUnknown).isTrue()
+        assertThat(first.request.operationId).isNotEmpty()
+        assertThat(first.request.requestId).isEmpty()
+        val second = coordinator(preferences, backend).execute(
+            FamilySessionCommand.RequestMemberLogin("爸爸", "Phone"),
+        ).getOrThrow() as FamilySessionOutcome.MemberLoginRequested
+        assertThat(second.request).isEqualTo(first.request)
+        assertThat(backend.memberLoginRequests).hasSize(1)
+        assertThat(preferences.pendingMemberSecret()).isEmpty()
+        coordinator(preferences, backend).execute(FamilySessionCommand.CancelMemberLogin).getOrThrow()
+        assertThat(preferences.pendingMemberLogin.first()).isNull()
+    }
+
+    @Test
+    fun lateClaimFromAnotherOwnerCannotActivateOverANewerPendingRequest() = runTest {
+        val preferences = MemorySyncPreferences(SyncSession(serverHost = "family.home"))
+        val oldBackend = RecordingSyncBackend()
+        val oldOwner = coordinator(preferences, oldBackend)
+        oldOwner.execute(FamilySessionCommand.RequestMemberLogin("爸爸", "Phone")).getOrThrow()
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        oldBackend.memberLoginStatuses += MemberLoginStatus.Approved
+        oldBackend.beforeMemberLoginClaimReturn = { started.complete(Unit); release.await() }
+        val check = async { oldOwner.execute(FamilySessionCommand.CheckMemberLogin) }
+        started.await()
+        val newerBackend = RecordingSyncBackend().apply {
+            nextMemberLoginReceipt = nextMemberLoginReceipt.copy(requestId = "new-request", pendingSecret = "new-secret")
+        }
+        val newerOwner = coordinator(preferences, newerBackend)
+        newerOwner.execute(FamilySessionCommand.CancelMemberLogin).getOrThrow()
+        newerOwner.execute(FamilySessionCommand.RequestMemberLogin("妈妈", "Tablet")).getOrThrow()
+        release.complete(Unit)
+        assertThat(check.await().exceptionOrNull())
+            .isInstanceOf(com.lezi.babylog.sync.MemberLoginAttemptRetiredException::class.java)
+        assertThat(preferences.pendingMemberLogin.first()?.requestId).isEqualTo("new-request")
+        assertThat(preferences.pendingMemberSecret()).isEqualTo("new-secret")
+        assertThat(preferences.current().isJoined).isFalse()
+    }
+
+    @Test
+    fun editingAwayAndBackCannotDiscardAnUnknownMemberApplication() = runTest {
+        val preferences = MemorySyncPreferences(SyncSession(serverHost = "family.home"))
+        val backend = RecordingSyncBackend().apply { memberLoginRequestFailure = java.io.IOException("lost") }
+        val owner = coordinator(preferences, backend)
+        val first = owner.execute(FamilySessionCommand.RequestMemberLogin("爸爸", "Phone"))
+            .getOrThrow() as FamilySessionOutcome.MemberLoginRequested
+        val changed = owner.execute(FamilySessionCommand.SaveEndpointConfig(FamilyEndpointConfig(host = "other.home")))
+        assertThat(changed.isFailure).isTrue()
+        owner.execute(FamilySessionCommand.SaveEndpointConfig(FamilyEndpointConfig(host = "family.home"))).getOrThrow()
+        val repeated = owner.execute(FamilySessionCommand.RequestMemberLogin("爸爸", "Phone"))
+            .getOrThrow() as FamilySessionOutcome.MemberLoginRequested
+        assertThat(repeated.request.operationId).isEqualTo(first.request.operationId)
+        assertThat(backend.memberLoginRequests).hasSize(1)
+    }
+
+    @Test
+    fun abandoningAnInFlightUnknownAttemptCannotBeUndoneByItsLateReceipt() = runTest {
+        val preferences = MemorySyncPreferences(SyncSession(serverHost = "family.home"))
+        val backend = RecordingSyncBackend().apply {
+            memberLoginRequestStarted = CompletableDeferred()
+            releaseMemberLoginRequest = CompletableDeferred()
+        }
+        val owner = coordinator(preferences, backend)
+        val request = async { owner.execute(FamilySessionCommand.RequestMemberLogin("爸爸", "Phone")) }
+        backend.memberLoginRequestStarted!!.await()
+        owner.execute(FamilySessionCommand.CancelMemberLogin).getOrThrow()
+        backend.releaseMemberLoginRequest!!.complete(Unit)
+        assertThat(request.await().isFailure).isTrue()
+        assertThat(preferences.pendingMemberLogin.first()).isNull()
+    }
+
+    @Test
+    fun positivelyUnsentApplicationDoesNotLeaveAnUnknownRemoteOutcome() = runTest {
+        val preferences = MemorySyncPreferences(SyncSession(serverHost = "family.home"))
+        val backend = RecordingSyncBackend().apply {
+            memberLoginRequestFailure = com.lezi.babylog.sync.backend.MemberLoginRequestNotSentException(
+                java.io.IOException("DNS failed"),
+            )
+        }
+        val result = coordinator(preferences, backend).execute(
+            FamilySessionCommand.RequestMemberLogin("爸爸", "Phone"),
+        )
+        assertThat(result.isFailure).isTrue()
+        assertThat(preferences.pendingMemberLogin.first()).isNull()
+    }
+
     @Test
     fun memberRequestIsDurableAndPendingChecksNeverClaimOrPublishASession() = runTest {
         val initial = SyncSession(
@@ -288,7 +384,7 @@ class FamilySessionCoordinatorMemberJoinQrTest {
             .getOrThrow() as FamilySessionOutcome.MemberLoginChecked
 
         assertThat(checked.result)
-            .isEqualTo(MemberLoginCheckResult.Terminal(MemberLoginStatus.Claimed))
+            .isEqualTo(MemberLoginCheckResult.Terminal(MemberLoginStatus.Claimed, backend.nextMemberLoginReceipt.requestId))
         assertThat(preferences.pendingMemberLogin.first()).isNull()
         assertThat(preferences.pendingMemberSecret()).isEmpty()
         assertThat(preferences.current().isJoined).isFalse()
@@ -352,7 +448,7 @@ class FamilySessionCoordinatorMemberJoinQrTest {
             .getOrThrow() as FamilySessionOutcome.MemberLoginChecked
 
         assertThat(outcome.result)
-            .isEqualTo(MemberLoginCheckResult.Terminal(MemberLoginStatus.Rejected))
+            .isEqualTo(MemberLoginCheckResult.Terminal(MemberLoginStatus.Rejected, backend.nextMemberLoginReceipt.requestId))
         assertThat(preferences.pendingMemberLogin.first()).isNull()
         assertThat(preferences.current()).isEqualTo(initial)
         assertThat(backend.memberLoginClaimCalls).isEqualTo(0)
@@ -496,8 +592,49 @@ class FamilySessionCoordinatorMemberJoinQrTest {
         val mismatch = coordinator(mismatchPreferences, mismatchBackend).execute(
             FamilySessionCommand.ClaimMemberLoginGrant(payload, "Pixel Tablet"),
         )
-        assertThat(mismatch.isFailure).isTrue()
-        assertThat(mismatchBackend.memberLoginGrantClaims).isEmpty()
+        assertThat(mismatch.isSuccess).isTrue()
+        assertThat(mismatchPreferences.verifiedEndpoint.first()).isEqualTo(payload.endpoint)
+        assertThat(mismatchBackend.memberLoginGrantClaims).hasSize(1)
+    }
+
+    @Test
+    fun failedQrClaimNeverMutatesExistingTrustOrTheUnknownNormalApplication() = runTest {
+        val endpoint = TrustedEndpointProfile.systemPki("https://family.example.com")
+        val payload = MemberLoginQrPayload(endpoint, "grant-0000000000000000000000000000000000000", "Home", "妈妈", 9_999_999_999)
+        for (hadTrust in listOf(false, true)) {
+            val prefs = MemorySyncPreferences(SyncSession())
+            if (hadTrust) prefs.rememberEndpoint(endpoint)
+            val attempt = PendingMemberLogin("", "妈妈", "Phone", 0, "operation-a", endpoint.origin, true)
+            prefs.saveMemberLoginAttempt(attempt)
+            val backend = RecordingSyncBackend().apply { memberLoginGrantClaimFailure = java.io.IOException("lost") }
+            val result = coordinator(prefs, backend).execute(FamilySessionCommand.ClaimMemberLoginGrant(payload, "Phone"))
+            assertThat(result.isFailure).isTrue()
+            assertThat(prefs.memberLoginAttempt()).isEqualTo(attempt)
+            assertThat(prefs.verifiedEndpoint.first()).isEqualTo(if (hadTrust) endpoint else null)
+        }
+    }
+
+    @Test
+    fun lateQrClaimCannotActivateAfterExplicitForgetOrSessionReplacement() = runTest {
+        val endpoint = TrustedEndpointProfile.systemPki("https://family.example.com")
+        val payload = MemberLoginQrPayload(endpoint, "grant-0000000000000000000000000000000000000", "Home", "妈妈", 9_999_999_999)
+        for (replace in listOf(false, true)) {
+            val prefs = MemorySyncPreferences(SyncSession())
+            val started = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            val backend = RecordingSyncBackend().apply {
+                beforeMemberLoginGrantClaimReturn = { started.complete(Unit); release.await() }
+            }
+            val claim = async { coordinator(prefs, backend).execute(FamilySessionCommand.ClaimMemberLoginGrant(payload, "Phone")) }
+            started.await()
+            if (replace) prefs.saveSession(SyncSession(familyId = "new-family", deviceId = "new-device", serverHost = "new.example.com", refreshToken = "new-secret"))
+            else prefs.forgetEndpoint()
+            val retained = prefs.current()
+            release.complete(Unit)
+            assertThat(claim.await().isFailure).isTrue()
+            assertThat(prefs.current()).isEqualTo(retained)
+            assertThat(prefs.verifiedEndpoint.first()).isNull()
+        }
     }
 
     @Test

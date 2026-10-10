@@ -190,6 +190,15 @@ data class SourceRelationDeclarationEntity(
     val createdAt: Long,
 )
 
+/** Complete current read projection, independent of Record lifecycle and immutable receipts. */
+data class CurrentSourceRelationProjection(
+    val relationId: String,
+    val displayClientUuid: String,
+    val sourceClientUuids: List<String>,
+    val autoAligned: Boolean,
+    val acceptedProvenance: SourceRelationEntity? = null,
+)
+
 /** Wire/Room vocabulary for source-relation reason (client + server author_declare/owner_group_resolve). */
 object SourceRelationReason {
     const val AUTHOR_DECLARE = "author_declare"
@@ -208,6 +217,8 @@ object SourceRelationDeclarationStatus {
     const val CONSUMED = "consumed"
     const val SUPERSEDED = "superseded"
     const val FAILED = "failed"
+    /** A definitive server rejection; legacy FAILED may instead be a lost response. */
+    const val REJECTED = "rejected"
 }
 
 /**

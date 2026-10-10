@@ -1,4 +1,7 @@
 package com.lezi.babylog.feature.log.composer
+
+import com.lezi.babylog.domain.carelog.*
+import com.lezi.babylog.core.model.SleepPayload
 import android.net.Uri
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
@@ -784,100 +787,70 @@ class RecordComposerViewModel @Inject constructor(
         val draft = pending.draft
         val command = pending.command
         val confirmedAt = pending.confirmedAtMillis
+        val payload = command.payload()
+        val content = CareFactContent(command.timestamp, payload, command.note, command.endTimestamp)
+        val photos = CareAttachments.replaceWith(draft.photos)
+        val writeId = CareWriteId(pending.clientUuid)
+        val baby = CareBabyId(pending.babyId)
         return when (pending.writeDecision) {
             ComposerWriteDecision.UpdateCarePlan -> {
-                val carePlanId = requireNotNull(draft.carePlanId)
-                careLog.updateCarePlan(
-                    carePlanId = carePlanId,
-                    scheduledAt = command.timestamp,
-                    note = command.note,
-                    payloadJson = command.payloadJson,
-                    schemaVersion = command.schemaVersion,
-                    photoLocalPaths = draft.photos,
-                    nowMillis = confirmedAt,
-                    projectToSystemCalendar = draft.projectToSystemCalendar,
-                )
-                carePlanId
+                val target = CarePlanId(requireNotNull(draft.carePlanId))
+                careLog.editPlan(EditCarePlan(
+                    target, content, photos, draft.projectToSystemCalendar,
+                ), confirmedAt)
+                target.value
             }
             ComposerWriteDecision.FulfillCarePlan -> {
-                careLog.fulfillCarePlan(
-                    carePlanId = requireNotNull(draft.carePlanId),
-                    actualTimestamp = command.timestamp,
-                    endTimestamp = command.endTimestamp.takeIf { command.type == RecordType.SLEEP },
-                    note = command.note,
-                    payloadJson = command.payloadJson,
-                    schemaVersion = command.schemaVersion,
-                    photoLocalPaths = draft.photos,
-                    nowMillis = confirmedAt,
-                    clientUuid = pending.clientUuid,
-                )
+                careLog.fulfillPlan(FulfillCarePlan(
+                    CarePlanId(requireNotNull(draft.carePlanId)),
+                    content.copy(endTimestamp = command.endTimestamp.takeIf { command.type == RecordType.SLEEP }),
+                    photos, writeId,
+                ), confirmedAt)
                 null
             }
-            ComposerWriteDecision.ConvertRecordToCarePlan -> careLog.convertRecordToCarePlan(
-                recordId = requireNotNull(command.existingRecordId),
-                scheduledAt = command.timestamp,
-                note = command.note,
-                payloadJson = command.payloadJson,
-                schemaVersion = command.schemaVersion,
-                photoLocalPaths = draft.photos,
-                nowMillis = confirmedAt,
-                projectToSystemCalendar = draft.projectToSystemCalendar,
-                clientUuid = pending.clientUuid,
+            ComposerWriteDecision.ConvertRecordToCarePlan -> careLog.convertRecordToPlan(
+                ConvertCareRecordToPlan(
+                    CareRecordId(requireNotNull(command.existingRecordId)), content, photos,
+                    draft.projectToSystemCalendar, writeId,
+                ), confirmedAt,
             )
             ComposerWriteDecision.ConfirmSleep -> {
-                careLog.confirmSleep(
-                    babyId = pending.babyId,
-                    expectedOpenSleepId = command.existingRecordId,
-                    timestamp = command.timestamp,
-                    endTimestamp = command.endTimestamp,
-                    note = command.note,
-                    payloadJson = command.payloadJson,
-                    schemaVersion = command.schemaVersion,
-                    photoLocalPaths = draft.photos,
-                    nowMillis = confirmedAt,
-                    clientUuid = pending.clientUuid,
-                )
+                val sleepPayload = payload as SleepPayload
+                val target = command.existingRecordId?.let(::CareSleepId)
+                val end = command.endTimestamp
+                when {
+                    target != null && end != null -> careLog.closeSleep(
+                        CloseCareSleep(baby, target, command.timestamp, end, command.note, photos, writeId),
+                        confirmedAt,
+                    )
+                    target != null -> careLog.editOpenSleep(
+                        EditOpenCareSleep(baby, target, command.timestamp, sleepPayload, command.note, photos),
+                        confirmedAt,
+                    )
+                    end != null -> careLog.backfillSleep(
+                        BackfillCareSleep(baby, command.timestamp, end, sleepPayload, command.note, photos, writeId),
+                        confirmedAt,
+                    )
+                    else -> careLog.startSleep(
+                        StartCareSleep(baby, command.timestamp, sleepPayload, command.note, photos, writeId),
+                        confirmedAt,
+                    )
+                }
                 null
             }
             ComposerWriteDecision.UpdateRecord -> {
-                careLog.updateRecord(
-                    id = requireNotNull(command.existingRecordId),
-                    timestamp = command.timestamp,
-                    endTimestamp = command.endTimestamp,
-                    note = command.note,
-                    payloadJson = command.payloadJson,
-                    schemaVersion = command.schemaVersion,
-                    photoLocalPaths = draft.photos,
-                    nowMillis = confirmedAt,
-                )
+                careLog.editRecord(EditCareRecord(
+                    CareRecordId(requireNotNull(command.existingRecordId)), content, photos,
+                ), confirmedAt)
                 null
             }
-            ComposerWriteDecision.CreateCarePlan -> careLog.createCarePlan(
-                babyId = pending.babyId,
-                type = command.type,
-                scheduledAt = command.timestamp,
-                note = command.note,
-                payloadJson = command.payloadJson,
-                schemaVersion = command.schemaVersion,
-                customItemId = draft.customItemId,
-                photoLocalPaths = draft.photos,
-                nowMillis = confirmedAt,
-                projectToSystemCalendar = draft.projectToSystemCalendar,
-                clientUuid = pending.clientUuid,
+            ComposerWriteDecision.CreateCarePlan -> careLog.createPlan(
+                CreateCarePlan(
+                    baby, content, draft.customItemId, photos, draft.projectToSystemCalendar, writeId,
+                ), confirmedAt,
             )
             ComposerWriteDecision.AddRecord -> {
-                careLog.addRecord(
-                    babyId = pending.babyId,
-                    type = command.type,
-                    timestamp = command.timestamp,
-                    endTimestamp = command.endTimestamp,
-                    note = command.note,
-                    payloadJson = command.payloadJson,
-                    schemaVersion = command.schemaVersion,
-                    photoLocalPaths = draft.photos,
-                    nowMillis = confirmedAt,
-                    clientUuid = pending.clientUuid,
-                )
+                careLog.createRecord(CreateCareRecord(baby, content, photos, writeId), confirmedAt)
                 null
             }
         }

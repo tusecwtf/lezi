@@ -211,9 +211,9 @@ class RealSyncPortTipSkipTest {
         seedMissingMedia(rig, MEDIA_A)
         rig.backend.getMediaFailureByUuid[MEDIA_A] = SyncHttpException(404, "half upload")
 
-        // Round 1: full round; the download loop GETs A, 404 → durable marker.
+        // Round 1 includes one legacy-authority rewalk; full round; the download loop GETs A, 404 → durable marker.
         rig.port.requestSync(SyncTrigger.Foreground)
-        pumpUntilRoundCompleted(rig, handshakeCalls = 1, pullCount = 1, appUpdateCalls = 1)
+        pumpUntilRoundCompleted(rig, handshakeCalls = 1, pullCount = 2, appUpdateCalls = 1)
         assertThat(rig.backend.mediaGets).containsExactly(MEDIA_A)
         assertThat(rig.conflictDetails.getTransportJournal("media-404:$MEDIA_A")).isNotNull()
 
@@ -222,7 +222,7 @@ class RealSyncPortTipSkipTest {
         advanceTipSkipTime(rig, 8_000)
         pumpUntil { rig.backend.heartbeatCalls >= 2 }
         rig.port.requestSync(SyncTrigger.Foreground)
-        pumpUntilRoundCompleted(rig, handshakeCalls = 1, pullCount = 1, appUpdateCalls = 2)
+        pumpUntilRoundCompleted(rig, handshakeCalls = 1, pullCount = 2, appUpdateCalls = 2)
         assertThat(rig.backend.mediaGets).containsExactly(MEDIA_A)
 
         // The marker only informs tip-skip: once another seam forces a full
@@ -230,7 +230,7 @@ class RealSyncPortTipSkipTest {
         rig.backend.getMediaFailureByUuid.remove(MEDIA_A)
         seedMissingMedia(rig, MEDIA_B)
         rig.port.requestSync(SyncTrigger.Foreground)
-        pumpUntilRoundCompleted(rig, handshakeCalls = 2, pullCount = 2, appUpdateCalls = 3)
+        pumpUntilRoundCompleted(rig, handshakeCalls = 2, pullCount = 3, appUpdateCalls = 3)
         // Round 3 retried A (markers never stop the download loop) and
         // downloaded B for the first time. The two round-3 GETs run in
         // parallel (0.5 W4), so only the multiset is asserted.
@@ -248,11 +248,11 @@ class RealSyncPortTipSkipTest {
         seedMissingMedia(rig, MEDIA_A)
         rig.mediaFiles.saveDownloadedFailures += MEDIA_A
 
-        // Round 1: full round; the GET succeeds but the local save fails —
+        // Round 1 includes one legacy-authority rewalk; full round; the GET succeeds but the local save fails —
         // previously an invisible swallow that re-GETted forever and vetoed
         // tip-skip permanently. Now the condition is durably journaled.
         rig.port.requestSync(SyncTrigger.Foreground)
-        pumpUntilRoundCompleted(rig, handshakeCalls = 1, pullCount = 1, appUpdateCalls = 1)
+        pumpUntilRoundCompleted(rig, handshakeCalls = 1, pullCount = 2, appUpdateCalls = 1)
         assertThat(rig.backend.mediaGets).containsExactly(MEDIA_A)
         assertThat(rig.conflictDetails.getTransportJournal("media-save-failed:$MEDIA_A")).isNotNull()
 
@@ -262,7 +262,7 @@ class RealSyncPortTipSkipTest {
         advanceTipSkipTime(rig, 8_000)
         pumpUntil { rig.backend.heartbeatCalls >= 2 }
         rig.port.requestSync(SyncTrigger.Foreground)
-        pumpUntilRoundCompleted(rig, handshakeCalls = 1, pullCount = 1, appUpdateCalls = 2)
+        pumpUntilRoundCompleted(rig, handshakeCalls = 1, pullCount = 2, appUpdateCalls = 2)
         assertThat(rig.backend.mediaGets).containsExactly(MEDIA_A)
 
         // Free the disk. A's marker cannot know that, so a second unmarked
@@ -271,7 +271,7 @@ class RealSyncPortTipSkipTest {
         rig.mediaFiles.saveDownloadedFailures.clear()
         seedMissingMedia(rig, MEDIA_B)
         rig.port.requestSync(SyncTrigger.Foreground)
-        pumpUntilRoundCompleted(rig, handshakeCalls = 2, pullCount = 2, appUpdateCalls = 3)
+        pumpUntilRoundCompleted(rig, handshakeCalls = 2, pullCount = 3, appUpdateCalls = 3)
         // Round 3 retried A and downloaded B; the two GETs run in parallel,
         // so only the multiset is asserted.
         assertThat(rig.backend.mediaGets).containsExactly(MEDIA_A, MEDIA_A, MEDIA_B)
@@ -478,7 +478,7 @@ class RealSyncPortTipSkipTest {
                 localUri = "",
                 remoteUri = rig.preferences.current().receiptFor(clientUuid),
                 mime = "image/jpeg",
-                byteSize = 12,
+                byteSize = (rig.backend.mediaBytesByUuid[clientUuid] ?: rig.backend.mediaBytes).size.toLong(),
                 createdAt = 100,
                 updatedAt = 100,
                 syncDirty = false,

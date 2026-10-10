@@ -164,6 +164,7 @@ impl Store {
         let fingerprint = request_fingerprint("author_declare", &input)?;
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::causal::require_current_principal(&tx, principal)?;
         if let Some(receipt) =
             replay_mutation_receipt(&tx, &principal.family_id, &input.mutation_id, &fingerprint)?
         {
@@ -365,6 +366,7 @@ impl Store {
 
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::causal::require_current_principal(&tx, principal)?;
         if let Some(receipt) =
             replay_mutation_receipt(&tx, &principal.family_id, &input.mutation_id, &fingerprint)?
         {
@@ -1130,11 +1132,11 @@ pub(super) fn project_record_eligibility(
         .get("timestamp")
         .and_then(serde_json::Value::as_i64)
         .ok_or(StoreError::InvalidStoredPayload)?;
-    let author_membership_id = root
-        .get("created_by_membership_id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or(StoreError::InvalidStoredPayload)?;
+    let author_membership_id = match root.get("created_by_membership_id") {
+        None | Some(serde_json::Value::Null) => "",
+        Some(serde_json::Value::String(author)) => author.as_str(),
+        _ => return Err(StoreError::InvalidStoredPayload),
+    };
     tx.execute(
         "INSERT INTO source_relation_record_eligibility(
              family_id, record_client_uuid, baby_client_uuid, record_type,
@@ -1170,16 +1172,14 @@ pub(crate) fn rebuild_record_eligibility(
                 json_extract(payload_json, '$.baby_client_uuid'),
                 json_extract(payload_json, '$.type'),
                 CAST(json_extract(payload_json, '$.timestamp') AS INTEGER),
-                json_extract(payload_json, '$.created_by_membership_id')
+                COALESCE(json_extract(payload_json, '$.created_by_membership_id'), '')
          FROM entities
          WHERE entity_type = 'record' AND deleted_at IS NULL
            AND json_type(payload_json, '$.baby_client_uuid') = 'text'
            AND json_extract(payload_json, '$.baby_client_uuid') != ''
            AND json_type(payload_json, '$.type') = 'text'
            AND json_extract(payload_json, '$.type') != ''
-           AND json_type(payload_json, '$.timestamp') = 'integer'
-           AND json_type(payload_json, '$.created_by_membership_id') = 'text'
-           AND json_extract(payload_json, '$.created_by_membership_id') != ''",
+           AND json_type(payload_json, '$.timestamp') = 'integer'",
         [],
     )?;
     Ok(())

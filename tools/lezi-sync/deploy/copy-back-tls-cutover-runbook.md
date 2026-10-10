@@ -1,5 +1,7 @@
 # Copy-back + TLS cutover runbook
 
+Privacy note: private LAN addresses, SSH accounts, and personal host paths below are synthetic examples, not production defaults or authorization. Historical results do not describe the example hosts; the owner must separately confirm the actual target and maintenance window.
+
 **Status:** ops runbook for an authorized maintenance window. It records the fixed
 copy-back + TLS order; live start/stop still happens through the dedicated scripts
 and an explicit operator window, not by opening this file.
@@ -34,12 +36,12 @@ Full numbered form used by help/script headers:
 - `4. start schema-12-compatible TLS deploy (CD)`
 - `5. health/ready by actual protocol`
 
-## Default control plane
+## Explicit control plane (synthetic examples)
 
-| Role | Default |
+| Role | Example / invariant |
 |------|---------|
 | SSH | `ssh -p 10000 nas-operator@192.168.77.10` |
-| Data bind host path | `/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data` |
+| Data bind host path | `/srv/lezi-example/data` |
 | Post-TLS LAN endpoint | `https://192.168.77.10:8765` |
 | Post-TLS container readiness | `docker exec lezi-sync lezi-sync healthcheck` (container-internal HTTP 8766; not published on the NAS host) |
 | Pre-TLS drift probe | `http://192.168.77.10:8765/health` (plaintext may still answer until cutover) |
@@ -48,7 +50,11 @@ Full numbered form used by help/script headers:
 | Expected migrated schema | frozen legacy target `PRAGMA user_version=12` (independent of live current) |
 | Data bind uid | `10001:10001` (container user; must own `lezi.db` after copy-back) |
 
-Override only via env (`NAS_SSH`, `NAS_SSH_PORT`, `LEZI_DATA_HOST_PATH`, `LEZI_TLS_HOST`, …).
+There are no personal deployment defaults. Set `NAS_SSH` and `NAS_SSH_PORT` for
+SSH commands, `LEZI_DATA_HOST_PATH` for data operations, and `LEZI_TLS_HOST` /
+`LEZI_LAN_HOST` for the relevant TLS deployment / LAN probe command, using the
+owner's separately approved configuration. The example target and paths above
+are never authorization to change hosts or run the maintenance window.
 
 ## Preconditions (before the maintenance window)
 
@@ -75,7 +81,8 @@ the private age identity offline and outside Git; it is used only by the local r
 **Before** stop/rm/replace:
 
 ```bash
-ssh -p 10000 nas-operator@192.168.77.10 bash -s <<'EOF'
+ssh -p "${NAS_SSH_PORT:?explicit approved NAS SSH port required}" \
+  "${NAS_SSH:?explicit approved NAS SSH target required}" bash -s <<'EOF'
 set -euo pipefail
 mkdir -p /tmp/lezi-sync-releases/pre-cutover
 read -r IMG IMAGE_REF < <(
@@ -98,7 +105,8 @@ On the developer machine, pin the saved image id and stream the still-running co
 
 ```bash
 export LEZI_EXPECTED_PRE_TLS_IMAGE_ID="$(
-  ssh -p 10000 nas-operator@192.168.77.10 \
+  ssh -p "${NAS_SSH_PORT:?explicit approved NAS SSH port required}" \
+    "${NAS_SSH:?explicit approved NAS SSH target required}" \
     "awk 'NR == 1 { print \$1 }' /tmp/lezi-sync-releases/pre-cutover/image-id.txt"
 )"
 [[ "${LEZI_EXPECTED_PRE_TLS_IMAGE_ID}" =~ ^sha256:[0-9a-f]{64}$ ]]
@@ -134,7 +142,8 @@ exists on the NAS.
 On the NAS (data directory is **not** deleted). Prefer the named container used by CD (`container_name=lezi-sync`); compose project is `lezi`.
 
 ```bash
-ssh -p 10000 nas-operator@192.168.77.10 bash -s <<'EOF'
+ssh -p "${NAS_SSH_PORT:?explicit approved NAS SSH port required}" \
+  "${NAS_SSH:?explicit approved NAS SSH target required}" bash -s <<'EOF'
 set -euo pipefail
 if docker inspect lezi-sync >/dev/null 2>&1; then
   docker stop lezi-sync
@@ -162,9 +171,11 @@ If you use zdocker compose, stopping/removing `lezi-sync` is enough for the publ
 
 ```bash
 # Example NAS-side snapshot (container already stopped):
-ssh -p 10000 nas-operator@192.168.77.10 bash -s <<'EOF'
+ssh -p "${NAS_SSH_PORT:?explicit approved NAS SSH port required}" \
+  "${NAS_SSH:?explicit approved NAS SSH target required}" bash -s -- \
+  "${LEZI_DATA_HOST_PATH:?explicit approved NAS data path required}" <<'EOF'
 set -euo pipefail
-SRC=/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data
+SRC=$1
 DST=/tmp/lezi-sync-releases/pre-cutover-data-$(date -u +%Y%m%dT%H%M%SZ)
 mkdir -p "$(dirname "$DST")"
 cp -a "$SRC" "$DST"
@@ -292,21 +303,23 @@ Post-cutover probe: [`live-cutover-probe.sh`](./live-cutover-probe.sh) (requires
 
 ```bash
 # 1) LAN HTTPS (required) — prefer data-bind cert when host-readable:
+: "${LEZI_LAN_HOST:?explicit approved NAS LAN host required}"
 curl --cacert /path/to/data-bind/tls/server.crt \
-  -fsS https://192.168.77.10:8765/health
+  -fsS "https://${LEZI_LAN_HOST}:8765/health"
 curl --cacert /path/to/data-bind/tls/server.crt \
-  -fsS https://192.168.77.10:8765/ready
+  -fsS "https://${LEZI_LAN_HOST}:8765/ready"
 # mode-700 bind: cert often unreadable on SSH user → curl -k to the same URLs,
 # or: docker exec lezi-sync cat /data/tls/server.crt > /tmp/lezi-server.crt
 
 # 2) Container-internal readiness (optional corroboration; image has no curl):
-ssh -p 10000 nas-operator@192.168.77.10 \
+ssh -p "${NAS_SSH_PORT:?explicit approved NAS SSH port required}" \
+    "${NAS_SSH:?explicit approved NAS SSH target required}" \
   'docker exec lezi-sync lezi-sync healthcheck'
 
 # Do NOT: ssh … 'curl http://127.0.0.1:8766/health'  # host has nothing on 8766
 ```
 
-If HTTPS fails with TLS “wrong version number” and `http://192.168.77.10:8765/health` still answers → **protocol drift** (live image is not the TLS stack). Report drift; **do not** claim cutover success.
+If HTTPS fails with TLS “wrong version number” and HTTP `/health` on the same explicitly configured LAN host still answers → **protocol drift** (live image is not the TLS stack). Report drift; **do not** claim cutover success.
 
 When `/health` reports a version, it should match the deployed image / `LEZI_EXPECTED_VERSION`.
 
@@ -341,7 +354,8 @@ bash tools/lezi-sync/deploy/restore-pre-tls-cutover-state.sh \
 4. Re-start the **pre-cutover image** from the **Step 0** `docker save` tar (or a retained pre-TLS package), **not** “same tag 0.3.0” alone. Load and check the image first:
 
 ```bash
-ssh -p 10000 nas-operator@192.168.77.10 bash -s <<'EOF'
+ssh -p "${NAS_SSH_PORT:?explicit approved NAS SSH port required}" \
+  "${NAS_SSH:?explicit approved NAS SSH target required}" bash -s <<'EOF'
 set -euo pipefail
 cd /tmp/lezi-sync-releases/pre-cutover
 sha256sum -c lezi-sync-pre-cutover.tar.sha256
@@ -367,8 +381,9 @@ dotenv interpolation, argv exposure, or log output.
 5. Probe until usable:
 
 ```bash
-curl -fsS http://192.168.77.10:8765/health
-curl -fsS http://192.168.77.10:8765/ready
+: "${LEZI_LAN_HOST:?explicit approved NAS LAN host required}"
+curl -fsS "http://${LEZI_LAN_HOST}:8765/health"
+curl -fsS "http://${LEZI_LAN_HOST}:8765/ready"
 # or on-NAS: curl -fsS http://127.0.0.1:8765/health
 ```
 
@@ -382,7 +397,7 @@ Before telling the household the window is done:
 |------|---------|
 | Root password | Rotated at migration; **owner** signs in with the ops-chosen new password (`LEZI_BOOTSTRAP_SECRET` = migration password). Old root password is void. |
 | Old clients | **Old APK** and **plaintext HTTP** clients are not supported after TLS + schema cutover. Install the current client build. |
-| Endpoint | Use `https://192.168.77.10:8765` (LAN). Complete **TOFU / SPKI** trust on the trusted-HTTPS path. |
+| Endpoint | Use the explicitly approved LAN HTTPS origin. Complete **TOFU / SPKI** trust on the trusted-HTTPS path. |
 | Members | **All members re-login** via current request/approve or login-grant flows. Pre-migration credentials, invites, and device sessions are void (no silent restore). |
 
 See also `migrator::REAUTH_OPS_NOTE` / migrate CLI success output.

@@ -153,6 +153,15 @@ product §4.6）。下拉刷新触发同步。
 `ExportScreen.kt`、`ExportFileGenerator.kt`、`PdfExport.kt`、`ExportCacheCleanup.kt`；
 经 domain `ExportPort`；TXT/PDF（系统分享，App 不长期存 PDF）。
 
+生成保持 30 s 调用方等待上限。`ExportRenderService` 是不导出的 `:export_renderer`
+专用进程，原生图片解码／PDF 编码／文件写入不占用调用方的结构化协程子任务；
+取消由带请求身份的控制通道终止该 worker，不能用线程中断假定原生编码可取消。
+Application 在该进程不得启动数据门闩、同步、日历或 widget 业务图。
+请求及输出经私有文件描述符传递；绑定失败、进程死亡、取消与 UI 接收前的失败回收
+本次临时文件。下一次生成等待旧 worker 的 Binder 死亡，不能积累后台编码任务。
+只有完整生成物交给系统分享后才按既有 24 h 缓存清理策略保留，不能用旧超时删除
+分享接收方仍可能读取的文件。
+
 ## 11. `:feature:search` — 搜索
 
 `SearchScreen.kt` + `SearchRepository.kt`；最近备注候选严格按当前宝宝与记录类型

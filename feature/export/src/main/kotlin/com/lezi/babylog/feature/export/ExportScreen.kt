@@ -69,10 +69,11 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import com.lezi.babylog.core.ui.formatBabyBirthday
 import java.time.LocalDate
 import java.time.Instant
-import java.time.YearMonth
 import java.time.ZoneOffset
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -119,6 +120,7 @@ internal fun exportActionChrome(
 
 internal data class ExportUiState(
     val busyFormat: ExportFormat? = null,
+    val request: ExportRequest? = null,
     val preview: String? = null,
     val pendingShare: PreparedExport? = null,
     val failureKind: FailureKind? = null,
@@ -153,6 +155,7 @@ class ExportViewModel @Inject constructor(
         _state.update {
             it.copy(
                 busyFormat = format,
+                request = ExportRequest(ExportRequestDraft(from, to, includePhotos), format),
                 preview = null,
                 pendingShare = null,
                 failureKind = null,
@@ -161,48 +164,64 @@ class ExportViewModel @Inject constructor(
             )
         }
         viewModelScope.launch {
-            val generation = try {
-                runBoundedExportGeneration {
-                    withContext(Dispatchers.IO) {
-                        val baby = careLog.getCurrentBaby() ?: error("请先添加宝宝")
-                        val document = exportPort.exportDocument(baby.id, from, to)
-                        // 票 10（T3）：范围内 0 条护理记录 → 空态，不产出近空文件。
-                        if (document.recordCount == 0) {
-                            null
-                        } else {
-                            val prepared = fileGenerator.prepare(
-                                format = format,
-                                title = "乐记导出",
-                                document = document,
-                                includePhotos = includePhotos,
-                            )
-                            document.text to prepared
+            var ownedExport: PreparedExport? = null
+            var published = false
+            try {
+                val generation = try {
+                    runBoundedExportGeneration {
+                        withContext(Dispatchers.IO) {
+                            val baby = careLog.getCurrentBaby() ?: error("请先添加宝宝")
+                            val document = exportPort.exportDocument(baby.id, from, to)
+                            // 票 10（T3）：范围内 0 条护理记录 → 空态，不产出近空文件。
+                            if (document.recordCount == 0) {
+                                null
+                            } else {
+                                val prepared = fileGenerator.prepare(
+                                    format = format,
+                                    title = "乐记导出",
+                                    document = document,
+                                    includePhotos = includePhotos,
+                                )
+                                // Own the file before crossing the cancellable dispatcher boundary.
+                                ownedExport = prepared
+                                document.text to prepared
+                            }
                         }
                     }
+                } catch (timeout: TimeoutCancellationException) {
+                    failWith(exportFailureAttribution(timeout))
+                    return@launch
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    failWith(exportFailureAttribution(error))
+                    return@launch
                 }
-            } catch (timeout: TimeoutCancellationException) {
-                failWith(exportFailureAttribution(timeout))
-                return@launch
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Throwable) {
-                failWith(exportFailureAttribution(error))
-                return@launch
-            }
-            _state.update {
-                if (generation == null) {
-                    it.copy(busyFormat = null, emptyRange = true)
-                } else {
-                    // Clear generate-busy when preview is ready; keep controls locked via
-                    // pendingShare until shareLaunched / shareDismissed so chrome is honest.
-                    it.copy(
-                        busyFormat = null,
-                        preview = generation.first,
-                        pendingShare = generation.second,
-                    )
+                currentCoroutineContext().ensureActive()
+                _state.update {
+                    if (generation == null) {
+                        it.copy(busyFormat = null, emptyRange = true)
+                    } else {
+                        // Clear generate-busy when preview is ready; keep controls locked via
+                        // pendingShare until shareLaunched / shareDismissed so chrome is honest.
+                        it.copy(
+                            busyFormat = null,
+                            preview = generation.first,
+                            pendingShare = generation.second,
+                        )
+                    }
                 }
+                published = true
+            } finally {
+                if (!published) ownedExport?.file?.delete()
             }
         }
+    }
+
+    override fun onCleared() {
+        // A file not yet handed to the Sharesheet still belongs to this screen.
+        _state.value.pendingShare?.file?.delete()
+        super.onCleared()
     }
 
     private fun failWith(attribution: ExportFailureAttribution) {
@@ -256,11 +275,11 @@ fun ExportRoute(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
-    val defaultMonth = remember { YearMonth.now() }
-    var fromDate by remember { mutableStateOf(defaultMonth.atDay(1)) }
-    var toDate by remember { mutableStateOf(defaultMonth.atEndOfMonth()) }
+    var draft by rememberExportRequestDraft()
+    val fromDate = draft.from
+    val toDate = draft.to
+    val includePhotos = draft.includePhotos
     var dateTarget by remember { mutableStateOf<ExportDateTarget?>(null) }
-    var includePhotos by remember { mutableStateOf(true) }
     var inputError by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(state.pendingShare) {
@@ -346,7 +365,7 @@ fun ExportRoute(
                 Text("PDF 包含记录图片", style = LeziTypography.Body)
                 LeziSwitch(
                     checked = includePhotos,
-                    onCheckedChange = { includePhotos = it },
+                    onCheckedChange = { draft = draft.copy(includePhotos = it) },
                     enabled = actions.controlsEnabled,
                 )
             }
@@ -430,11 +449,9 @@ fun ExportRoute(
                         .atZone(ZoneOffset.UTC)
                         .toLocalDate()
                     if (target == ExportDateTarget.From) {
-                        fromDate = picked
-                        if (toDate.isBefore(picked)) toDate = picked
+                        draft = draft.copy(from = picked, to = maxOf(toDate, picked))
                     } else {
-                        toDate = picked
-                        if (fromDate.isAfter(picked)) fromDate = picked
+                        draft = draft.copy(to = picked, from = minOf(fromDate, picked))
                     }
                     inputError = null
                 }

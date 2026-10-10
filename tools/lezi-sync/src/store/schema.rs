@@ -647,6 +647,9 @@ impl Store {
             )),
             live_census_cache: Arc::new(crate::store::live_census_cache::LiveCensusCache::new()),
             auth_cache: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            auth_cache_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(test)]
+            auth_cache_read_hook: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(test)]
             auto_align_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };

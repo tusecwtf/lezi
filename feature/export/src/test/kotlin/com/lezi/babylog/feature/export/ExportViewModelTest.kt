@@ -1,6 +1,9 @@
 package com.lezi.babylog.feature.export
 
 import android.net.Uri
+import androidx.lifecycle.ViewModelStore
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
 import com.lezi.babylog.core.common.failure.FailureKind
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.domain.CareLog
@@ -34,6 +37,35 @@ import org.mockito.Mockito.verifyNoInteractions
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ExportViewModelTest {
+    @get:Rule val files = TemporaryFolder()
+
+    @Test fun leavingBeforeShareHandoffDeletesTheUnclaimedFile() = runTest {
+        verifyScreenFileOwnership(handedToSharesheet = false)
+    }
+
+    @Test fun leavingAfterShareHandoffKeepsTheFileForTheReceivingApp() = runTest {
+        verifyScreenFileOwnership(handedToSharesheet = true)
+    }
+
+    private suspend fun TestScope.verifyScreenFileOwnership(handedToSharesheet: Boolean) {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val file = files.newFile("owned.pdf").apply { writeText("generated export") }
+            val document = ExportDocument("record", recordCount = 1)
+            val generator = mock(ExportFileGenerator::class.java)
+            val prepared = aPreparedExport().copy(file = file)
+            `when`(generator.prepare(ExportFormat.Pdf, "乐记导出", document, false)).thenReturn(prepared)
+            val vm = ExportViewModel(FakeExportPort(document), aCareLog(), generator)
+            val store = ViewModelStore().apply { put("export", vm) }
+            vm.exportRange(from, to, ExportFormat.Pdf, false)
+            awaitState(vm) { it.pendingShare != null }
+            if (handedToSharesheet) vm.shareLaunched()
+            store.clear()
+            assertEquals(handedToSharesheet, file.exists())
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
 
     private val from: LocalDate = LocalDate.of(2026, 9, 1)
     private val to: LocalDate = LocalDate.of(2026, 9, 30)
@@ -84,6 +116,7 @@ class ExportViewModelTest {
             assertFalse(state.emptyRange)
             assertEquals("乐记导出\n一行记录\n", state.preview)
             assertEquals(prepared, state.pendingShare)
+            assertEquals(ExportRequest(ExportRequestDraft(from, to, false), ExportFormat.Txt), state.request)
             verify(generator).prepare(ExportFormat.Txt, "乐记导出", document, false)
         } finally {
             Dispatchers.resetMain()

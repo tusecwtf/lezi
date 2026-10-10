@@ -1,5 +1,7 @@
 package com.lezi.babylog.sync.engine
 
+import com.lezi.babylog.sync.media.parseCanonicalMediaMime
+import com.lezi.babylog.sync.media.requireCanonicalMediaMime
 import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
 import com.lezi.babylog.core.database.causal.frozenMediaSpoolCacheKey
@@ -84,9 +86,7 @@ internal class CausalMediaSettlementJournalOwner(
         require(manifest.mutationId == mutation.mutationId) {
             "media settlement manifest mutation identity drift"
         }
-        require(manifest.items.map(ImmutableMediaSpoolItem::toManifestIdentity) ==
-            mutation.media.map { Triple(it.mediaUuid, it.sha256, it.byteSize) }
-        ) { "media settlement mutation manifest drift" }
+        require(manifest.items.map(ImmutableMediaSpoolItem::toCausalMediaItem) == mutation.media) { "media settlement mutation manifest drift" }
         val binding = CausalMediaSettlementBinding(
             mutationId = mutation.mutationId,
             entityType = mutation.entityType,
@@ -204,9 +204,46 @@ internal class CausalMediaSettlementJournalOwner(
             val journal = decodeCausalMediaSettlementOrNull(row.payloadJson) ?: return@mapNotNull null
             journal.takeIf { it.binding.entityType == entityType && it.binding.clientUuid == clientUuid }
         }
-        matches.forEach { journal ->
-            spool.discardGroup(journal.binding.mutationId)
+        // This can run inside a caller's Room transaction. Retire the durable
+        // reference first; deleting bytes here would survive a later rollback.
+        // Existing orphan recovery sweeps the bytes only after that commit.
+        check(matches.none { it.phase == CausalMediaSettlementPhase.CommitUnknown }) {
+            "unknown media commit cannot be abandoned"
+        }
+        matches.filter { it.phase != CausalMediaSettlementPhase.Branched }.forEach { journal ->
             cache.deleteFrozenMediaSpoolManifest(journal.binding.mutationId)
+        }
+    }
+
+    /** Retire only branches proven absent by an authoritative root pull, inside its transaction. */
+    suspend fun retireResolvedBranches(
+        entityType: String,
+        clientUuid: String,
+        openConflictId: String?,
+        openBranchVersionIds: Set<String>,
+    ): Set<String> {
+        val retired = linkedSetOf<String>()
+        cache.listFrozenMediaSpoolManifests().forEach { row ->
+            val journal = decodeCausalMediaSettlementOrNull(row.payloadJson) ?: return@forEach
+            if (journal.phase != CausalMediaSettlementPhase.Branched ||
+                journal.binding.entityType != entityType || journal.binding.clientUuid != clientUuid
+            ) return@forEach
+            if (journal.conflictId == openConflictId &&
+                journal.branchVersionId in openBranchVersionIds
+            ) return@forEach
+            cache.deleteFrozenMediaSpoolManifest(journal.binding.mutationId)
+            retired += journal.binding.mutationId
+        }
+        return retired
+    }
+
+    /** Caller must have committed the transaction which removed these references. */
+    suspend fun sweepRetired(retiredMutationIds: Set<String>) {
+        retiredMutationIds.forEach { mutationId ->
+            check(cache.getFrozenMediaSpoolManifest(mutationId) == null) {
+                "referenced media cannot be retired"
+            }
+            spool.discardGroup(mutationId)
         }
     }
 
@@ -251,6 +288,8 @@ internal class CausalMediaSettlementJournalOwner(
             val current = loadRequired(mutationId)
             require(current == before) { "media cleanup journal changed while bytes were removed" }
             cache.deleteFrozenMediaSpoolManifest(mutationId)
+            cache.deleteTransportJournal("media-freeze-capture-v1:$mutationId")
+            cache.deleteTransportJournal("media-preparation-sources-v1:$mutationId")
         }
         return true
     }
@@ -450,7 +489,7 @@ private fun CausalMutationUnit.toJournalJson(): JsonObject = buildJsonObject {
                         put("role", item.role)
                         put("sha256", item.sha256)
                         put("byte_size", item.byteSize)
-                        put("mime", item.mime)
+                        put("mime", item.mime?.let(::JsonPrimitive) ?: JsonNull)
                         put("width", item.width?.let(::JsonPrimitive) ?: JsonNull)
                         put("height", item.height?.let(::JsonPrimitive) ?: JsonNull)
                     },
@@ -471,7 +510,7 @@ private fun JsonObject.toJournalMutation(): CausalMutationUnit {
             role = item.requiredString("role"),
             sha256 = item.requiredString("sha256"),
             byteSize = item.requiredLong("byte_size"),
-            mime = item.requiredString("mime"),
+            mime = parseCanonicalMediaMime(item["mime"]),
             width = item.optionalLong("width"),
             height = item.optionalLong("height"),
         )

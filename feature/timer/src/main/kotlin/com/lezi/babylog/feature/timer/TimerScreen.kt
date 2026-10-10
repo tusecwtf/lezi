@@ -14,6 +14,7 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -28,6 +29,8 @@ import androidx.compose.foundation.shape.CircleShape
 import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheetProperties
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -42,6 +45,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -185,7 +189,6 @@ fun TimerRoute(
     }
     var showDiscardConfirmation by remember { mutableStateOf(false) }
     val context = LocalContext.current
-    val completionSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val configuration = LocalConfiguration.current
     val viewportMode = timerViewportMode(
         screenHeightDp = configuration.screenHeightDp,
@@ -288,13 +291,9 @@ fun TimerRoute(
     }
 
     completionUi.draft?.let { draft ->
-        ModalBottomSheet(
-            onDismissRequest = {
-                if (!completionUi.saving) {
-                    vm.dismissCompletion()
-                }
-            },
-            sheetState = completionSheetState,
+        TimerCompletionModalSheet(
+            saving = completionUi.saving,
+            onDismiss = vm::dismissCompletion,
         ) {
             NursingCompletionSheet(
                 draft = draft,
@@ -560,5 +559,29 @@ private fun SideButton(
                 color = actionColor,
             )
         }
+    }
+}
+
+/** The retained completion command owns dismissal across drag, scrim and system back. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun TimerCompletionModalSheet(
+    saving: Boolean,
+    onDismiss: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val currentSaving by rememberUpdatedState(saving)
+    val sheetState = rememberModalBottomSheetState(
+        skipPartiallyExpanded = true,
+        confirmValueChange = { target -> target != SheetValue.Hidden || !currentSaving },
+    )
+    ModalBottomSheet(
+        onDismissRequest = { if (!currentSaving) onDismiss() },
+        sheetState = sheetState,
+        properties = ModalBottomSheetProperties(shouldDismissOnBackPress = false),
+    ) {
+        // Material's predictive-back dismissal can translate a retained sheet off-screen.
+        BackHandler { if (!currentSaving) onDismiss() }
+        content()
     }
 }

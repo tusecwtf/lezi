@@ -1,4 +1,7 @@
 package com.lezi.babylog.domain.carelog
+
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.lezi.babylog.core.common.MediaContentDigest
 import com.lezi.babylog.core.common.newClientUuid
 import com.lezi.babylog.core.database.MediaAssetDao
@@ -43,11 +46,30 @@ internal data class PhotoAttachmentMutation(
  *
  * Module-scoped [internal]: careplan/carelog coordinators may use it; feature modules must not.
  */
-internal class PhotoAttachmentReconciler(
+internal class PhotoAttachmentReconciler private constructor(
     private val mediaAssetDao: MediaAssetDao,
     private val pathGate: MediaLocalPathGate,
-    private val uuidFactory: () -> String = ::newClientUuid,
+    private val digestFile: (String) -> String?,
+    private val uuidFactory: () -> String,
 ) {
+    /** The only accessible constructor retains historical positional/trailing UUID semantics. */
+    constructor(
+        mediaAssetDao: MediaAssetDao,
+        pathGate: MediaLocalPathGate,
+        uuidFactory: () -> String = ::newClientUuid,
+    ) : this(mediaAssetDao, pathGate, { MediaContentDigest.ofReadableFile(it) }, uuidFactory)
+
+    companion object {
+        /** Explicit filesystem-boundary injection cannot compete with the legacy constructor. */
+        fun withDigest(
+            mediaAssetDao: MediaAssetDao,
+            pathGate: MediaLocalPathGate,
+            digestFile: (String) -> String?,
+            uuidFactory: () -> String = ::newClientUuid,
+        ): PhotoAttachmentReconciler =
+            PhotoAttachmentReconciler(mediaAssetDao, pathGate, digestFile, uuidFactory)
+    }
+
     /**
      * Acquires path locks for existing owner media plus [additionalPaths], then runs [block].
      * Must wrap the Room transaction that calls [reconcile] / [tombstone], never the reverse.
@@ -74,14 +96,22 @@ internal class PhotoAttachmentReconciler(
         return pathGate.withLocks(existing + additionalPaths, block)
     }
 
-    internal fun digestReadablePaths(paths: Collection<String>): Map<String, String> {
-        val digests = linkedMapOf<String, String>()
-        paths.forEach { raw ->
-            val path = raw.trim()
-            if (path.isEmpty() || path in digests) return@forEach
-            MediaContentDigest.ofReadableFile(path)?.let { digests[path] = it }
+    internal suspend fun activePlanPhotoSnapshot(planId: Long): List<MediaAssetEntity> =
+        mediaAssetDao.listActiveForCarePlan(planId)
+
+    internal suspend fun digestReadablePaths(paths: Collection<String>): Map<String, String> {
+        // No filesystem operation means no dispatcher handoff. In particular, a
+        // note/time-only edit can commit before its guarded provider follow-up.
+        if (paths.isEmpty()) return emptyMap()
+        return withContext(Dispatchers.IO) {
+            val digests = linkedMapOf<String, String>()
+            paths.forEach { raw ->
+                val path = raw.trim()
+                if (path.isEmpty() || path in digests) return@forEach
+                digestFile(path)?.let { digests[path] = it }
+            }
+            digests
         }
-        return digests
     }
 
     /** Returns the exact tombstones that may be handed to physical cleanup after commit. */

@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.onboarding
 
+import com.lezi.babylog.sync.session.toPresentation
 import com.lezi.babylog.domain.family.FamilyWizardEntry
 import com.lezi.babylog.domain.family.FamilyWizardMode
 import com.lezi.babylog.domain.family.FamilyWizardJoinRole
@@ -51,7 +52,7 @@ class OnboardingFamilyWizardAdapterTest {
         assertEquals(
             OnboardingCreateBabySource.AfterFamilyCreate,
             onboardingCreateBabySource(
-                completed(emptySnapshot(), FamilyWizardOutcome.Created(ownerSession())),
+                completed(emptySnapshot(), FamilyWizardOutcome.Created(ownerSession().toPresentation())),
             ),
         )
         assertEquals(
@@ -60,7 +61,7 @@ class OnboardingFamilyWizardAdapterTest {
                 completed(
                     emptySnapshot(),
                     FamilyWizardOutcome.Reclaimed(
-                        ownerSession(),
+                        ownerSession().toPresentation(),
                         InitialFamilyDataRecovery.Complete,
                     ),
                 ),
@@ -81,7 +82,7 @@ class OnboardingFamilyWizardAdapterTest {
         assertEquals(
             OnboardingFamilyTransition(false, OnboardingStep.CreateBaby),
             onboardingFamilyWizardTransition(
-                completed(snapshot, FamilyWizardOutcome.Created(ownerSession())),
+                completed(snapshot, FamilyWizardOutcome.Created(ownerSession().toPresentation())),
                 reclaimedFamilyEmpty = null,
             ),
         )
@@ -91,7 +92,7 @@ class OnboardingFamilyWizardAdapterTest {
                 completed(
                     snapshot,
                     FamilyWizardOutcome.Reclaimed(
-                        ownerSession(),
+                        ownerSession().toPresentation(),
                         InitialFamilyDataRecovery.Complete,
                     ),
                 ),
@@ -104,7 +105,7 @@ class OnboardingFamilyWizardAdapterTest {
                 completed(
                     snapshot.copy(mode = FamilyWizardMode.Join),
                     FamilyWizardOutcome.OwnerLoggedIn(
-                        ownerSession(),
+                        ownerSession().toPresentation(),
                         InitialFamilyDataRecovery.Complete,
                     ),
                 ),
@@ -117,7 +118,7 @@ class OnboardingFamilyWizardAdapterTest {
                 completed(
                     snapshot.copy(mode = FamilyWizardMode.Join),
                     FamilyWizardOutcome.MemberApproved(
-                        memberSession(),
+                        memberSession().toPresentation(),
                         InitialFamilyDataRecovery.Complete,
                     ),
                 ),
@@ -130,7 +131,7 @@ class OnboardingFamilyWizardAdapterTest {
                 completed(
                     snapshot.copy(mode = FamilyWizardMode.Join),
                     FamilyWizardOutcome.MemberApproved(
-                        memberSession(),
+                        memberSession().toPresentation(),
                         InitialFamilyDataRecovery.RetryRequired(),
                     ),
                 ),
@@ -143,7 +144,7 @@ class OnboardingFamilyWizardAdapterTest {
                 completed(
                     snapshot.copy(mode = FamilyWizardMode.Join),
                     FamilyWizardOutcome.MemberLoginQrClaimed(
-                        memberSession(),
+                        memberSession().toPresentation(),
                         InitialFamilyDataRecovery.Complete,
                     ),
                 ),
@@ -156,7 +157,7 @@ class OnboardingFamilyWizardAdapterTest {
                 completed(
                     snapshot.copy(mode = FamilyWizardMode.Join),
                     FamilyWizardOutcome.MemberLoginQrClaimed(
-                        memberSession(),
+                        memberSession().toPresentation(),
                         InitialFamilyDataRecovery.RetryRequired(),
                     ),
                 ),
@@ -169,7 +170,7 @@ class OnboardingFamilyWizardAdapterTest {
                 completed(
                     snapshot.copy(mode = FamilyWizardMode.Join),
                     FamilyWizardOutcome.MemberApproved(
-                        memberSession(),
+                        memberSession().toPresentation(),
                         InitialFamilyDataRecovery.NotRequired,
                     ),
                 ),
@@ -189,7 +190,7 @@ class OnboardingFamilyWizardAdapterTest {
             displayName = "妈妈",
         )
         val committed = FamilyWizardOutcome.Reclaimed(
-            ownerSession(),
+            ownerSession().toPresentation(),
             InitialFamilyDataRecovery.RetryRequired(),
         )
 
@@ -259,7 +260,7 @@ class OnboardingFamilyWizardAdapterTest {
         )
         assertTrue(
             onboardingKeepsCreateBabyStep(
-                completed(snapshot, FamilyWizardOutcome.Created(ownerSession())),
+                completed(snapshot, FamilyWizardOutcome.Created(ownerSession().toPresentation())),
                 reclaimedFamilyEmpty = null,
             ),
         )
@@ -268,7 +269,7 @@ class OnboardingFamilyWizardAdapterTest {
                 completed(
                     snapshot,
                     FamilyWizardOutcome.Reclaimed(
-                        ownerSession(),
+                        ownerSession().toPresentation(),
                         InitialFamilyDataRecovery.Complete,
                     ),
                 ),
@@ -280,7 +281,7 @@ class OnboardingFamilyWizardAdapterTest {
                 completed(
                     snapshot,
                     FamilyWizardOutcome.Reclaimed(
-                        ownerSession(),
+                        ownerSession().toPresentation(),
                         InitialFamilyDataRecovery.Complete,
                     ),
                 ),
@@ -292,7 +293,7 @@ class OnboardingFamilyWizardAdapterTest {
                 completed(
                     snapshot.copy(mode = FamilyWizardMode.Join),
                     FamilyWizardOutcome.MemberApproved(
-                        memberSession(),
+                        memberSession().toPresentation(),
                         InitialFamilyDataRecovery.Complete,
                     ),
                 ),

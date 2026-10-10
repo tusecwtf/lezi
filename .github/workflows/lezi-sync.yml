@@ -6,11 +6,25 @@ on:
     paths:
       - "tools/lezi-sync/**"
       - ".github/workflows/lezi-sync.yml"
+      - "config/**"
+      # Android codecs/closed key sets are wire inputs even without doc edits.
+      - "sync/src/main/**"
+      - "core/model/src/main/**"
+      - "core/database/**"
+      - "docs/spec/contracts/**"
+      - "tools/testing/**"
   pull_request:
     branches: [master]
     paths:
       - "tools/lezi-sync/**"
       - ".github/workflows/lezi-sync.yml"
+      - "config/**"
+      # Android codecs/closed key sets are wire inputs even without doc edits.
+      - "sync/src/main/**"
+      - "core/model/src/main/**"
+      - "core/database/**"
+      - "docs/spec/contracts/**"
+      - "tools/testing/**"
   workflow_dispatch:
 
 concurrency:
@@ -32,12 +46,15 @@ jobs:
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: tools/lezi-sync -> target
+
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
 
       - name: Test
         run: cargo test --locked
@@ -47,8 +64,13 @@ jobs:
 
       # Isolated deployment smoke: tool fixtures never contact the NAS or save real images.
       # Invoke via bash so a non-executable commit mode still runs on Actions.
+      - name: Explicit operator configuration (offline fixtures)
+        run: bash deploy/test-explicit-operator-config.sh
+
       - name: docker cargo build-context helper
-        run: bash docker/test-prepare-build-context.sh
+        run: |
+          bash docker/test-prepare-build-context.sh
+          bash docker/test-version-contract.sh
 
       - name: package-nas app-update inputs
         run: bash deploy/test-package-nas-app-update.sh
@@ -68,3 +90,16 @@ jobs:
         run: |
           bash deploy/test-init-tls.sh
           bash deploy/test-remote-deploy-tls-guard.sh
+
+      - name: Remaining isolated release fixtures
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sqlite3
+          bash deploy/test-copy-back-nas-data.sh
+          bash deploy/test-image-config-digest.sh
+          bash deploy/test-live-cutover-probe.sh
+          bash deploy/test-push-and-deploy-tls-bootstrap.sh
+          bash deploy/test-schema-cutover.sh
+          bash deploy/test-schema-update-pair.sh
+          bash deploy/test-schema-cutover-rehearsal.sh
+          bash ../testing/test-isolated-integration.sh

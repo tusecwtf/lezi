@@ -1,0 +1,17 @@
+test	status
+tools/lezi-sync/deploy/test-copy-back-nas-data.sh	PASS
+tools/lezi-sync/deploy/test-image-config-digest.sh	PASS
+tools/lezi-sync/deploy/test-init-tls-read-only.sh	PASS
+tools/lezi-sync/deploy/test-init-tls.sh	PASS
+tools/lezi-sync/deploy/test-live-cutover-probe.sh	PASS
+tools/lezi-sync/deploy/test-nas-release-identity.sh	PASS
+tools/lezi-sync/deploy/test-package-nas-app-update.sh	PASS
+tools/lezi-sync/deploy/test-push-and-deploy-tls-bootstrap.sh	PASS
+tools/lezi-sync/deploy/test-remote-deploy-app-update-atomic.sh	PASS
+tools/lezi-sync/deploy/test-remote-deploy-tls-guard.sh	PASS
+tools/lezi-sync/deploy/test-remote-deploy-tls-inspection-read-only.sh	PASS
+tools/lezi-sync/deploy/test-schema-cutover-rehearsal.sh	PASS
+tools/lezi-sync/deploy/test-schema-cutover.sh	PASS
+tools/lezi-sync/docker/test-prepare-build-context.sh	PASS
+tools/lezi-sync/docker/test-version-contract.sh	PASS
+tools/testing/test-isolated-integration.sh	PASS

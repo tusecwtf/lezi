@@ -128,10 +128,9 @@ class RealSyncPortHeartbeatLoopTest {
         advanceHeartbeatTime(rig, 8_000)
         assertThat(rig.backend.heartbeatCalls).isEqualTo(2)
 
-        // 退后台 (LeziApp.onStop only flips ForegroundState): the loop tears
-        // itself down at its next wake — zero probes far beyond every cadence.
+        // Cancellation is immediate; do not advance to the old scheduled beat.
         rig.foreground.setForeground(false)
-        advanceHeartbeatTime(rig, 10 * 60_000)
+        runCurrent()
         pumpUntil { !rig.port.heartbeatLoopActive }
         assertThat(rig.backend.heartbeatCalls).isEqualTo(2)
 
@@ -147,6 +146,26 @@ class RealSyncPortHeartbeatLoopTest {
         assertThat(rig.backend.heartbeatCalls).isEqualTo(2)
         advanceHeartbeatTime(rig, 1_000)
         assertThat(rig.backend.heartbeatCalls).isEqualTo(3)
+    }
+
+    @Test
+    fun backgroundCancelsBlockedPullWithoutKillingTheSignalHost() = runTest {
+        val rig = heartbeatRig()
+        val entered = CompletableDeferred<Unit>()
+        val cancelled = CompletableDeferred<Unit>()
+        rig.backend.beforePullReturn = {
+            entered.complete(Unit)
+            try { kotlinx.coroutines.awaitCancellation() } finally { cancelled.complete(Unit) }
+        }
+        rig.port.requestSync(SyncTrigger.Foreground)
+        pumpUntil { entered.isCompleted }
+        rig.foreground.setForeground(false)
+        pumpUntil { cancelled.isCompleted }
+        val pullsBeforeReturn = rig.backend.pullCount
+        rig.foreground.setForeground(true)
+        rig.port.requestSync(SyncTrigger.Foreground)
+        pumpUntil { rig.backend.pullCount > pullsBeforeReturn }
+        settleIdle(rig)
     }
 
     @Test
@@ -350,16 +369,16 @@ class RealSyncPortHeartbeatLoopTest {
         assertThat(rig.port.heartbeatNextBeatAtMillis.value)
             .isEqualTo(rig.clock.now + 300_000)
 
-        // requestSync(LocalWrite) → engine onLocalWriteCompleted: the EXPOSED
-        // deadline resets to the 60s baseline (jitter pinned to 0 here).
+        // Write ten seconds into an already parked five-minute deadline.
+        advanceHeartbeatTime(rig, 10_000)
         rig.port.requestSync(SyncTrigger.LocalWrite)
         assertThat(rig.port.heartbeatNextBeatAtMillis.value)
             .isEqualTo(rig.clock.now + 60_000)
 
-        // The reset is honored at the loop's next wake: settle the echo round,
-        // then the overdue deadline fires exactly one beat.
         settleIdle(rig)
-        advanceHeartbeatTime(rig, 300_000)
+        advanceHeartbeatTime(rig, 59_999)
+        assertThat(rig.backend.heartbeatCalls).isEqualTo(5)
+        advanceHeartbeatTime(rig, 1)
         pumpUntil { rig.backend.heartbeatCalls == 6 }
         settleIdle(rig)
     }

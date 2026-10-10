@@ -59,6 +59,7 @@ object SuspectedDuplicateBounds {
         zone: ZoneId,
         now: Long,
         checkActive: () -> Unit,
+        factEndExclusive: Long = Long.MAX_VALUE,
     ): CareRangeBounds {
         require(dayCount > 0) { "dayCount must be positive" }
         val liveByUuid = HashMap<String, Record>(records.size)
@@ -79,7 +80,7 @@ object SuspectedDuplicateBounds {
             checkActive()
             if (record.clientUuid !in groupedUuids) {
                 fixed.add(
-                    record.metricWindow(startDate, dayCount, zone, now, checkActive),
+                    record.metricWindow(startDate, dayCount, zone, now, factEndExclusive, checkActive),
                     checkActive,
                 )
             }
@@ -91,7 +92,7 @@ object SuspectedDuplicateBounds {
             group.memberClientUuids.forEach { uuid ->
                 checkActive()
                 liveByUuid[uuid]?.let { record ->
-                    members += record.metricWindow(startDate, dayCount, zone, now, checkActive)
+                    members += record.metricWindow(startDate, dayCount, zone, now, factEndExclusive, checkActive)
                 }
             }
             if (members.isNotEmpty()) {
@@ -431,9 +432,10 @@ private fun Record.metricWindow(
     dayCount: Int,
     zone: ZoneId,
     now: Long,
+    factEndExclusive: Long,
     checkActive: () -> Unit,
 ): MetricWindow = MetricWindow(
-    CareAggregation.range(listOf(this), startDate, dayCount, zone, now).days.map { day ->
+    CareAggregation.range(listOf(this), startDate, dayCount, zone, now, factEndExclusive).days.map { day ->
         checkActive()
         MetricVector(
             formulaMl = day.formulaMl,

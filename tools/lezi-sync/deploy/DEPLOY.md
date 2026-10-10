@@ -1,13 +1,15 @@
 # lezi-sync backend deployment runbook (NAS rollback / zdocker)
 
+Privacy note: private LAN addresses, SSH accounts, and personal host paths below are synthetic examples, not production defaults or authorization. Historical results do not describe the example hosts; the owner must separately confirm the actual target and maintenance window.
+
 VPS deployment tooling was removed at the owner's request (2026-09-06, after
 the 2026-09-05 suspension); git history retains the deleted scripts. This
 runbook keeps only the guarded NAS rollback and read-only copy-out path.
-Real target values live in untracked `deploy/env.local` (`NAS_SSH`, `NAS_SSH_PORT`,
-`LEZI_DATA_HOST_PATH`, `LEZI_TLS_HOST`); tracked files use only the synthetic
-example `nas-operator@192.168.77.10:10000`. Do not retarget these
-scripts. Operator permission repair does not authorize a container
-replacement: deployment still requires a separately confirmed window.
+No production SSH identity, LAN host, or data path is checked in as a default.
+Explicitly configure the owner's approved target for each relevant command;
+synthetic examples do not authorize retargeting these scripts. Operator permission
+repair does not authorize a container replacement: deployment still requires a
+separately confirmed window.
 
 ## Scope
 
@@ -26,7 +28,7 @@ operator entrypoint that may replace the NAS container is `push-and-deploy.sh`.
 | Item | Choice |
 |---|---|
 | Trigger | Dev machine scripts (package → scp → SSH deploy) |
-| Compose engine on NAS | **zdocker** bundled `docker-compose` v2 (`/zspace/applications/services/zdocker/bin/docker-compose`) |
+| Compose engine on NAS | Optional vendor Compose v2 executable, explicitly set with `ZDOCKER_COMPOSE`; no vendor path is assumed. Unset/unavailable uses the existing `docker run` fallback. |
 | Bootstrap secret | Live container is authoritative during ordinary CD; a matching mode-`600` persistent NAS file is seeded/verified before replace |
 | Credential backup | `push-and-deploy.sh` must stream the root secret + TLS pair into a local `age`-encrypted off-repo backup before ordinary replace |
 | Concurrency | Ordinary CD holds an app-update publication lease plus the data owner-token lease across package transfer and replace. Schema cutover holds the publication lease while it publishes the forced-update pair, then acquires the data lease before releasing the publication lease; competing CD cannot enter the handoff gap. |
@@ -50,6 +52,7 @@ operator entrypoint that may replace the NAS container is `push-and-deploy.sh`.
 | `init-tls.sh`, `tls-certificate-sha256.sh`, `tls-spki.sh` | NAS or isolated developer fixture | Internal/read-only except authorized bootstrap | Distinguish absent/present/unsafe TLS state, validate the pair, and measure exact certificate/SPKI identity. |
 | `copy-out-nas-data.sh`, `copy-back-nas-data.sh`, `live-cutover-probe.sh` | Maintenance workflow | Authorized maintenance window only | Prepare or execute the separately governed offline-migration cutover; they are never part of ordinary CD. |
 | `schema-cutover.sh`, `schema-cutover-steps.sh` | Developer machine | Exact `LEZI_SCHEMA_CUTOVER_APPROVAL` only | H29 0.4.0/schema-13 state machine; owns APK prepublish, outer lease, encrypted rollback, migration, staged swap, target activation and post-check. |
+| `schema-update-pair.sh` | NAS, called by the authorized cutover phase | Requires the exact outer publication owner lease on every invocation | Durable private update-pair snapshot, checked publication and idempotent pre-open rollback for the existing 11/12-to-13 maintenance flow. Not a standalone deploy entrypoint. |
 | `schema-cutover-rehearsal.sh`, `schema-cutover-rehearsal-steps.sh` | Developer-owned isolated Docker only | Exact `LEZI_ISOLATED_SCHEMA_CUTOVER_REHEARSAL=1`; loopback and `/tmp`/`/var/tmp` roots only | H30 schema 11/12 success plus all eight pre-write failure/rollback cases. Never targets the family NAS and is not a production deploy entrypoint. |
 | `backup-pre-tls-cutover-state.sh`, `restore-pre-tls-cutover-state.sh`, `validate-pre-tls-cutover-state.py` | Developer machine | Authorized maintenance preparation | Capture and validate the pre-cutover container start contract for rollback staging; they do not make the incomplete live rollback executable. |
 | `validate-credential-bundle.sh` | Developer machine | Internal/read-only | Validate the pipe-only credential bundle before encryption or recovery staging. |
@@ -65,22 +68,37 @@ operator entrypoint that may replace the NAS container is `push-and-deploy.sh`.
 # build-image.sh and all downstream scripts derive the release identifier from Cargo.toml.
 cd tools/lezi-sync && ./build-image.sh
 
+# Use the owner's separately approved configuration and maintenance window.
+# No example below is a production default.
+: "${NAS_SSH:?explicit approved NAS SSH target required}"
+: "${NAS_SSH_PORT:?explicit approved NAS SSH port required}"
+: "${LEZI_DATA_HOST_PATH:?explicit approved NAS data path required}"
+: "${LEZI_TLS_HOST:?explicit approved NAS TLS host required}"
 # Package + scp + remote deploy
 ./deploy/push-and-deploy.sh
 ```
 
-Environment overrides:
+Environment configuration (the relevant SSH, data, TLS, and LAN values must be
+explicit; keep real deployment settings outside the tracked tree):
 
-| Variable | Default |
+Ordinary Android/Gradle and Cargo builds do not require NAS configuration. Isolated
+fixtures and app-update check-only checks may explicitly use synthetic values
+without contacting a real NAS. Actual NAS packaging/deployment requires the
+explicit approved configuration; container replacement still requires its own
+confirmed maintenance window.
+
+| Variable | Requirement / default |
 |---|---|
-| `NAS_SSH` | No tracked real default; source `deploy/env.local` (synthetic example `nas-operator@192.168.77.10`) |
-| `NAS_SSH_PORT` | `10000` |
-| `NAS_REMOTE_DIR` | Stable validated package path `/tmp/lezi-sync-releases/lezi-sync-<ver>-nas`（该机 `HOME=/home/` 不可写）。Push uploads into a fresh mode-`700` `.incoming-<nonce>` sibling, validates and deploys there, then promotes it to this stable path only after success. The parent must be a canonical non-symlink mode-`700` directory owned by the SSH user. |
+| `NAS_SSH` | Required for SSH commands; no default. Synthetic example: `nas-operator@192.168.77.10` |
+| `NAS_SSH_PORT` | Required for SSH commands; no default. Example: `10000` |
+| `NAS_REMOTE_DIR` | Stable validated package path `/tmp/lezi-sync-releases/lezi-sync-<ver>-nas`, independent of SSH home-directory writability. Push uploads into a fresh mode-`700` `.incoming-<nonce>` sibling, validates and deploys there, then promotes it to this stable path only after success. The parent must be a canonical non-symlink mode-`700` directory owned by the SSH user. |
 | `LEZI_SYNC_VERSION` | from `Cargo.toml` |
-| `LEZI_DATA_HOST_PATH` | `/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data`; must be a normalized portable absolute path because it is rendered into compose/manifest and derives the lock domain. Filesystem root and exact broad/system roots `/etc`, `/usr`, `/var`, `/home`, `/root`, `/tmp`, `/opt`, `/srv` are refused; use a product-specific child. |
-| `LEZI_TLS_HOST` | `192.168.77.10`; IPv4 address or DNS name resolving to IPv4, included in the self-signed certificate SAN |
+| `LEZI_DATA_HOST_PATH` | Required for data-bound operations; no default. Synthetic example: `/srv/lezi-example/data`. Must be a normalized portable absolute path because it is rendered into compose/manifest and derives the lock domain. Filesystem root and exact broad/system roots `/etc`, `/usr`, `/var`, `/home`, `/root`, `/tmp`, `/opt`, `/srv` are refused; use a product-specific child. |
+| `LEZI_TLS_HOST` | Required for packaging/deployment; no default. IPv4 address or DNS name resolving to IPv4, included in the self-signed certificate SAN. Synthetic example: `192.168.77.10` |
+| `LEZI_LAN_HOST` | Required for LAN probes; no default. Use the separately approved LAN endpoint host. |
+| `ZDOCKER_COMPOSE` | Optional explicit path to an operator-verified vendor Compose executable; unset uses `docker run`. |
 | `LEZI_LAN_APK_DOWNLOAD_ORIGIN` | `http://<LEZI_TLS_HOST>:8767`; invite-install origin, restricted to the same IPv4/DNS host and port 8767; IPv6 is not supported by this NAS publish path |
-| `LEZI_SECRET_FILE` | NAS-side persistent root-secret file. Default: sibling of the data bind at `../config/lezi-sync.env` (`/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/config/lezi-sync.env` on the family NAS). Overrides must be normalized absolute paths using only letters, digits, `.`, `_`, `/`, and `-` so the SSH login shell cannot reinterpret them. |
+| `LEZI_SECRET_FILE` | NAS-side persistent root-secret file. Default: sibling of the explicitly configured data bind at `../config/lezi-sync.env` (synthetic example `/srv/lezi-example/config/lezi-sync.env`). Overrides must be normalized absolute paths using only letters, digits, `.`, `_`, `/`, and `-` so the SSH login shell cannot reinterpret them. |
 | `LEZI_ALLOW_SECRET_RECOVERY=1` | Explicit incident authorization to use the persistent file when the live container is absent. Ordinary CD leaves it unset. |
 | `LEZI_ALLOW_SECRET_RESEED=1` | Explicit maintenance authorization to replace a conflicting persistent value; requires live container absent plus forwarded explicit secret. Never use for ordinary CD. |
 | `LEZI_ALLOW_TLS_BOOTSTRAP=1` | One-time opt-in to create TLS files only on an operator-verified fresh data root. Requires an explicitly forwarded secret, and remote deploy aborts if a live container exists. Ordinary CD, rollback, and certificate tests on the family NAS leave it unset. |
@@ -101,7 +119,7 @@ Environment overrides:
 
 ### One-time Docker access repair (operator-executed)
 
-The measured SSH account is not in the existing `docker` group. Repair the
+If the approved SSH account is missing the existing `docker` group, repair the
 account's supplementary groups, not the data bind or Docker socket modes.
 **Docker access is effectively host-root access**; grant it only to this trusted
 NAS administrator. This does not authorize deployment or a daemon restart.
@@ -109,13 +127,16 @@ NAS administrator. This does not authorize deployment or a daemon restart.
 1. Open an interactive session from the developer machine:
 
 ```bash
-ssh -o ControlPath=none -p 10000 nas-operator@192.168.77.10
+ssh -o ControlPath=none -p "${NAS_SSH_PORT:?explicit approved NAS SSH port required}" \
+  "${NAS_SSH:?explicit approved NAS SSH target required}"
 ```
 
 2. Run on the NAS. Enter the NAS sudo password only at its terminal prompt:
 
 ```bash
-test "$(id -un)" = nas-account || exit 1
+# Replace this placeholder with the separately approved SSH username.
+expected_user='<approved-ssh-user>'
+test "$(id -un)" = "${expected_user}" || exit 1
 sudo -v
 sudo sh -eu -c '
   user=$1
@@ -175,13 +196,14 @@ the current family as a permission test or weaken its schema check.
 
 ### One-time NAS filesystem preflight
 
-The family NAS data bind lives below a root-owned ZFS directory. Before the first hardened CD, an
+If the approved data bind lives below a root-owned directory, before the first hardened CD an
 administrator must create the secret/lease sibling for the SSH account; neither the unprivileged SSH
-user nor a Docker helper may weaken the ZFS parent to make this pass. Do this once in an interactive
+user nor a Docker helper may weaken the parent to make this pass. Do this once in an interactive
 NAS shell (never paste the sudo password into logs or chat):
 
 ```bash
-config=/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/config
+# Set LEZI_DATA_HOST_PATH to the separately approved path in this NAS shell.
+config="$(dirname "${LEZI_DATA_HOST_PATH:?explicit approved NAS data path required}")/config"
 sudo mkdir -p "${config}"
 sudo chown "$(id -u):$(id -g)" "${config}"
 sudo chmod 700 "${config}"
@@ -215,7 +237,7 @@ platform, measured image OS/architecture, image name, complete image config dige
 file, missing helper, checksum mismatch, signer mismatch, loaded/running-image mismatch, or `/health`
 version mismatch aborts. Its manifest image config digest/OS/architecture must equal the locally inspectable
 `lezi-sync:<ver>` image, and rendered data/TLS/invite inputs must equal the current command's expected
-defaults or explicit overrides. scp never writes into a reusable directory: each attempt gets a new
+explicit deployment configuration. scp never writes into a reusable directory: each attempt gets a new
 `.incoming-<nonce>` directory. A failed attempt is retained only for inspection and must be removed
 deliberately after confirming no deploy uses it; successful attempts atomically promote to the stable path.
 
@@ -271,7 +293,12 @@ Metadata contract (`app-update.json`, snake_case):
   value get `code=client_update_required` on authoritative sync paths **and disaster-restore
   write paths**, but can still call the app-update routes with a valid session.
 - Package layout: `app-update/app-release.apk` + `app-update/app-update.json`.
-- On deploy, files are installed to the data bind as `/data/app-release.apk` and `/data/app-update.json` (container uid `10001`) via **atomic pair publish**: both artifacts are staged completely, then the APK is renamed into place **before** metadata so a running service never observes “new `min_supported` + missing/old/broken package” under the final paths. When an old container is running, CD snapshots the prior pair and restores it if the live 8767 hash proof fails, before any stop/rm. Smoke: `deploy/test-remote-deploy-app-update-atomic.sh`.
+- On deploy, files are installed to the data bind as `/data/app-release.apk` and `/data/app-update.json` through one uid-`10001` helper writer. Both are staged and checked before the APK is renamed **before** metadata. These remain two filesystem renames, not a single atomic filesystem operation. The running service must continue to verify its channel before enforcing a raised floor.
+- Publication snapshots and an ownership nonce live in a mode-`700` `/data/.lezi-app-update-transaction` directory. The snapshots and preparation marker are flushed before either final filename changes. Copy, rename, helper, exact-byte verification, live-download failure, or HUP/INT/TERM before publication commit invokes the same rollback path, verifies both original files, and prevents container stop/rm. A fresh data root rolls back to both files absent. Failed rollback never reports success or deletes its remaining evidence.
+- After both final files and the old container's live 8767 download hash are verified, publication commits. Private evidence remains until the replacement passes image/version/TLS checks. A subsequent deployment failure must not silently downgrade the verified package/floor or database state.
+- SIGKILL, host loss, or an uncertain helper result can leave the transaction directory (or legacy `.lezi-staging`/`.lezi-rollback` files). The next run refuses **before publication or container replacement**, preserving all evidence. Do not remove that state merely to retry: an authorized operator must inspect the retained pair, current served identities, and deployment outcome, and deliberately recover it under the owner lease. There is no automatic stale-state cleanup and no implied authorization to touch a live NAS. Smoke: `deploy/test-remote-deploy-app-update-atomic.sh`.
+- Both ordinary and maintenance pair writers also serialize each helper operation with `/data/.lezi-app-update-helper-lock`. A lost transport response does not prove the previous writer stopped. A held or interrupted helper lock prevents a second publication or rollback from racing it; the lock is not automatically stolen or expired.
+- The existing 11/12-to-13 maintenance flow uses the lease-validated `schema-update-pair.sh` for both prepublish and pre-open rollback. Its private old-pair snapshots remain in the operation's remote staging directory; readiness/mutation/restore markers are flushed, and `/data/.lezi-schema-app-update-transaction` ties an incomplete publication to that operation. The developer-side intent marker is persisted before SSH begins, so a lost response requires recovery rather than being treated as “no change.” A failed restore leaves the publication lease held by the outer orchestrator. Neither helper changes SQL schemas or permits a new rollback target. Smoke: `deploy/test-schema-update-pair.sh`.
 - Older server generations enforce `min_supported_version_code` on authoritative sync and
   disaster-restore writes **only** when the on-disk channel is verified (metadata + APK sha256),
   so metadata-only or integrity-failing packages fail open. **0.3.13 (causal) production** is the
@@ -346,9 +373,9 @@ LEZI_RELEASE_APK=../../app/build/outputs/apk/release/app-release.apk \
   its bootstrap value empty. Ignore rules are defense in depth; an accidentally committed value still
   requires immediate rotation and history incident handling.
 - Canonical NAS file: `${LEZI_SECRET_FILE}` or, by default, the data bind's sibling
-  `../config/lezi-sync.env`. For the family NAS that is
-  `/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/config/lezi-sync.env`. Despite the `/tmp/zfsv3`
-  prefix this is the NAS persistent ZFS-backed tree; `/tmp/lezi-sync-releases/` is disposable.
+  `../config/lezi-sync.env`. Synthetic example:
+  `/srv/lezi-example/config/lezi-sync.env`. The approved data and config directories
+  must be persistent; `/tmp/lezi-sync-releases/` is disposable staging.
 - The dedicated `config/` directory must be a non-symlink mode-`700` directory. The secret file must
   be a non-symlink regular mode-`600` file containing exactly one line:
   `LEZI_BOOTSTRAP_SECRET=<value>`. The parser never `source`s or evaluates it.
@@ -439,9 +466,9 @@ SAN host:
 ```bash
 cd tools/lezi-sync
 LEZI_AGE_IDENTITY_FILE=/path/on/offline-media/lezi-age-identity.txt \
-LEZI_EXPECTED_TLS_HOST=192.168.77.10 \
-LEZI_EXPECTED_CERTIFICATE_SHA256=75023c71d8ca918a42fe4f058aab8faf85db3f02b9a69bfb6522951ce362da9e \
-LEZI_EXPECTED_SPKI_SHA256=bd07d8645ed3b7adead162eca454373aee4007b0a35aa7c62caf7d8ac0cb3215 \
+LEZI_EXPECTED_TLS_HOST="${LEZI_EXPECTED_TLS_HOST:?set independently confirmed TLS host}" \
+LEZI_EXPECTED_CERTIFICATE_SHA256="${LEZI_EXPECTED_CERTIFICATE_SHA256:?set independently recorded certificate fingerprint}" \
+LEZI_EXPECTED_SPKI_SHA256="${LEZI_EXPECTED_SPKI_SHA256:?set independently recorded SPKI fingerprint}" \
   ./deploy/restore-nas-credentials.sh \
     "$HOME/.config/lezi/backups/<backup>.age" \
     /var/tmp/lezi-credential-recovery-YYYYMMDD

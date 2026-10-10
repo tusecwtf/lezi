@@ -96,6 +96,9 @@ pub const CAPABILITY_DISASTER_RESTORE: &str = "device_disaster_restore_v1";
 pub const CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT: &str = "validated_deferred_fulfillment_v1";
 /// Complete 0.4.0 commit-first/conflict-v2 generation.
 pub const CAPABILITY_CAUSAL_SYNC_V2: &str = "causal_sync_v2";
+pub const CAPABILITY_CAUSAL_MEDIA_IDENTITY_V1: &str = "causal_media_identity_v1";
+pub const CAPABILITY_NURSING_PLAN_INTENT_V1: &str = "nursing_plan_intent_v1";
+pub const CAPABILITY_RESTORE_AUTHORITY_V1: &str = "restore_authority_v1";
 /// Capabilities exposed by health after the complete generation is activated.
 pub const HEALTH_CAPABILITIES: &[&str] = &[
     CAPABILITY_ATOMIC_BUNDLE,
@@ -103,10 +106,14 @@ pub const HEALTH_CAPABILITIES: &[&str] = &[
     CAPABILITY_DISASTER_RESTORE,
     CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT,
     CAPABILITY_CAUSAL_SYNC_V2,
+    CAPABILITY_CAUSAL_MEDIA_IDENTITY_V1,
+    CAPABILITY_NURSING_PLAN_INTENT_V1,
+    CAPABILITY_RESTORE_AUTHORITY_V1,
 ];
-pub const AUTHENTICATED_SYNC_HANDSHAKE_CAPABILITIES: &[&str] = &[CAPABILITY_CAUSAL_SYNC_V2];
-/// 0.4.0 causal generation requires the code 21 APK before server activation.
-const PROTOCOL_CUTOVER_CLIENT_VERSION_CODE: u64 = 21;
+pub const AUTHENTICATED_SYNC_HANDSHAKE_CAPABILITIES: &[&str] =
+    &[CAPABILITY_CAUSAL_SYNC_V2, CAPABILITY_NURSING_PLAN_INTENT_V1];
+/// The paired 0.5 value-domain generation requires app35 even without metadata.
+const PROTOCOL_CUTOVER_CLIENT_VERSION_CODE: u64 = 35;
 pub(crate) const PROVISIONING_LOCK_KEY: &str = "__server_provisioning__";
 pub const SETUP_PROTOCOL_VERSION: u16 = 1;
 pub const CAPABILITY_TRUSTED_HTTPS_ENDPOINT: &str = "trusted_https_endpoint_v1";
@@ -186,6 +193,9 @@ pub struct ServerConfig {
     /// Deterministic readiness-probe seam for isolated concurrency tests.
     #[doc(hidden)]
     pub readiness_probe_blocking_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync + 'static>>,
+    /// Isolated verification-count seam; receives no secret data.
+    #[doc(hidden)]
+    pub root_password_verification_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     clock: Clock,
 }
 
@@ -221,6 +231,7 @@ impl ServerConfig {
             causal_media_prepare_blocking_hook: None,
             causal_media_commit_blocking_hook: None,
             readiness_probe_blocking_hook: None,
+            root_password_verification_hook: None,
             clock: Arc::new(system_epoch_seconds),
         }
     }
@@ -414,6 +425,7 @@ struct AppState {
     causal_media_prepare_blocking_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync + 'static>>,
     causal_media_commit_blocking_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync + 'static>>,
     readiness_probe_blocking_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync + 'static>>,
+    root_password_verification_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     maintenance_read_only: bool,
 }
 
@@ -724,7 +736,7 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
             owner_root_fingerprint.as_deref(),
         )?;
         let restore_family_ids =
-            disaster_restore::prepare_startup(&config.data_dir, (config.clock)())?;
+            disaster_restore::prepare_startup(&store, &config.data_dir, (config.clock)())?;
         media::collect_orphan_family_media(&store, &media_root, &restore_family_ids)?;
         media::retry_committed_pending_bundle_media_cleanup(&store, &media_root)?;
         // Complete any causal DB-accepted publication before the authority graph is
@@ -806,9 +818,9 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
                 required_version_code = PROTOCOL_CUTOVER_CLIENT_VERSION_CODE,
                 "protocol cutover refused before the forced-update floor"
             );
-            return Err(ApiError::internal(
-                "protocol cutover release channel does not enforce version code 21",
-            ));
+            return Err(ApiError::internal(format!(
+                "protocol cutover release channel does not enforce version code {PROTOCOL_CUTOVER_CLIENT_VERSION_CODE}",
+            )));
         }
     } else if app_update_metadata_path.is_file() && app_update_apk_path.is_file() {
         if let Err(error) =
@@ -858,6 +870,7 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
         causal_media_prepare_blocking_hook: config.causal_media_prepare_blocking_hook,
         causal_media_commit_blocking_hook: config.causal_media_commit_blocking_hook,
         readiness_probe_blocking_hook: config.readiness_probe_blocking_hook,
+        root_password_verification_hook: config.root_password_verification_hook,
         maintenance_read_only: config.maintenance_read_only,
     };
     let maintenance_read_only = config.maintenance_read_only;
@@ -994,6 +1007,11 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
             post(sync::withdraw_conflict_branches),
         )
         .route(
+            "/v1/source-relations/current",
+            post(handlers::current_source_relations::current_source_relations)
+                .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
             "/v1/source-relations/declare",
             post(sync::declare_source_relation),
         )
@@ -1107,14 +1125,9 @@ async fn authenticate(state: &Arc<AppState>, headers: &HeaderMap) -> Result<Prin
 ///
 /// Enforce the floor when a **verified** app-update channel is available (metadata
 /// present and the on-disk APK matches its sha256), or when a last-known-good floor
-/// is retained across a mid-promote integrity miss. Metadata alone, a missing APK
-/// with no prior verified pair, or a never-verified channel must not brick the family
-/// into forced upgrade with nothing to install. Missing metadata still fails open.
-/// App-update metadata/APK routes never call this.
-///
-/// Negative channel failures are stamp-cached so a permanent half-deploy does not
-/// re-hash the APK on every gated request; the gate logs once per stamp pair when
-/// fail-open or retaining last-known-good (see `AppUpdateCache::min_supported_if_verified`).
+/// is retained across a mid-promote integrity miss. Verified metadata may raise
+/// the minimum; missing or damaged metadata can never lower the paired wire
+/// generation's hard floor. App-update metadata/APK routes remain accessible.
 pub(crate) async fn require_supported_client(
     state: &Arc<AppState>,
     headers: &HeaderMap,
@@ -1127,10 +1140,9 @@ pub(crate) async fn require_supported_client(
         ))
     })
     .await?;
-    let Some(min_supported) = min_supported else {
-        // Never verified, channel gone, or fail-open with no last-known-good.
-        return Ok(());
-    };
+    let min_supported = min_supported
+        .unwrap_or(0)
+        .max(PROTOCOL_CUTOVER_CLIENT_VERSION_CODE);
     let client_version = match parse_client_version_code(headers) {
         Some(value) => value,
         None => {
@@ -1143,6 +1155,28 @@ pub(crate) async fn require_supported_client(
         return Err(ApiError::client_update_required(
             "Client version is below the minimum supported by this family server",
         ));
+    }
+    require_sync_capability(headers, CAPABILITY_NURSING_PLAN_INTENT_V1)
+}
+
+pub(crate) fn require_sync_capability(headers: &HeaderMap, required: &str) -> Result<(), ApiError> {
+    let mut values = headers.get_all("x-lezi-sync-capabilities").iter();
+    let raw = values.next().and_then(|value| value.to_str().ok());
+    let valid = raw.is_some_and(|raw| {
+        let mut seen = std::collections::BTreeSet::new();
+        raw.split(',').all(|value| {
+            let capability = value.trim();
+            matches!(
+                capability,
+                CAPABILITY_NURSING_PLAN_INTENT_V1 | CAPABILITY_RESTORE_AUTHORITY_V1
+            ) && seen.insert(capability)
+        }) && seen.contains(required)
+    });
+    if values.next().is_some() || !valid {
+        return Err(
+            ApiError::conflict("Required sync capability is missing or invalid")
+                .with_code("capability_mismatch"),
+        );
     }
     Ok(())
 }
@@ -1186,14 +1220,13 @@ fn require_bootstrap_secret(
     let Some(expected) = state.bootstrap_secret.as_deref() else {
         return Ok(());
     };
+    admit_root_authentication(state, source)?;
     let provided = headers
         .get(BOOTSTRAP_SECRET_HEADER)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
-        return Err(root_auth_rejection(
-            state,
-            source,
+    if !root_password_matches(state, provided, expected) {
+        return Err(ApiError::unauthorized_detail(
             "Bootstrap secret required or invalid",
         ));
     }
@@ -1205,10 +1238,9 @@ fn require_owner_root_password(
     headers: &HeaderMap,
     source: SocketAddr,
 ) -> Result<(), ApiError> {
+    admit_root_authentication(state, source)?;
     let Some(expected) = state.bootstrap_secret.as_deref() else {
-        return Err(root_auth_rejection(
-            state,
-            source,
+        return Err(ApiError::unauthorized_detail(
             "Administrator authentication failed",
         ));
     };
@@ -1216,26 +1248,36 @@ fn require_owner_root_password(
         .get(BOOTSTRAP_SECRET_HEADER)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
-        return Err(root_auth_rejection(
-            state,
-            source,
+    if !root_password_matches(state, provided, expected) {
+        return Err(ApiError::unauthorized_detail(
             "Administrator authentication failed",
         ));
     }
     Ok(())
 }
 
-fn root_auth_rejection(state: &AppState, source: SocketAddr, detail: &str) -> ApiError {
+/// All root-authenticated entrypoints share admission, before examining the
+/// supplied password. Successful guesses cannot bypass an exhausted window.
+/// Per-source windows expire normally; the process budget bounds IP rotation.
+fn admit_root_authentication(state: &AppState, source: SocketAddr) -> Result<(), ApiError> {
     let scope = format!("root-auth-source:{}", source.ip());
     if state
         .root_auth_limiter
         .check_and_record(&scope, state.now())
     {
-        ApiError::unauthorized_detail(detail)
+        Ok(())
     } else {
-        ApiError::too_many_requests("Too many administrator authentication attempts")
+        Err(ApiError::too_many_requests(
+            "Too many administrator authentication attempts",
+        ))
     }
+}
+
+fn root_password_matches(state: &AppState, provided: &str, expected: &str) -> bool {
+    if let Some(hook) = &state.root_password_verification_hook {
+        hook();
+    }
+    constant_time_eq(provided.as_bytes(), expected.as_bytes())
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -1698,6 +1740,18 @@ impl IntoResponse for ApiError {
 impl From<StoreError> for ApiError {
     fn from(error: StoreError) -> Self {
         match &error {
+            StoreError::ForbiddenIdentityAdministration => {
+                Self::forbidden("Cannot administer this family identity")
+            }
+            StoreError::MembershipDeleted => {
+                Self::unauthorized_code("membership_deleted", "Membership was deleted")
+            }
+            StoreError::DeviceRemoved => {
+                Self::unauthorized_code("device_removed", "Device was removed")
+            }
+            StoreError::AuthorityGraphInvalid { .. } => {
+                Self::conflict("Authority graph is invalid").with_code("authority_graph_invalid")
+            }
             StoreError::InvalidStoredPayload => {
                 tracing::error!(
                     code = "invalid_stored_payload",

@@ -127,7 +127,6 @@ pub(super) async fn update_my_display_name(
     let display_name = request.validate()?;
     let display_name_key = normalized_display_name_key(&display_name);
     let store = state.store.clone();
-    let family_id = principal.family_id.clone();
     let membership_id = principal.membership_id.clone();
     let now = state.now();
     if principal.role == "owner" {
@@ -136,7 +135,7 @@ pub(super) async fn update_my_display_name(
         run_blocking(move || {
             store
                 .rename_active_membership(
-                    &family_id,
+                    &principal,
                     &membership_id,
                     &blocking_display_name,
                     &blocking_display_name_key,
@@ -157,8 +156,7 @@ pub(super) async fn update_my_display_name(
     let request = run_blocking(move || {
         store
             .create_member_rename_request(
-                &family_id,
-                &membership_id,
+                &principal,
                 &blocking_display_name,
                 &display_name_key,
                 now,
@@ -191,10 +189,9 @@ pub(super) async fn list_member_rename_requests(
 ) -> Result<Json<RenameRequestsResponse>, ApiError> {
     let principal = require_owner(&state, &headers).await?;
     let store = state.store.clone();
-    let family_id = principal.family_id;
     let now = state.now();
     let requests =
-        run_blocking(move || Ok(store.pending_member_rename_requests(&family_id, now)?)).await?;
+        run_blocking(move || Ok(store.pending_member_rename_requests(&principal, now)?)).await?;
     Ok(Json(RenameRequestsResponse { requests }))
 }
 
@@ -205,11 +202,10 @@ pub(super) async fn approve_member_rename_request(
 ) -> Result<Json<Value>, ApiError> {
     let principal = require_owner(&state, &headers).await?;
     let store = state.store.clone();
-    let family_id = principal.family_id;
     let now = state.now();
     let display_name = run_blocking(move || {
         store
-            .approve_member_rename_request(&family_id, &request_id, now)
+            .approve_member_rename_request(&principal, &request_id, now)
             .map_err(map_name_lifecycle_error)
     })
     .await?;
@@ -223,11 +219,10 @@ pub(super) async fn reject_member_rename_request(
 ) -> Result<Json<Value>, ApiError> {
     let principal = require_owner(&state, &headers).await?;
     let store = state.store.clone();
-    let family_id = principal.family_id;
     let now = state.now();
     run_blocking(move || {
         store
-            .reject_member_rename_request(&family_id, &request_id, now)
+            .reject_member_rename_request(&principal, &request_id, now)
             .map_err(map_name_lifecycle_error)
     })
     .await?;
@@ -245,12 +240,10 @@ pub(super) async fn cancel_my_member_rename_request(
         ));
     }
     let store = state.store.clone();
-    let family_id = principal.family_id;
-    let membership_id = principal.membership_id;
     let now = state.now();
     run_blocking(move || {
         store
-            .cancel_own_member_rename_request(&family_id, &membership_id, now)
+            .cancel_own_member_rename_request(&principal, now)
             .map_err(map_name_lifecycle_error)
     })
     .await?;
@@ -265,12 +258,11 @@ pub(super) async fn add_family_member(
     let principal = require_owner(&state, &headers).await?;
     let display_name = json_body(body)?.validate()?;
     let store = state.store.clone();
-    let family_id = principal.family_id;
     let blocking_display_name = display_name.clone();
     let display_name_key = normalized_display_name_key(&display_name);
     let membership_id = run_blocking(move || {
         store
-            .add_device_less_member(&family_id, &blocking_display_name, &display_name_key)
+            .add_device_less_member(&principal, &blocking_display_name, &display_name_key)
             .map_err(map_name_lifecycle_error)
     })
     .await?;
@@ -293,7 +285,6 @@ pub(super) async fn rename_family_member(
     let principal = require_owner(&state, &headers).await?;
     let display_name = json_body(body)?.validate()?;
     let store = state.store.clone();
-    let family_id = principal.family_id;
     let blocking_membership_id = membership_id.clone();
     let blocking_display_name = display_name.clone();
     let display_name_key = normalized_display_name_key(&display_name);
@@ -301,7 +292,7 @@ pub(super) async fn rename_family_member(
     run_blocking(move || {
         store
             .rename_active_membership(
-                &family_id,
+                &principal,
                 &blocking_membership_id,
                 &blocking_display_name,
                 &display_name_key,
@@ -324,29 +315,15 @@ pub(super) async fn rename_family_device(
     body: Result<Json<UpdateDeviceNameRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let principal = authenticate(&state, &headers).await?;
-    let is_owner = principal.role == "owner";
     let device_name = json_body(body)?.validate()?;
     let store = state.store.clone();
-    let family_id = principal.family_id;
-    let membership_id = principal.membership_id;
     let blocking_device_id = device_id.clone();
     let blocking_device_name = device_name.clone();
     let device_name_key = normalized_device_name_key(&device_name);
     run_blocking(move || {
-        if !is_owner {
-            let owns_target = store
-                .visible_active_devices(&family_id, &membership_id, false)?
-                .iter()
-                .any(|device| device.device_id == blocking_device_id);
-            if !owns_target {
-                return Err(ApiError::forbidden("Cannot manage another member's device"));
-            }
-        }
         store
             .rename_active_device(
-                &family_id,
-                &membership_id,
-                is_owner,
+                &principal,
                 &blocking_device_id,
                 &blocking_device_name,
                 &device_name_key,
@@ -370,11 +347,10 @@ pub(super) async fn revoke_family_device(
     let principal = require_owner(&state, &headers).await?;
     let _ = json_body(body)?;
     let store = state.store.clone();
-    let family_id = principal.family_id;
     let now = state.now();
     run_blocking(move || {
         store
-            .revoke_family_device(&family_id, &device_id, now)
+            .revoke_family_device(&principal, &device_id, now)
             .map_err(|error| match error {
                 StoreError::DeviceNotFound => ApiError::not_found("Device not found"),
                 other => other.into(),
@@ -419,11 +395,10 @@ pub(super) async fn remove_family_member(
         ));
     }
     let store = state.store.clone();
-    let family_id = principal.family_id;
     let blocking_target_id = target_id.clone();
     let now = state.now();
     run_blocking(move || {
-        let memberships = store.active_memberships(&family_id)?;
+        let memberships = store.active_memberships(&principal.family_id)?;
         let target = memberships
             .iter()
             .find(|membership| membership.membership_id == blocking_target_id)
@@ -431,7 +406,7 @@ pub(super) async fn remove_family_member(
         if target.role == "owner" {
             return Err(ApiError::forbidden("Cannot remove the family admin"));
         }
-        store.hard_delete_membership(&family_id, &blocking_target_id, now)?;
+        store.hard_delete_membership(&principal, &blocking_target_id, now)?;
         Ok(())
     })
     .await?;

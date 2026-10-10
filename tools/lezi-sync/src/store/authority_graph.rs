@@ -161,257 +161,369 @@ impl Store {
         F: FnMut(&str, &str, usize) -> Result<bool, StoreError>,
     {
         let connection = self.connect()?;
-        let family_count = connection.query_row("SELECT COUNT(*) FROM families", [], |row| {
-            row.get::<_, usize>(0)
-        })?;
-        let family_ids = self.family_ids()?;
-        if let Some(invalid_family_id) = family_ids.iter().find(|family_id| {
-            family_id.is_empty()
-                || family_id.len() > 128
-                || !family_id.chars().all(|character| {
-                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
-                })
-        }) {
-            return Err(StoreError::AuthorityGraphInvalid {
-                reason_code: "invalid_family_id",
-                entity_type: "family".to_owned(),
-                client_uuid: invalid_family_id.clone(),
-                rev: None,
-            });
-        }
-        let rows = {
-            let mut statement = connection.prepare(
+        validate_authority_graph_on(
+            &connection,
+            &self.database_path,
+            max_media_bytes,
+            &mut media_ready,
+        )
+    }
+}
+
+pub(crate) fn validate_authority_graph_on<F>(
+    connection: &rusqlite::Connection,
+    database_path: &std::path::Path,
+    max_media_bytes: usize,
+    mut media_ready: F,
+) -> Result<AuthorityGraphValidationSummary, StoreError>
+where
+    F: FnMut(&str, &str, usize) -> Result<bool, StoreError>,
+{
+    let family_count = connection.query_row("SELECT COUNT(*) FROM families", [], |row| {
+        row.get::<_, usize>(0)
+    })?;
+    let family_ids = {
+        let mut statement = connection.prepare("SELECT id FROM families")?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids
+    };
+    if let Some(invalid_family_id) = family_ids.iter().find(|family_id| {
+        family_id.is_empty()
+            || family_id.len() > 128
+            || !family_id.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
+    }) {
+        return Err(StoreError::AuthorityGraphInvalid {
+            reason_code: "invalid_family_id",
+            entity_type: "family".to_owned(),
+            client_uuid: invalid_family_id.clone(),
+            rev: None,
+        });
+    }
+    let rows = {
+        let mut statement = connection.prepare(
                 "
                 SELECT family_id, entity_type, client_uuid, updated_at, deleted_at, payload_json, rev
                 FROM entities
                 ORDER BY family_id, rev, entity_type, client_uuid
                 ",
             )?;
-            let rows = statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, Option<i64>>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, i64>(6)?,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            rows
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    let entity_count = rows.len();
+    let mut entities = HashMap::with_capacity(entity_count);
+    for (family_id, entity_type, client_uuid, updated_at, deleted_at, raw_payload, rev) in rows {
+        let mut payload = parse_payload(&raw_payload)?;
+        if entity_type == "care_plan" {
+            crate::model::project_care_plan_source_key(&mut payload);
+        }
+        let context = if entity_type == "media" {
+            EntityValidationContext::AtomicBundleMedia
+        } else {
+            EntityValidationContext::AtomicBundleRoot
         };
-        let entity_count = rows.len();
-        let mut entities = HashMap::with_capacity(entity_count);
-        for (family_id, entity_type, client_uuid, updated_at, deleted_at, raw_payload, rev) in rows
-        {
-            let mut payload = parse_payload(&raw_payload)?;
-            if entity_type == "care_plan" {
-                crate::model::project_care_plan_source_key(&mut payload);
-            }
-            let context = if entity_type == "media" {
-                EntityValidationContext::AtomicBundleMedia
-            } else {
-                EntityValidationContext::AtomicBundleRoot
-            };
-            let parsed_uuid =
-                Uuid::parse_str(&client_uuid).map_err(|_| StoreError::AuthorityGraphInvalid {
-                    reason_code: "invalid_entity_uuid",
-                    entity_type: entity_type.clone(),
-                    client_uuid: client_uuid.clone(),
-                    rev: Some(rev),
-                })?;
-            RawEntity {
-                entity_type: entity_type.clone(),
-                client_uuid: parsed_uuid,
-                updated_at,
-                deleted_at,
-                payload: payload.clone(),
-            }
-            .validate_as(max_media_bytes, context)
-            .map_err(|_| StoreError::AuthorityGraphInvalid {
-                reason_code: "invalid_payload",
+        let parsed_uuid =
+            Uuid::parse_str(&client_uuid).map_err(|_| StoreError::AuthorityGraphInvalid {
+                reason_code: "invalid_entity_uuid",
                 entity_type: entity_type.clone(),
                 client_uuid: client_uuid.clone(),
                 rev: Some(rev),
             })?;
-            let entity = AuthorityEntity {
-                family_id,
-                entity_type,
-                client_uuid,
-                deleted_at,
-                rev,
-                payload,
-            };
-            entities.insert(entity.key(), entity);
+        RawEntity {
+            entity_type: entity_type.clone(),
+            client_uuid: parsed_uuid,
+            updated_at,
+            deleted_at,
+            payload: payload.clone(),
         }
+        .validate_as(max_media_bytes, context)
+        .map_err(|_| StoreError::AuthorityGraphInvalid {
+            reason_code: "invalid_payload",
+            entity_type: entity_type.clone(),
+            client_uuid: client_uuid.clone(),
+            rev: Some(rev),
+        })?;
+        let entity = AuthorityEntity {
+            family_id,
+            entity_type,
+            client_uuid,
+            deleted_at,
+            rev,
+            payload,
+        };
+        entities.insert(entity.key(), entity);
+    }
 
-        let mut deferred_fulfillment_count = 0usize;
-        for entity in entities.values() {
-            match entity.entity_type.as_str() {
-                "baby" if entity.deleted_at.is_none() => {
-                    if let Some(avatar_id) = optional_string(entity, "avatar_media_uuid") {
-                        let media =
-                            live_entity(&entities, &same_family_key(entity, "media", avatar_id))
-                                .ok_or_else(|| entity.invalid("missing_avatar_media"))?;
-                        if media.payload.get("kind").and_then(Value::as_str) != Some("avatar")
-                            || optional_string(media, "baby_client_uuid")
-                                != Some(entity.client_uuid.as_str())
-                        {
-                            return Err(entity.invalid("invalid_avatar_ownership"));
-                        }
+    let mut deferred_fulfillment_count = 0usize;
+    for entity in entities.values() {
+        match entity.entity_type.as_str() {
+            "baby" if entity.deleted_at.is_none() => {
+                if let Some(avatar_id) = optional_string(entity, "avatar_media_uuid") {
+                    let media =
+                        live_entity(&entities, &same_family_key(entity, "media", avatar_id))
+                            .ok_or_else(|| entity.invalid("missing_avatar_media"))?;
+                    if media.payload.get("kind").and_then(Value::as_str) != Some("avatar")
+                        || optional_string(media, "baby_client_uuid")
+                            != Some(entity.client_uuid.as_str())
+                    {
+                        return Err(entity.invalid("invalid_avatar_ownership"));
                     }
                 }
-                "record" | "care_plan" => {
-                    let baby_id = required_string(entity, "baby_client_uuid")?;
-                    if !entities.contains_key(&same_family_key(entity, "baby", baby_id)) {
-                        return Err(entity.invalid("missing_baby_reference"));
+            }
+            "record" | "care_plan" => {
+                let baby_id = required_string(entity, "baby_client_uuid")?;
+                if !entities.contains_key(&same_family_key(entity, "baby", baby_id)) {
+                    return Err(entity.invalid("missing_baby_reference"));
+                }
+                if let Some(custom_item_id) = optional_string(entity, "custom_item_client_uuid") {
+                    if !entities.contains_key(&same_family_key(
+                        entity,
+                        "custom_item",
+                        custom_item_id,
+                    )) {
+                        return Err(entity.invalid("missing_custom_item_reference"));
                     }
-                    if let Some(custom_item_id) = optional_string(entity, "custom_item_client_uuid")
-                    {
-                        if !entities.contains_key(&same_family_key(
-                            entity,
-                            "custom_item",
-                            custom_item_id,
-                        )) {
-                            return Err(entity.invalid("missing_custom_item_reference"));
-                        }
-                    }
-                    if entity.entity_type == "care_plan"
-                        && entity.deleted_at.is_none()
-                        && entity.payload.get("status").and_then(Value::as_str) == Some("completed")
-                    {
-                        let record_id = required_string(entity, "fulfilled_record_client_uuid")?;
-                        let record_key = same_family_key(entity, "record", record_id);
-                        match entities.get(&record_key) {
-                            Some(record) => {
-                                if required_string(record, "baby_client_uuid")? != baby_id {
-                                    return Err(entity.invalid("fulfillment_baby_mismatch"));
-                                }
-                                if record.deleted_at.is_some() {
-                                    tracing::warn!(
-                                        family_id = %entity.family_id,
-                                        entity_type = "care_plan",
-                                        client_uuid = %entity.client_uuid,
-                                        rev = entity.rev,
-                                        record_client_uuid = %record_id,
-                                        reason_code = "fulfilled_record_deleted",
-                                        "completed care_plan retained after fulfillment record tombstone"
-                                    );
-                                }
+                }
+                if entity.entity_type == "care_plan"
+                    && entity.deleted_at.is_none()
+                    && entity.payload.get("status").and_then(Value::as_str) == Some("completed")
+                {
+                    let record_id = required_string(entity, "fulfilled_record_client_uuid")?;
+                    let record_key = same_family_key(entity, "record", record_id);
+                    match entities.get(&record_key) {
+                        Some(record) => {
+                            if required_string(record, "baby_client_uuid")? != baby_id {
+                                return Err(entity.invalid("fulfillment_baby_mismatch"));
                             }
-                            None => {
-                                if !committed_deferred_evidence_exists(
-                                    &connection,
-                                    entity,
-                                    record_id,
-                                    &entities,
-                                )? {
-                                    return Err(entity.invalid("missing_deferred_evidence"));
-                                }
-                                if deferred_fulfillment_count < 32 {
-                                    tracing::warn!(
-                                        family_id = %entity.family_id,
-                                        entity_type = "care_plan",
-                                        client_uuid = %entity.client_uuid,
-                                        rev = entity.rev,
-                                        record_client_uuid = %record_id,
-                                        reason_code = "legacy_missing_fulfilled_record",
-                                        "deferred legacy fulfillment retained outside the public graph"
-                                    );
-                                }
-                                deferred_fulfillment_count += 1;
+                            if record.deleted_at.is_some() {
+                                tracing::warn!(
+                                    family_id = %entity.family_id,
+                                    entity_type = "care_plan",
+                                    client_uuid = %entity.client_uuid,
+                                    rev = entity.rev,
+                                    record_client_uuid = %record_id,
+                                    reason_code = "fulfilled_record_deleted",
+                                    "completed care_plan retained after fulfillment record tombstone"
+                                );
                             }
                         }
-                    }
-                }
-                "media" if entity.deleted_at.is_none() => {
-                    let kind = required_string(entity, "kind")?;
-                    let (parent_type, parent_field) = match kind {
-                        "avatar" => ("baby", "baby_client_uuid"),
-                        "log" if optional_string(entity, "care_plan_client_uuid").is_some() => {
-                            ("care_plan", "care_plan_client_uuid")
+                        None => {
+                            if !committed_deferred_evidence_exists(
+                                connection, entity, record_id, &entities,
+                            )? {
+                                return Err(entity.invalid("missing_deferred_evidence"));
+                            }
+                            if deferred_fulfillment_count < 32 {
+                                tracing::warn!(
+                                    family_id = %entity.family_id,
+                                    entity_type = "care_plan",
+                                    client_uuid = %entity.client_uuid,
+                                    rev = entity.rev,
+                                    record_client_uuid = %record_id,
+                                    reason_code = "legacy_missing_fulfilled_record",
+                                    "deferred legacy fulfillment retained outside the public graph"
+                                );
+                            }
+                            deferred_fulfillment_count += 1;
                         }
-                        "log" => ("record", "record_client_uuid"),
-                        _ => return Err(entity.invalid("invalid_media_owner")),
-                    };
-                    let parent_id = required_string(entity, parent_field)?;
-                    if !entities.contains_key(&same_family_key(entity, parent_type, parent_id)) {
-                        return Err(entity.invalid("missing_media_owner"));
-                    }
-                    let publication = connection
-                        .query_row(
-                            "SELECT 1 FROM media_publications WHERE family_id = ?1 AND media_uuid = ?2",
-                            params![entity.family_id, entity.client_uuid],
-                            |_| Ok(()),
-                        )
-                        .optional()?;
-                    if publication.is_none() {
-                        return Err(entity.invalid("missing_media_publication"));
-                    }
-                    let byte_size = entity
-                        .payload
-                        .get("byte_size")
-                        .and_then(Value::as_u64)
-                        .and_then(|value| usize::try_from(value).ok())
-                        .ok_or_else(|| entity.invalid("invalid_media_size"))?;
-                    if !media_ready(&entity.family_id, &entity.client_uuid, byte_size)? {
-                        return Err(entity.invalid("media_bytes_not_ready"));
                     }
                 }
-                "fulfillment_candidate" => {
-                    let submitter = entity
-                        .payload
-                        .get("submitter_membership_id")
-                        .ok_or_else(|| entity.invalid("missing_candidate_server_evidence"))?;
-                    let submitter_role = required_string(entity, "submitter_role")?;
-                    if !matches!(submitter_role, "owner" | "member")
-                        || entity
-                            .payload
-                            .get("confirmed_at")
-                            .and_then(Value::as_i64)
-                            .filter(|value| *value > 0)
-                            .is_none()
-                    {
-                        return Err(entity.invalid("invalid_candidate_server_evidence"));
+            }
+            "media" if entity.deleted_at.is_none() => {
+                let kind = required_string(entity, "kind")?;
+                let (parent_type, parent_field) = match kind {
+                    "avatar" => ("baby", "baby_client_uuid"),
+                    "log" if optional_string(entity, "care_plan_client_uuid").is_some() => {
+                        ("care_plan", "care_plan_client_uuid")
                     }
-                    if let Some(membership_id) = submitter.as_str() {
-                        let membership_exists = connection.query_row(
+                    "log" => ("record", "record_client_uuid"),
+                    "wake" => ("wake_observation", "record_client_uuid"),
+                    _ => return Err(entity.invalid("invalid_media_owner")),
+                };
+                let parent_id = required_string(entity, parent_field)?;
+                if !entities.contains_key(&same_family_key(entity, parent_type, parent_id)) {
+                    return Err(entity.invalid("missing_media_owner"));
+                }
+                let publication = connection
+                    .query_row(
+                        "SELECT 1 FROM media_publications WHERE family_id = ?1 AND media_uuid = ?2",
+                        params![entity.family_id, entity.client_uuid],
+                        |_| Ok(()),
+                    )
+                    .optional()?;
+                if publication.is_none() {
+                    return Err(entity.invalid("missing_media_publication"));
+                }
+                let byte_size = entity
+                    .payload
+                    .get("byte_size")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .ok_or_else(|| entity.invalid("invalid_media_size"))?;
+                if !media_ready(&entity.family_id, &entity.client_uuid, byte_size)? {
+                    return Err(entity.invalid("media_bytes_not_ready"));
+                }
+            }
+            "fulfillment_candidate" => {
+                let submitter = entity
+                    .payload
+                    .get("submitter_membership_id")
+                    .ok_or_else(|| entity.invalid("missing_candidate_server_evidence"))?;
+                let submitter_role = required_string(entity, "submitter_role")?;
+                if !matches!(submitter_role, "owner" | "member")
+                    || entity
+                        .payload
+                        .get("confirmed_at")
+                        .and_then(Value::as_i64)
+                        .filter(|value| *value > 0)
+                        .is_none()
+                {
+                    return Err(entity.invalid("invalid_candidate_server_evidence"));
+                }
+                if let Some(membership_id) = submitter.as_str() {
+                    let membership_exists = connection.query_row(
                             "SELECT EXISTS(SELECT 1 FROM memberships WHERE family_id = ?1 AND membership_id = ?2)",
                             params![entity.family_id, membership_id],
                             |row| row.get::<_, bool>(0),
                         )?;
-                        if !membership_exists {
-                            return Err(entity.invalid("unknown_candidate_submitter"));
-                        }
-                    } else if !submitter.is_null() {
-                        return Err(entity.invalid("invalid_candidate_server_evidence"));
+                    if !membership_exists {
+                        return Err(entity.invalid("unknown_candidate_submitter"));
                     }
-                    if entity.deleted_at.is_some() {
-                        continue;
-                    }
-                    let plan_id = required_string(entity, "care_plan_client_uuid")?;
-                    let record_id = required_string(entity, "record_client_uuid")?;
-                    let plan =
-                        live_entity(&entities, &same_family_key(entity, "care_plan", plan_id))
-                            .ok_or_else(|| entity.invalid("missing_candidate_plan"))?;
-                    let record = entities
-                        .get(&same_family_key(entity, "record", record_id))
-                        .ok_or_else(|| entity.invalid("missing_candidate_record"))?;
-                    if required_string(plan, "baby_client_uuid")?
-                        != required_string(record, "baby_client_uuid")?
-                    {
-                        return Err(entity.invalid("candidate_baby_mismatch"));
-                    }
+                } else if !submitter.is_null() {
+                    return Err(entity.invalid("invalid_candidate_server_evidence"));
                 }
-                _ => {}
+                if entity.deleted_at.is_some() {
+                    continue;
+                }
+                let plan_id = required_string(entity, "care_plan_client_uuid")?;
+                let record_id = required_string(entity, "record_client_uuid")?;
+                let plan = live_entity(&entities, &same_family_key(entity, "care_plan", plan_id))
+                    .ok_or_else(|| entity.invalid("missing_candidate_plan"))?;
+                let record = entities
+                    .get(&same_family_key(entity, "record", record_id))
+                    .ok_or_else(|| entity.invalid("missing_candidate_record"))?;
+                if required_string(plan, "baby_client_uuid")?
+                    != required_string(record, "baby_client_uuid")?
+                {
+                    return Err(entity.invalid("candidate_baby_mismatch"));
+                }
+            }
+            _ => {}
+        }
+    }
+    validate_stable_projection(connection, database_path, &entities)?;
+    Ok(AuthorityGraphValidationSummary {
+        family_count,
+        entity_count,
+        deferred_fulfillment_count,
+    })
+}
+
+fn validate_stable_projection(
+    connection: &rusqlite::Connection,
+    database_path: &std::path::Path,
+    entities: &HashMap<(String, String, String), AuthorityEntity>,
+) -> Result<(), StoreError> {
+    for entity in entities.values() {
+        if entity.entity_type == "media" && entity.deleted_at.is_none() {
+            let (kind, uuid) = super::media_association_owner(&entity.payload)?
+                .ok_or_else(|| entity.invalid("invalid_media_owner"))?;
+            let headed: bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM entity_stable_heads WHERE family_id=?1 AND entity_type=?2 AND client_uuid=?3)",params![entity.family_id,kind,uuid],|row|row.get(0))?;
+            if headed {
+                let mut projected = super::PulledEntity {
+                    entity_type: "media".to_owned(),
+                    client_uuid: entity.client_uuid.clone(),
+                    updated_at: 0,
+                    deleted_at: None,
+                    payload: entity.payload.clone(),
+                    rev: entity.rev,
+                    version_id: None,
+                    conflict_summary: None,
+                    source_relation_summary: None,
+                    media_identity: None,
+                };
+                super::pull::attach_media_identity(
+                    connection,
+                    database_path,
+                    &entity.family_id,
+                    &mut projected,
+                )
+                .map_err(|_| entity.invalid("stable_media_projection_mismatch"))?;
             }
         }
-        Ok(AuthorityGraphValidationSummary {
-            family_count,
-            entity_count,
-            deferred_fulfillment_count,
-        })
+        if matches!(
+            entity.entity_type.as_str(),
+            "media" | "fulfillment_candidate"
+        ) {
+            continue;
+        }
+        let head: Option<(String,String,String,i64,Option<i64>)>=connection.query_row(
+            "SELECT v.version_id,v.origin,v.payload_json,v.updated_at,v.deleted_at FROM entity_stable_heads h JOIN entity_versions v ON v.family_id=h.family_id AND v.version_id=h.version_id AND v.entity_type=h.entity_type AND v.client_uuid=h.client_uuid WHERE h.family_id=?1 AND h.entity_type=?2 AND h.client_uuid=?3",params![entity.family_id,entity.entity_type,entity.client_uuid],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional()?;
+        let Some((version, origin, root, updated, deleted)) = head else {
+            let has_versions: bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM entity_versions WHERE family_id=?1 AND entity_type=?2 AND client_uuid=?3) OR EXISTS(SELECT 1 FROM entity_stable_heads WHERE family_id=?1 AND entity_type=?2 AND client_uuid=?3)",params![entity.family_id,entity.entity_type,entity.client_uuid],|row|row.get(0))?;
+            if has_versions {
+                return Err(entity.invalid("missing_stable_head"));
+            }
+            // Historical ordinary rows predate causal authority; no implicit migration.
+            continue;
+        };
+        let mut root: Map<String, Value> = serde_json::from_str(&root)?;
+        root.remove("updated_at");
+        if entity.entity_type == "care_plan" {
+            crate::model::project_care_plan_source_key(&mut root);
+        }
+        if root != entity.payload || deleted != entity.deleted_at {
+            return Err(entity.invalid("stable_root_projection_mismatch"));
+        }
+        let _ = updated;
+        if origin != "migration_base" {
+            super::causal::load_validated_version(
+                connection,
+                database_path,
+                &entity.family_id,
+                &version,
+            )
+            .map_err(|_| entity.invalid("invalid_stable_version"))?
+            .ok_or_else(|| entity.invalid("missing_stable_version"))?;
+        }
+        let mut statement = connection.prepare(
+            "SELECT media_uuid FROM entity_version_media WHERE family_id=?1 AND version_id=?2",
+        )?;
+        let media = statement
+            .query_map(params![entity.family_id, version], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for id in media {
+            let projected = entities.get(&same_family_key(entity, "media", &id));
+            if entity.deleted_at.is_some() && projected.is_none_or(|m| m.deleted_at.is_some()) {
+                continue;
+            }
+            let projected = projected
+                .filter(|m| m.deleted_at.is_none())
+                .ok_or_else(|| entity.invalid("missing_stable_media_projection"))?;
+            if super::media_association_owner(&projected.payload)?
+                != Some((entity.entity_type.as_str(), entity.client_uuid.as_str()))
+            {
+                return Err(entity.invalid("stable_media_owner_mismatch"));
+            }
+        }
     }
+    Ok(())
 }
