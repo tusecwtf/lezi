@@ -24,7 +24,7 @@ class RealServerCommitAuthenticationTest {
     }
 
     @Test
-    fun commit401AfterRefreshRequiresReauthAndRetainsTheFrozenPending() = runBlocking {
+    fun commit401AfterRefreshRequiresReauthAndRetainsTheFrozenUnknown() = runBlocking {
         runCase("always")
     }
 
@@ -34,20 +34,27 @@ class RealServerCommitAuthenticationTest {
     }
 
     private suspend fun runCase(mode: String) {
-        RealServerMediaReceiptFaultFixture.open().use { fixture ->
+        RealServerMediaReceiptFaultFixture.open(controlledReceiptClock = true).use { fixture ->
             val seeded = fixture.seedRecordMedia(
                 recordUuid = "00000000-0000-4000-8000-000000002501",
                 mediaUuid = "00000000-0000-4000-8000-000000002502",
                 localUri = "content://synthetic/commit-auth", bytes = byteArrayOf(2, 5, 0, 1),
             )
             var commitCalls = 0
+            val attemptedMutations = mutableListOf<List<CausalMutationUnit>>()
             val instrumented = object : SyncBackend by fixture.backend {
                 override suspend fun causalCommit(session: SyncSession, units: List<CausalMutationUnit>): CausalCommitBatchResult {
                     commitCalls++
+                    attemptedMutations += units.toList()
                     if (mode == "revoked") {
-                        fixture.sqlite("UPDATE devices SET status = 'revoked' WHERE device_id = '${session.deviceId}';")
+                        // Use the public authority route so its cache invalidation
+                        // and persistent revocation both take effect.
+                        fixture.backend.revokeFamilyDevice(session, session.deviceId)
                     } else if (mode == "always" || commitCalls == 1) {
-                        fixture.sqlite("UPDATE device_sessions SET access_expires_at = 1 WHERE device_id = '${session.deviceId}';")
+                        // Expire the real issued access token against the server's
+                        // clock, including any already-warm auth-cache entry. Direct
+                        // SQL edits would bypass that cache and do not simulate TTL.
+                        fixture.server.setReceiptClock(session.accessExpiresAtEpochSeconds + 1)
                     }
                     return fixture.backend.causalCommit(session, units)
                 }
@@ -67,6 +74,7 @@ class RealServerCommitAuthenticationTest {
             val refreshes = fixture.proxy.forwardedPaths.drop(beforePaths).filter { it.contains("/refresh") }
             assertThat(failure).isNotInstanceOf(CausalCommitRejectedException::class.java)
             assertThat(bodies.distinct()).hasSize(1)
+            assertThat(attemptedMutations.distinct()).hasSize(1)
             if (mode == "once") {
                 assertThat(failure).isNull()
                 assertThat(statuses).containsExactly(401, 200).inOrder()
@@ -87,8 +95,19 @@ class RealServerCommitAuthenticationTest {
                 val pending = requireNotNull(decodeCausalMediaSettlementOrNull(
                     fixture.conflictDetails.listFrozenMediaSpoolManifests().single().payloadJson,
                 ))
-                assertThat(pending.phase).isEqualTo(CausalMediaSettlementPhase.Pending)
+                // The journal is durably marked before sending. An auth error is
+                // not an authoritative causal rejection and cannot retire evidence.
+                assertThat(pending.phase).isEqualTo(CausalMediaSettlementPhase.CommitUnknown)
+                assertThat(pending.mutation).isEqualTo(attemptedMutations.first().single())
                 assertThat(pending.mutation.mutationId).isEqualTo(pendingRecord.mutationId)
+                val item = pending.manifest.items.single()
+                assertThat(item.mediaUuid).isEqualTo(seeded.mediaUuid)
+                assertThat(item.byteSize).isEqualTo(seeded.frozenBytes.size.toLong())
+                assertThat(item.sha256).isEqualTo(
+                    com.lezi.babylog.core.common.MediaContentDigest.ofBytes(seeded.frozenBytes),
+                )
+                assertThat(fixture.immutableMediaSpool.open(pending.mutation.mutationId, item)
+                    .openStream().use { it.readBytes() }).isEqualTo(seeded.frozenBytes)
                 assertThat(fixture.immutableMediaSpool.discardedMutationIds).isEmpty()
             }
         }

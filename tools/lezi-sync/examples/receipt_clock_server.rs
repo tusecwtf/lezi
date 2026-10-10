@@ -28,7 +28,10 @@ async fn main() {
         .expect("valid test port");
     let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     axum_server::bind_rustls(address, tls)
-        .serve(apps.public.into_make_service_with_connect_info::<SocketAddr>())
+        .serve(
+            apps.public
+                .into_make_service_with_connect_info::<SocketAddr>(),
+        )
         .await
         .expect("isolated HTTPS server");
 }

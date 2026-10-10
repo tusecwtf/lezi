@@ -111,7 +111,7 @@ class FamilyHttpDeadlineAcceptanceTest {
                 assertThat(failure).isInstanceOf(FamilyHttpException::class.java)
                 assertThat((failure as FamilyHttpException).kind).isEqualTo(FamilyHttpFailureKind.SyncTookTooLong)
             } else {
-                assertThat(failure).isSameInstanceAs(original)
+                assertOriginalIoFailurePreserved(failure, original)
             }
             assertThat(connection.disconnected.get()).isTrue()
         }
@@ -175,7 +175,7 @@ class FamilyHttpDeadlineAcceptanceTest {
                         else backend.getAppUpdateMetadata(directSession())
                     }
                 }.exceptionOrNull()
-                assertThat(actual).isSameInstanceAs(failure)
+                assertOriginalIoFailurePreserved(actual, failure)
                 assertThat(connection.disconnected.get()).isTrue()
             }
         }
@@ -899,4 +899,14 @@ private class JsonDeadlineConnection(
     fun sentBody(): String = requestBytes.toString(Charsets.UTF_8.name())
 
     override fun usingProxy(): Boolean = false
+}
+
+/** Coroutine stacktrace recovery may copy IOException while preserving its original cause. */
+private fun assertOriginalIoFailurePreserved(actual: Throwable?, original: java.io.IOException) {
+    val failure = requireNotNull(actual)
+    assertThat(failure.javaClass).isEqualTo(original.javaClass)
+    assertThat(failure.message).isEqualTo(original.message)
+    val causes = generateSequence(failure) { it.cause }.toList()
+    assertThat(causes.any { it === original }).isTrue()
+    assertThat(causes.any { it is FamilyHttpException || it is SyncRetryBudgetExceededException }).isFalse()
 }

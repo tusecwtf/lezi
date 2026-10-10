@@ -667,13 +667,31 @@ class RealSyncPortSessionLifecycleTest {
             serverHost = "192.168.1.20",
             serverPort = 8787,
         )
-        val rig = SyncRig(session = configured)
-        rig.awaitInitialReplicaBarrier()
+        val backend = RecordingSyncBackend()
+        val initialSyncStarted = CompletableDeferred<Unit>()
+        val initialSyncCancelled = CompletableDeferred<Unit>()
         val automaticSyncGate = CompletableDeferred<Unit>()
-        rig.backend.anonymousHealthGate = automaticSyncGate
-        rig.backend.createStarted = CompletableDeferred()
-        rig.backend.releaseCreate = CompletableDeferred()
-        rig.backend.nextPull = PullResult(
+        val rig = SyncRig(
+            session = configured,
+            syncBackend = object : SyncBackend by backend {
+                override suspend fun authenticatedHandshake(
+                    session: SyncSession,
+                ): com.lezi.babylog.sync.backend.AuthenticatedSyncHandshake {
+                    initialSyncStarted.complete(Unit)
+                    try {
+                        automaticSyncGate.await()
+                        return backend.authenticatedHandshake(session)
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        initialSyncCancelled.complete(Unit)
+                        throw cancelled
+                    }
+                }
+            },
+        )
+        rig.awaitInitialReplicaBarrier()
+        backend.createStarted = CompletableDeferred()
+        backend.releaseCreate = CompletableDeferred()
+        backend.nextPull = PullResult(
             entities = emptyList(),
             cursor = 7,
             generation = "current-generation",
@@ -687,8 +705,8 @@ class RealSyncPortSessionLifecycleTest {
                 familyName = "乐乐家",
             ).getOrThrow()
         }
-        rig.backend.createStarted!!.await()
-        val changingNetwork = async {
+        backend.createStarted!!.await()
+        val changingNetwork = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
             rig.port.saveEndpointConfig(
                 FamilyEndpointConfig(
                     host = "192.168.1.99",
@@ -696,20 +714,29 @@ class RealSyncPortSessionLifecycleTest {
                 ),
             ).exceptionOrNull()
         }
-        runCurrent()
+        try {
+            backend.releaseCreate!!.complete(Unit)
+            val created = creating.await()
+            val blocked = changingNetwork.await()
 
-        rig.backend.releaseCreate!!.complete(Unit)
-        val created = creating.await()
-        rig.foreground.setForeground(false)
-        automaticSyncGate.complete(Unit)
-        val blocked = changingNetwork.await()
+            // Initial sync actually enters authenticatedHandshake, not anonymousHealth.
+            // The create/network commands finish while that first sync is still parked.
+            initialSyncStarted.await()
+            assertThat(created.dataRecovery).isEqualTo(InitialFamilyDataRecovery.NotRequired)
+            assertThat(backend.pullCursors).isEmpty()
+            assertThat(blocked).isInstanceOf(DifferentFamilyServerException::class.java)
+            assertThat(rig.preferences.current().serverHost).isEqualTo("192.168.1.20")
+            assertThat(rig.preferences.current().isJoined).isTrue()
+            assertThat(rig.preferences.current().familyId).isEqualTo(created.sessionPresentation.familyId)
 
-        assertThat(created.dataRecovery).isEqualTo(InitialFamilyDataRecovery.NotRequired)
-        assertThat(rig.backend.pullCursors).isEmpty()
-        assertThat(blocked).isInstanceOf(DifferentFamilyServerException::class.java)
-        assertThat(rig.preferences.current().serverHost).isEqualTo("192.168.1.20")
-        assertThat(rig.preferences.current().isJoined).isTrue()
-        assertThat(rig.preferences.current().familyId).isEqualTo(created.sessionPresentation.familyId)
+            // Observe cancellation before releasing the gate; never race a new pull.
+            rig.foreground.setForeground(false)
+            initialSyncCancelled.await()
+            assertThat(backend.pullCursors).isEmpty()
+        } finally {
+            rig.foreground.setForeground(false)
+            automaticSyncGate.complete(Unit)
+        }
     }
 
     @Test

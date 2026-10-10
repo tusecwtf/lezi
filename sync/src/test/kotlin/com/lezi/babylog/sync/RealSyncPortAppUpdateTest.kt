@@ -399,18 +399,18 @@ class RealSyncPortAppUpdateTest {
             .isEqualTo(ForcedAppUpdateState.PackageUnknown)
 
         rig.preferences.clearDeviceCredentialsForReauth()
-        runCurrent()
+        // The session owner runs on real Dispatchers.IO. Await its publication event,
+        // not virtual time or an assumed IO scheduling speed. The enclosing runTest
+        // retains its ordinary whole-test liveness bound; this is not a latency SLO.
+        rig.port.status().first { it == SyncStatus.ReauthRequired }
         val result = rig.port.checkAppUpdate().getOrThrow()
 
         assertThat(result).isEqualTo(AppUpdateCheckResult.ForcedPackageUnknown)
         assertThat(rig.port.availableForcedAppUpdate().first())
             .isEqualTo(ForcedAppUpdateState.PackageUnknown)
         assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
-        assertThat(
-            withTimeout(1_000L) {
-                rig.port.status().first { it == SyncStatus.ReauthRequired }
-            },
-        ).isEqualTo(SyncStatus.ReauthRequired)
+        // Checking for an update must preserve the already-observed reauth phase.
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.ReauthRequired)
     }
 
     @Test
