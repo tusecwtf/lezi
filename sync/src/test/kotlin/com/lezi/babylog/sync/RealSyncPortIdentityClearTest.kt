@@ -37,7 +37,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
@@ -471,10 +470,11 @@ class RealSyncPortIdentityClearTest {
         )
         val rig = SyncRig(session = retained)
         rig.awaitStartupRecovery()
+        // Startup recovery and session observation are separate real-IO jobs.
+        // Await the published state itself; a runTest virtual timeout can expire
+        // before the session collector gets CPU. runTest bounds test liveness.
         assertThat(
-            withTimeout(2_000) {
-                rig.port.status().filter { it == SyncStatus.ReauthRequired }.first()
-            },
+            rig.port.status().first { it == SyncStatus.ReauthRequired },
         ).isEqualTo(SyncStatus.ReauthRequired)
         assertThat(rig.preferences.current().familyId).isEqualTo("family-a")
         assertThat(rig.preferences.current().pullCursor).isEqualTo(retained.pullCursor)
