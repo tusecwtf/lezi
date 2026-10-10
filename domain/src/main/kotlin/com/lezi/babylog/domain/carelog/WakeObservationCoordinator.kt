@@ -1,5 +1,9 @@
 package com.lezi.babylog.domain.carelog
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+import com.lezi.babylog.core.model.canEditWakeContent
 import com.lezi.babylog.core.common.MediaContentDigest
 import com.lezi.babylog.core.common.newClientUuid
 import com.lezi.babylog.core.database.DatabaseTransactionRunner
@@ -205,8 +209,8 @@ internal class WakeObservationCoordinator(
 
     /**
      * Observer withdraws own observation (`withdrawn=true`, root stays live).
-     * If this observation is the Sleep's effective selection, clear effective so
-     * projection re-enters explicit unconfirmed (provisional/open) state.
+     * Projection ignores a withdrawn effective selection. The observer must not
+     * publish a revision to the independently authored Sleep root.
      */
     suspend fun withdrawWake(clientUuid: String) {
         sleepMutationMutex.withLock {
@@ -223,21 +227,6 @@ internal class WakeObservationCoordinator(
                         syncDirty = true,
                     ),
                 )
-                val sleep = recordDao.getByClientUuid(existing.sleepRecordClientUuid)
-                if (
-                    sleep != null &&
-                    sleep.effectiveWakeObservationClientUuid == existing.clientUuid
-                ) {
-                    // Same local transaction: clear effective without requiring
-                    // author/Owner re-select when the chosen observation is withdrawn.
-                    recordDao.update(
-                        sleep.copy(
-                            effectiveWakeObservationClientUuid = null,
-                            updatedAt = nextSyncUpdatedAt(sleep.updatedAt, now),
-                            syncDirty = true,
-                        ),
-                    )
-                }
             }
         }
         requestLocalSync()
@@ -325,6 +314,8 @@ internal class WakeObservationCoordinator(
         clientUuid: String,
     ): Long {
         require(clientUuid.isNotBlank()) { "醒来观察标识不能为空" }
+        val photos = photoLocalPaths.map(String::trim).filter(String::isNotEmpty).distinct()
+        require(photos.size <= MAX_RECORD_PHOTOS) { "每条记录最多 $MAX_RECORD_PHOTOS 张照片" }
         val replay = wakeObservationDao.getByClientUuid(clientUuid)
         if (replay != null) {
             check(replay.deletedAt == null) { "这次醒来观察已删除，请重新填写" }
@@ -363,7 +354,7 @@ internal class WakeObservationCoordinator(
         val stored = wakeObservationDao.getByClientUuid(clientUuid)
             ?: error("WakeObservation missing after upsert")
         val localId = if (stored.id > 0L) stored.id else wakeId
-        reconcileWakePhotos(localId, photoLocalPaths, now, photoDigests)
+        reconcileWakePhotos(localId, photos, now, photoDigests)
         return localId
     }
 
@@ -422,26 +413,20 @@ internal class WakeObservationCoordinator(
     }
 
     private suspend fun requireObserverCanEdit(existing: WakeObservationEntity) {
-        val session = syncPort.session().first()
-        val actor = session.membershipId.trim()
-        val isOwner = session.role == FamilyRole.Owner
-        val isObserver = existing.observerMembershipId.isNotBlank() &&
-            existing.observerMembershipId == actor
-        // Offline / pre-join: empty observer stamp may edit own local dirty wake.
-        val localUnstamped = existing.observerMembershipId.isBlank() &&
-            actor.isEmpty() &&
-            existing.syncDirty
-        if (!isObserver && !isOwner && !localUnstamped) {
-            throw RecordPermissionException()
-        }
-        // Owner may not edit another member's observation content — only select effective.
-        if (isOwner && !isObserver && existing.observerMembershipId.isNotBlank()) {
+        val session = syncPort.sessionPresentation().first()
+        if (!canEditWakeContent(
+                observerMembershipId = existing.observerMembershipId,
+                actorMembershipId = session.membershipId,
+                actorIsOwner = session.role == FamilyRole.Owner,
+                syncDirty = existing.syncDirty,
+            )
+        ) {
             throw RecordPermissionException()
         }
     }
 
     private suspend fun requireSleepAuthorOrOwner(sleep: RecordEntity) {
-        val session = syncPort.session().first()
+        val session = syncPort.sessionPresentation().first()
         val actor = session.membershipId.trim()
         val isOwner = session.role == FamilyRole.Owner
         val isAuthor = sleep.createdByMembershipId.isNotBlank() &&
@@ -461,13 +446,18 @@ internal class WakeObservationCoordinator(
                 .filter { it.isNotBlank() }
         }
 
-    private fun digestReadablePhotoPaths(paths: Collection<String>): Map<String, String> {
-        val digests = linkedMapOf<String, String>()
-        paths.forEach { path ->
-            if (path in digests) return@forEach
-            MediaContentDigest.ofReadableFile(path)?.let { digests[path] = it }
+    private suspend fun digestReadablePhotoPaths(paths: Collection<String>): Map<String, String> {
+        // No filesystem operation means no dispatcher handoff. In particular, a
+        // note/time-only edit can commit before its guarded provider follow-up.
+        if (paths.isEmpty()) return emptyMap()
+        return withContext(Dispatchers.IO) {
+            val digests = linkedMapOf<String, String>()
+            paths.forEach { path ->
+                if (path in digests) return@forEach
+                MediaContentDigest.ofReadableFile(path)?.let { digests[path] = it }
+            }
+            digests
         }
-        return digests
     }
 
     private suspend fun reconcileWakePhotos(

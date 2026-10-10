@@ -1,4 +1,6 @@
 package com.lezi.babylog.domain.family
+
+// 192.168.77.10 is a synthetic RFC1918 LAN test endpoint, never a deployment default.
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.sync.CreateFamilyResult
 import com.lezi.babylog.sync.session.CertificateTrustCandidate

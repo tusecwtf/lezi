@@ -6,43 +6,39 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/lezi-package-app-update-test.XXXXXX")"
+# Explicit synthetic operator configuration; never inherit a real deployment target.
+export NAS_SSH=fixture@example.invalid NAS_SSH_PORT=10000
+export LEZI_DATA_HOST_PATH="${test_root}/nas-data"
+export LEZI_TLS_HOST=192.168.77.10 LEZI_LAN_HOST=192.168.77.10
 cleanup() {
   rm -rf -- "${test_root}"
 }
 trap cleanup EXIT HUP INT TERM
 
-ledger_values="$(python3 - "${REPO_ROOT}/config/local-data-contracts.json" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as source:
-    ledger = json.load(source)
-print(ledger["current_contract"])
+# A source checkout can legitimately be client-ahead of the channel package.
+# Resolve the APK identity and its contract from the published metadata/catalog,
+# not by equating Android upgrade_target and the server crate version.
+catalog_identity="$(python3 - "${REPO_ROOT}/config/android-release-compatibility.json" "${SCRIPT_DIR}/app-update.json" "${REPO_ROOT}/config/local-data-contracts.json" <<'PY2'
+import json, sys
+catalog, metadata, ledger = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:]]
+entries = [entry for entry in catalog["released_versions"] + [catalog["upgrade_target"]]
+           if (entry["version_code"], entry["version_name"]) == (metadata["version_code"], metadata["version_name"])]
+if len(entries) != 1:
+    raise SystemExit("channel identity has no unique release catalog entry")
+entry = entries[0]
+print(metadata["version_code"])
+print(metadata["version_name"])
+print(metadata["min_supported_version_code"])
+print(entry["local_data_contract"])
 print(ledger["minimum_migratable_contract"])
-PY
-)"
-current_local_data_contract="$(printf '%s\n' "${ledger_values}" | sed -n '1p')"
-minimum_local_data_contract="$(printf '%s\n' "${ledger_values}" | sed -n '2p')"
-expected_signer_sha256="$(tr -d '\r\n' <"${REPO_ROOT}/config/release-apk-signer-sha256.txt")"
-package_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "${REPO_ROOT}/tools/lezi-sync/Cargo.toml" | head -1)"
-catalog_identity="$(python3 - "${REPO_ROOT}/config/android-release-compatibility.json" <<'PY'
-import json
-import sys
-
-catalog = json.load(open(sys.argv[1], encoding="utf-8"))
-target = catalog["upgrade_target"]
-print(target["version_code"])
-print(target["version_name"])
-print(catalog["minimum_sync_version_code"])
-PY
+PY2
 )"
 target_version_code="$(printf '%s\n' "${catalog_identity}" | sed -n '1p')"
 target_version_name="$(printf '%s\n' "${catalog_identity}" | sed -n '2p')"
 target_min_supported="$(printf '%s\n' "${catalog_identity}" | sed -n '3p')"
-if [[ "${target_version_name}" != "${package_version}" ]]; then
-  echo "error: catalog upgrade_target version_name must match Cargo.toml ${package_version}" >&2
-  exit 1
-fi
+current_local_data_contract="$(printf '%s\n' "${catalog_identity}" | sed -n '4p')"
+minimum_local_data_contract="$(printf '%s\n' "${catalog_identity}" | sed -n '5p')"
+expected_signer_sha256="$(tr -d '\r\n' <"${REPO_ROOT}/config/release-apk-signer-sha256.txt")"
 
 apk_path="${test_root}/app-release.apk"
 printf 'lezi-fake-release-apk-bytes-for-gate-test\n' >"${apk_path}"
@@ -112,6 +108,7 @@ run_check() {
     LEZI_TEST_EXPECTED_SIGNER_SHA256="${expected_signer_sha256}" \
     LEZI_TEST_TARGET_VERSION_CODE="${target_version_code}" \
     LEZI_TEST_TARGET_VERSION_NAME="${target_version_name}" \
+  LEZI_SYNC_VERSION="${target_version_name}" \
   LEZI_PACKAGE_APP_UPDATE_CHECK_ONLY=1 \
     LEZI_APK_ANALYZER="${apk_analyzer}" \
     LEZI_APK_SIGNER="${LEZI_TEST_APK_SIGNER:-${apk_signer}}" \
@@ -255,4 +252,33 @@ if grep -Eqi 'docker save|saving image|package complete' "${ok_log}"; then
   exit 1
 fi
 
+# Exercise the same public gate in a separate source checkout representing the
+# legitimate frozen-wire split: Android 0.5.4/code34 and server 0.5.3, wire0.4,
+# floor21, contract6. No released metadata or production version is rewritten.
+if [[ "${LEZI_TEST_CLIENT_AHEAD_CHILD:-0}" != 1 ]]; then
+  fixture="${test_root}/client-ahead"
+  mkdir -p "${fixture}/tools/lezi-sync" "${fixture}/config"
+  cp -a "${SCRIPT_DIR}" "${fixture}/tools/lezi-sync/deploy"
+  cp "${REPO_ROOT}/config/android-release-compatibility.json" "${REPO_ROOT}/config/local-data-contracts.json" "${REPO_ROOT}/config/release-apk-signer-sha256.txt" "${fixture}/config/"
+  printf '[package]\nversion = "0.5.3"\n' >"${fixture}/tools/lezi-sync/Cargo.toml"
+  python3 - "${fixture}" <<'PY2'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+path = root / "config/android-release-compatibility.json"
+catalog = json.loads(path.read_text())
+entry = next(x for x in catalog["released_versions"] if x["version_name"] == "0.5.4")
+catalog["upgrade_target"] = entry
+catalog["released_versions"] = [x for x in catalog["released_versions"] if x["version_code"] < entry["version_code"]]
+catalog["minimum_sync_version_code"] = 21
+path.write_text(json.dumps(catalog))
+meta_path = root / "tools/lezi-sync/deploy/app-update.json"
+metadata = json.loads(meta_path.read_text())
+metadata.update(version_name="0.5.3", version_code=33, min_supported_version_code=21)
+meta_path.write_text(json.dumps(metadata))
+assert entry["local_data_contract"] == 6
+assert next(x for x in catalog["released_versions"] if x["version_name"] == "0.5.3")["local_data_contract"] == 6
+PY2
+  LEZI_TEST_CLIENT_AHEAD_CHILD=1 bash "${fixture}/tools/lezi-sync/deploy/test-package-nas-app-update.sh"
+  echo "frozen-wire client-ahead package smoke passed (Android 0.5.4, server/channel 0.5.3)"
+fi
 echo "package-nas app-update fail-closed smoke passed"

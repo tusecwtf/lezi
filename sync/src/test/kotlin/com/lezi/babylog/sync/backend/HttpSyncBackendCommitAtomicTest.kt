@@ -258,7 +258,46 @@ class HttpSyncBackendCommitAtomicTest {
     }
 
     @Test
-    fun causalCommitDecodesClosedTerminalEnvelopeBeforeHttpStatusRetryMapping() = runTest {
+    fun closedCommitUnauthorizedRefreshesAndReplaysTheUnchangedMutation() = runTest {
+        val server = ServerSocket(0, 3, InetAddress.getByName("127.0.0.1"))
+        val requests = mutableListOf<String>()
+        val responder = thread(name = "lezi-commit-refresh-test") {
+            repeat(3) { index ->
+                server.accept().use { socket ->
+                    requests += readRequest(socket)
+                    val body = when (index) {
+                        0 -> """{"status":"rejected","error":{"code":"unauthenticated","retryable":false}}"""
+                        1 -> """{"family_id":"family","membership_id":"membership","device_id":"device","role":"owner","access_token":"new-access","refresh_token":"new-refresh","access_expires_at":9999999999,"generation":"generation-a","family_name":"乐乐一家"}"""
+                        else -> """{"generation":"generation-a","results":[{"status":"accepted","mutation_id":"m1","request_hash":"${"a".repeat(64)}","replay":false,"stable":{"version_id":"v1","root":{},"media":[],"deleted":false,"deleted_at":null}}]}"""
+                    }.toByteArray(Charsets.UTF_8)
+                    val status = if (index == 0) "401 Unauthorized" else "200 OK"
+                    socket.getOutputStream().write(("HTTP/1.1 $status\r\nContent-Type: application/json\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n").toByteArray() + body)
+                }
+            }
+        }
+        try {
+            val session = testSession(server).copy(
+                membershipId = "membership", refreshToken = "old-refresh",
+                accessExpiresAtEpochSeconds = 9999999999,
+            )
+            val preferences = com.lezi.babylog.sync.MemorySyncPreferences(session)
+            val backend = RefreshingSyncBackend(loopbackBackend(), preferences,
+                object : com.lezi.babylog.sync.session.PolicyClock {
+                    override fun nowMillis() = 1_000L
+                })
+            val result = backend.causalCommit(session, listOf(causalMutation("m1")))
+            assertThat(result.results.single().stableVersionId).isEqualTo("v1")
+            assertThat(requests[0].substringAfter("\n\n"))
+                .isEqualTo(requests[2].substringAfter("\n\n"))
+            assertThat(requests[2]).contains("new-access")
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun causalCommitPreservesUnauthorizedStatusForCredentialRefresh() = runTest {
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
         val responder = thread(name = "lezi-causal-commit-auth-terminal-test-server") {
             server.accept().use { socket ->
@@ -275,10 +314,8 @@ class HttpSyncBackendCommitAtomicTest {
             val failure = runCatching {
                 loopbackBackend().causalCommit(testSession(server), listOf(causalMutation("m1")))
             }.exceptionOrNull()
-            assertThat(failure).isInstanceOf(CausalCommitRejectedException::class.java)
-            val rejected = failure as CausalCommitRejectedException
-            assertThat(rejected.code).isEqualTo("unauthenticated")
-            assertThat(rejected.mutationId).isNull()
+            assertThat(failure).isInstanceOf(SyncHttpException::class.java)
+            assertThat((failure as SyncHttpException).statusCode).isEqualTo(401)
         } finally {
             server.close()
             responder.join(2_000)

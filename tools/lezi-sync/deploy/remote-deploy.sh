@@ -11,11 +11,11 @@ cd "${DIR}"
 
 CONTAINER_NAME="${LEZI_CONTAINER_NAME:-lezi-sync}"
 COMPOSE_PROJECT="${LEZI_COMPOSE_PROJECT:-lezi}"
-ZDOCKER_COMPOSE="${ZDOCKER_COMPOSE:-/zspace/applications/services/zdocker/bin/docker-compose}"
+ZDOCKER_COMPOSE="${ZDOCKER_COMPOSE:-}"
 HEALTH_URL="${LEZI_HEALTH_URL:-https://127.0.0.1:8765/health}"
 READY_URL="${LEZI_READY_URL:-https://127.0.0.1:8765/ready}"
 EXPECTED_VERSION="${LEZI_SYNC_VERSION:-}"
-TLS_HOST="${LEZI_TLS_HOST:-192.168.77.4}"
+TLS_HOST="${LEZI_TLS_HOST:-}"
 LAN_APK_DOWNLOAD_ORIGIN="${LEZI_LAN_APK_DOWNLOAD_ORIGIN:-}"
 ALLOW_TLS_BOOTSTRAP="${LEZI_ALLOW_TLS_BOOTSTRAP:-0}"
 ALLOW_SECRET_RECOVERY="${LEZI_ALLOW_SECRET_RECOVERY:-0}"
@@ -479,99 +479,188 @@ else
 fi
 tls_certificate="${data_path}/tls/server.crt"
 
-# Self-hosted app update: copy release APK + metadata into the data bind mount
-# so lezi-sync can serve GET /v1/app-update and /v1/app-update/apk.
-#
-# Atomic pair publish: stage both files completely, then rename APK into place
-# before metadata. That way a running service never observes "new min_supported
-# + missing/old/broken APK" under the final paths (server also enforces the
-# version floor only on a verified channel).
+# Self-hosted app update publication is a recoverable two-file transaction.
+# APK precedes metadata, and the old container stays running until both files
+# and its download channel are verified. A durable private marker is created
+# before mutation. Never consume or overwrite an interrupted transaction: an
+# operator must inspect its snapshots before another deployment can proceed.
 if [[ ! -f "${DIR}/app-update/app-release.apk" || ! -f "${DIR}/app-update/app-update.json" ]]; then
   echo "error: package missing app-update/app-release.apk or app-update/app-update.json" >&2
-  echo "  repackage with package-nas.sh (fail-closed on release APK + metadata)" >&2
   exit 1
 fi
 
 # A running old server is the only endpoint that can prove the new APK before
-# the replacement activates its raised floor. Snapshot the currently served
-# pair first so any live-channel failure restores the prior floor and APK.
+# the replacement activates its raised floor. All writes use the runtime uid;
+# retrying a failed host rename through a different writer could hide a partial
+# publish, so there is one writer and one rollback path.
+app_update_transaction_token="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
 app_update_rollback_pending=0
-restore_app_update_pair() {
-  docker run --rm \
-    --user 10001:10001 \
-    -v "${data_path}:/data" \
-    --entrypoint /bin/sh \
-    "${image}" \
-    -ec 'test -f /data/app-release.apk.lezi-rollback && test -f /data/app-update.json.lezi-rollback && cp /data/app-release.apk.lezi-rollback /data/app-release.apk.lezi-staging && cp /data/app-update.json.lezi-rollback /data/app-update.json.lezi-staging && mv -f /data/app-release.apk.lezi-staging /data/app-release.apk && mv -f /data/app-update.json.lezi-staging /data/app-update.json && rm -f /data/app-release.apk.lezi-rollback /data/app-update.json.lezi-rollback'
-  app_update_rollback_pending=0
-}
-if [[ "${container_running}" == "1" ]]; then
-  docker run --rm \
-    --user 10001:10001 \
-    -v "${data_path}:/data" \
-    --entrypoint /bin/sh \
-    "${image}" \
-    -ec 'test -f /data/app-release.apk && test -f /data/app-update.json && rm -f /data/app-release.apk.lezi-rollback /data/app-update.json.lezi-rollback && cp /data/app-release.apk /data/app-release.apk.lezi-rollback && cp /data/app-update.json /data/app-update.json.lezi-rollback'
-  app_update_rollback_pending=1
-fi
-echo "==> install app-update artifacts into ${data_path} (atomic pair: APK then metadata)"
-# Data bind is often mode 700 uid 10001 (SSH user cannot write). Prefer direct
-# install; fall back to docker as uid 10001 with a bind of the package app-update/.
-app_update_apk_staging="${data_path}/app-release.apk.lezi-staging"
-app_update_meta_staging="${data_path}/app-update.json.lezi-staging"
-if mkdir -p "${data_path}" 2>/dev/null \
-  && install -m 644 "${DIR}/app-update/app-release.apk" "${app_update_apk_staging}" 2>/dev/null \
-  && install -m 644 "${DIR}/app-update/app-update.json" "${app_update_meta_staging}" 2>/dev/null \
-  && mv -f "${app_update_apk_staging}" "${data_path}/app-release.apk" \
-  && mv -f "${app_update_meta_staging}" "${data_path}/app-update.json"; then
-  if command -v chown >/dev/null 2>&1; then
-    chown 10001:10001 "${data_path}/app-update.json" "${data_path}/app-release.apk" 2>/dev/null || true
-  fi
-else
-  # Clean any partial direct staging before the docker fallback.
-  rm -f -- "${app_update_apk_staging}" "${app_update_meta_staging}" 2>/dev/null || true
-  echo "    direct install not writable; docker-copy as 10001:10001 (atomic pair)" >&2
+app_update_helper() {
   docker run --rm \
     --user 10001:10001 \
     -v "${data_path}:/data" \
     -v "${DIR}/app-update:/src:ro" \
     --entrypoint /bin/sh \
-    "${image}" \
-    -ec 'cp /src/app-release.apk /data/app-release.apk.lezi-staging && cp /src/app-update.json /data/app-update.json.lezi-staging && mv -f /data/app-release.apk.lezi-staging /data/app-release.apk && mv -f /data/app-update.json.lezi-staging /data/app-update.json && chmod 644 /data/app-update.json /data/app-release.apk'
-fi
-# Fail closed: final artifacts must exist under the bind (via docker stat as 10001),
-# and no staging leftovers may remain as the live names.
-docker run --rm \
-  --user 10001:10001 \
-  -v "${data_path}:/data:ro" \
-  --entrypoint /bin/sh \
-  "${image}" \
-  -ec 'test -f /data/app-update.json && test -f /data/app-release.apk && test ! -e /data/app-update.json.lezi-staging && test ! -e /data/app-release.apk.lezi-staging'
+    "${image}" -ec '
+      umask 077
+      # A lost Docker/SSH response does not prove its writer has stopped.
+      # Serialize each helper operation; a killed helper leaves a fail-closed
+      # lock rather than allowing rollback to race a still-running publication.
+      operation_lock=/data/.lezi-app-update-helper-lock
+      if ! mkdir -m 700 "$operation_lock"; then
+        echo "error: app-update helper active or interrupted; preserve evidence and refuse concurrent recovery" >&2
+        exit 1
+      fi
+      unlock_operation() {
+        status=$?
+        trap - EXIT
+        if ! rmdir "$operation_lock"; then status=1; fi
+        exit "$status"
+      }
+      trap unlock_operation EXIT
+      trap "exit 129" HUP
+      trap "exit 130" INT
+      trap "exit 143" TERM
+      tx=/data/.lezi-app-update-transaction
+      operation=$1
+      token=$2
+      running=$3
+      if [ "$operation" = acquire ]; then
+        for path in "$tx" /data/.lezi-schema-app-update-transaction /data/app-release.apk.lezi-rollback /data/app-update.json.lezi-rollback /data/app-release.apk.lezi-staging /data/app-update.json.lezi-staging; do
+          if [ -e "$path" ] || [ -L "$path" ]; then
+            echo "error: interrupted app-update publication; preserve snapshots and inspect before retrying" >&2
+            exit 1
+          fi
+        done
+        for name in app-release.apk app-update.json; do
+          test ! -L "/data/$name"
+          test ! -e "/data/$name" || test -f "/data/$name"
+        done
+        mkdir -m 700 "$tx"
+        printf "%s\n" "$token" >"$tx/owner"
+        sync -f "$tx/owner"
+        sync -f /data
+        exit 0
+      fi
+      if [ "$operation" = rollback ] && [ ! -e "$tx" ] && [ ! -L "$tx" ]; then exit 0; fi
+      test -d "$tx" && test ! -L "$tx"
+      test "$(cat "$tx/owner")" = "$token"
+      case "$operation" in
+        prepare)
+          if [ -f /data/app-release.apk ] && [ -f /data/app-update.json ]; then
+            cp /data/app-release.apk "$tx/old.apk"
+            cp /data/app-update.json "$tx/old.json"
+            cmp /data/app-release.apk "$tx/old.apk"
+            cmp /data/app-update.json "$tx/old.json"
+            sync -f "$tx/old.apk"
+            sync -f "$tx/old.json"
+            touch "$tx/had-pair"
+          else
+            test "$running" = 0
+            test ! -e /data/app-release.apk && test ! -e /data/app-update.json
+          fi
+          touch "$tx/prepared"
+          sync -f "$tx"
+          ;;
+        publish)
+          test -f "$tx/prepared"
+          cp /src/app-release.apk "$tx/new.apk"
+          cp /src/app-update.json "$tx/new.json"
+          chmod 644 "$tx/new.apk" "$tx/new.json"
+          cmp /src/app-release.apk "$tx/new.apk"
+          cmp /src/app-update.json "$tx/new.json"
+          sync -f "$tx/new.apk"
+          sync -f "$tx/new.json"
+          mv -f "$tx/new.apk" /data/app-release.apk
+          mv -f "$tx/new.json" /data/app-update.json
+          sync -f /data
+          ;;
+        verify)
+          test -f "$tx/prepared"
+          cmp /src/app-release.apk /data/app-release.apk
+          cmp /src/app-update.json /data/app-update.json
+          test ! -e "$tx/new.apk" && test ! -e "$tx/new.json"
+          ;;
+        rollback)
+          if [ -f "$tx/prepared" ]; then
+            if [ -f "$tx/had-pair" ]; then
+              cp "$tx/old.apk" "$tx/restore.apk"
+              cp "$tx/old.json" "$tx/restore.json"
+              chmod 644 "$tx/restore.apk" "$tx/restore.json"
+              mv -f "$tx/restore.apk" /data/app-release.apk
+              mv -f "$tx/restore.json" /data/app-update.json
+              cmp "$tx/old.apk" /data/app-release.apk
+              cmp "$tx/old.json" /data/app-update.json
+              sync -f /data/app-release.apk
+              sync -f /data/app-update.json
+            else
+              rm -f /data/app-release.apk /data/app-update.json
+            fi
+            sync -f /data
+          fi
+          ;;
+        commit)
+          test -f "$tx/prepared"
+          touch "$tx/published"
+          sync -f "$tx"
+          ;;
+        finish) test -f "$tx/published" ;;
+        *) exit 64 ;;
+      esac
+      if [ "$operation" = rollback ] || [ "$operation" = finish ]; then
+        # Only these invocation-owned files may be retired, after verification.
+        rm -f "$tx/new.apk" "$tx/new.json" "$tx/restore.apk" "$tx/restore.json" "$tx/old.apk" "$tx/old.json" "$tx/had-pair" "$tx/prepared" "$tx/published"
+        rm "$tx/owner"
+        rmdir "$tx"
+        sync -f /data
+      fi
+    ' lezi-app-update "$1" "${app_update_transaction_token}" "${container_running}"
+}
+restore_app_update_pair_on_exit() {
+  local status=$?
+  trap - EXIT
+  trap '' HUP INT TERM
+  if [[ "${app_update_rollback_pending}" == 1 ]]; then
+    if app_update_helper rollback; then
+      echo "==> prior app-update pair restored and verified; container not replaced" >&2
+    else
+      echo "error: app-update rollback failed; transaction evidence retained; replacement forbidden" >&2
+    fi
+    # An interrupted publication must never report success, even if rollback did.
+    [[ "${status}" != 0 ]] || status=1
+  fi
+  exit "${status}"
+}
+app_update_rollback_pending=1
+trap restore_app_update_pair_on_exit EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+app_update_helper acquire
+app_update_helper prepare
+echo "==> install app-update artifacts into ${data_path} (recoverable APK/metadata pair)"
+app_update_helper publish
+app_update_helper verify
 
-# The old container remains live until this point. Prove its anonymous LAN
-# install channel can actually serve the just-published APK before activating
-# the new server's forced-update floor and protocol capability.
+# Never stop the container before the pair and its live download are verified.
 if [[ "${container_running}" == "1" ]]; then
   expected_app_update_sha256="$(sha256sum "${DIR}/app-update/app-release.apk" | awk '{print $1}')"
   if ! served_app_update_sha256="$(curl -fsS --max-time 30 http://127.0.0.1:8767/download/lezi.apk | sha256sum | awk '{print $1}')"; then
-    restore_app_update_pair
-    echo "error: live LAN install channel could not serve the packaged APK; prior update pair restored" >&2
+    echo "error: live LAN install channel could not serve the packaged APK" >&2
     exit 1
   fi
   if [[ "${served_app_update_sha256}" != "${expected_app_update_sha256}" ]]; then
-    restore_app_update_pair
-    echo "error: live LAN install channel did not serve the packaged APK; prior update pair restored" >&2
+    echo "error: live LAN install channel did not serve the packaged APK" >&2
     exit 1
   fi
-  docker run --rm \
-    --user 10001:10001 \
-    -v "${data_path}:/data" \
-    --entrypoint /bin/sh \
-    "${image}" \
-    -ec 'rm -f /data/app-release.apk.lezi-rollback /data/app-update.json.lezi-rollback'
-  app_update_rollback_pending=0
   echo "==> live LAN install channel verified before protocol cutover: ${served_app_update_sha256}"
 fi
+# Commit the verified publication while retaining rollback evidence until the
+# entire replacement has succeeded. Even a lost helper response here can still
+# roll back; cleanup must not discard the only snapshot before this boundary.
+app_update_helper commit
+app_update_rollback_pending=0
+trap - EXIT HUP INT TERM
 
 echo "==> stop/remove existing container ${CONTAINER_NAME} (data bind kept)"
 if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
@@ -707,4 +796,7 @@ done <<<"${lezi_sync_ids_before}"
 
 
 docker ps --filter "name=^/${CONTAINER_NAME}$" --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+# Post-commit deployment failure leaves the published pair and private evidence
+# for explicit incident handling; never silently roll back protocol/floor state.
+app_update_helper finish
 echo "==> deploy ok"

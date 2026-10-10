@@ -1,7 +1,7 @@
 //! Member login request store contract tests.
 
 use super::super::*;
-use super::test_support::family;
+use super::test_support::{family, owner_principal};
 use tempfile::TempDir;
 
 #[test]
@@ -62,10 +62,12 @@ fn owner_request_list_keeps_unexpired_approved_requests_with_their_status() {
         .unwrap();
 
     store
-        .approve_new_member_login_request(&family_id, &request.request_id, 11)
+        .approve_new_member_login_request(&owner_principal(&family_id), &request.request_id, 11)
         .unwrap();
 
-    let visible = store.pending_member_login_requests(&family_id, 12).unwrap();
+    let visible = store
+        .pending_member_login_requests(&owner_principal(&family_id), 12)
+        .unwrap();
     assert_eq!(visible.len(), 1);
     assert_eq!(visible[0].request_id, request.request_id);
     assert_eq!(
@@ -74,10 +76,10 @@ fn owner_request_list_keeps_unexpired_approved_requests_with_their_status() {
     );
 
     store
-        .reject_member_login_request(&family_id, &request.request_id, 13)
+        .reject_member_login_request(&owner_principal(&family_id), &request.request_id, 13)
         .unwrap();
     assert!(store
-        .pending_member_login_requests(&family_id, 14)
+        .pending_member_login_requests(&owner_principal(&family_id), 14)
         .unwrap()
         .is_empty());
 
@@ -93,7 +95,7 @@ fn owner_request_list_keeps_unexpired_approved_requests_with_their_status() {
         })
         .unwrap();
     store
-        .approve_new_member_login_request(&family_id, &replacement.request_id, 16)
+        .approve_new_member_login_request(&owner_principal(&family_id), &replacement.request_id, 16)
         .unwrap();
 }
 
@@ -114,7 +116,7 @@ fn approved_unclaimed_requests_still_count_toward_the_open_request_limit() {
         })
         .unwrap();
     store
-        .approve_new_member_login_request(&family_id, &approved.request_id, 11)
+        .approve_new_member_login_request(&owner_principal(&family_id), &approved.request_id, 11)
         .unwrap();
 
     let error = store
@@ -130,3 +132,105 @@ fn approved_unclaimed_requests_still_count_toward_the_open_request_limit() {
         .unwrap_err();
     assert!(matches!(error, StoreError::MemberRequestLimit));
 }
+
+#[test]
+fn revoked_session_cannot_be_reinstalled_by_a_late_authentication_read() {
+    use std::sync::{Arc, Barrier};
+    for cached_hit in [false, true] {
+        let directory = TempDir::new().unwrap();
+        let store = Store::open(directory.path().join("lezi.db")).unwrap();
+        let issued = store
+            .create_family(
+                CreateFamilyInput {
+                    now: 100,
+                    create_request_id: "late-cache-insert-request-0000001",
+                    display_name: "Owner",
+                    display_name_key: "owner",
+                    family_name: "Test",
+                    device_name: "Test device",
+                    owner_root_fingerprint: None,
+                },
+                |_, _, _| {
+                    (
+                        "late-access-token".to_owned(),
+                        "late-refresh-token".to_owned(),
+                    )
+                },
+            )
+            .unwrap();
+        if cached_hit {
+            assert!(store
+                .authenticate("late-access-token", 100)
+                .unwrap()
+                .is_some());
+        }
+        let read = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        *store.auth_cache_read_hook.lock().unwrap() = Some(Arc::new({
+            let read = read.clone();
+            let resume = resume.clone();
+            move || {
+                read.wait();
+                resume.wait();
+            }
+        }));
+        let task = std::thread::spawn({
+            let store = store.clone();
+            move || store.authenticate("late-access-token", 161)
+        });
+        read.wait();
+        store
+            .revoke_family_device(
+                &Principal {
+                    family_id: issued.family_id.clone(),
+                    membership_id: issued.membership_id.clone(),
+                    device_id: issued.device_id.clone(),
+                    role: "owner".to_owned(),
+                },
+                &issued.device_id,
+                162,
+            )
+            .unwrap();
+        *store.auth_cache_read_hook.lock().unwrap() = None;
+        resume.wait();
+        let _ = task.join().unwrap().unwrap();
+        assert!(
+            store
+                .authenticate("late-access-token", 163)
+                .unwrap()
+                .is_none(),
+            "revocation must remain authoritative after the old read resumes"
+        );
+        let last_used: i64 = store
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT last_used_at FROM devices WHERE device_id = ?1",
+                [&issued.device_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            last_used, 162,
+            "old authentication cannot overwrite revocation activity"
+        );
+    }
+}
+
+#[test]
+fn unrelated_cache_invalidation_rechecks_instead_of_revoking_a_valid_token() {
+    use std::sync::Arc;
+    let directory = TempDir::new().unwrap();
+    let store = Store::open(directory.path().join("lezi.db")).unwrap();
+    family(&store);
+    *store.auth_cache_read_hook.lock().unwrap() = Some(Arc::new({
+        let store = store.clone();
+        move || {
+            *store.auth_cache_read_hook.lock().unwrap() = None;
+            store.invalidate_auth_cache();
+        }
+    }));
+    assert!(store.authenticate("owner-access", 2).unwrap().is_some());
+}
+
+mod auth_cache_barrier_tests;

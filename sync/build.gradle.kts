@@ -20,6 +20,12 @@ val latestReleasedVersionName = latestReleasedAndroidVersion["version_name"] as 
 val latestReleasedLocalDataContract =
     (latestReleasedAndroidVersion["local_data_contract"] as Number).toInt()
 
+// Slow platform I/O proofs are explicitly selected, never part of ordinary device suites.
+val manualAndroidTransport = providers.gradleProperty("leziAndroidTransport")
+    .map(String::toBoolean).getOrElse(false)
+val manualAndroidTransportAnnotation =
+    "com.lezi.babylog.sync.backend.transport.ManualAndroidTransport"
+
 android {
     namespace = "com.lezi.babylog.sync"
     compileSdk = 35
@@ -27,6 +33,11 @@ android {
     defaultConfig {
         minSdk = 26
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        if (manualAndroidTransport) {
+            testInstrumentationRunnerArguments["leziTransportManual"] = "true"
+        } else {
+            testInstrumentationRunnerArguments["notAnnotation"] = manualAndroidTransportAnnotation
+        }
         consumerProguardFiles("consumer-rules.pro")
         buildConfigField(
             "int",
@@ -60,6 +71,9 @@ android {
 
     sourceSets {
         getByName("test").resources.srcDir(rootProject.file("config"))
+        if (manualAndroidTransport) {
+            getByName("androidTest").assets.srcDir(layout.buildDirectory.dir("generated/androidTransportAssets"))
+        }
     }
 }
 
@@ -85,4 +99,51 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(testFixtures(project(":core:model")))
 
+}
+
+// Capacity proofs perform GiB of real filesystem I/O and need an exclusive validation window.
+// They must never silently run (or appear as skipped passes) in ordinary unit/aggregate suites.
+val publicRestoreCapacityTask = "publicRestoreCapacityTest"
+val manualRestoreCapacityCategory = "com.lezi.babylog.sync.ManualRestoreCapacity"
+tasks.withType<Test>().configureEach {
+    if (name != publicRestoreCapacityTask) {
+        useJUnit { excludeCategories(manualRestoreCapacityCategory) }
+        filter {
+            excludeTestsMatching("*RestoreFileSnapshotStoreCapacityTest")
+        }
+    }
+}
+
+tasks.register<Test>(publicRestoreCapacityTask) {
+    group = "verification"
+    description = "Manually prove the public 520 MiB JVM restore flow beside a full 512 MiB ordinary spool"
+    val debugUnitTests = tasks.named<Test>("testDebugUnitTest").get()
+    dependsOn("compileDebugUnitTestSources")
+    testClassesDirs = debugUnitTests.testClassesDirs
+    classpath = debugUnitTests.classpath
+    useJUnit { includeCategories(manualRestoreCapacityCategory) }
+    filter {
+        includeTestsMatching("com.lezi.babylog.sync.PublicRestoreCapacityTest")
+        isFailOnNoMatchingTests = true
+    }
+    maxParallelForks = 1
+    maxHeapSize = "512m"
+    systemProperty("lezi.publicRestoreCapacity", "true")
+    providers.gradleProperty("leziRestoreCapacityTmpDir").orNull?.let {
+        systemProperty("lezi.restoreCapacityTmpDir", it)
+    }
+    testLogging.showStandardStreams = true
+    doNotTrackState("A manual capacity proof must execute and emit fresh counters on every invocation")
+}
+
+// No checked-in private key, installed CA, hostname override, or production TLS change.
+if (manualAndroidTransport) {
+    val prepareAndroidTransportTls = tasks.register<Exec>("prepareAndroidTransportTls") {
+        commandLine("bash", rootProject.file("tools/testing/prepare-android-transport-tls.sh"))
+        outputs.file(layout.buildDirectory.file("generated/androidTransportAssets/transport-loopback.p12"))
+        outputs.upToDateWhen { false } // The certificate is deliberately short lived.
+    }
+    tasks.configureEach {
+        if (name == "mergeDebugAndroidTestAssets") dependsOn(prepareAndroidTransportTls)
+    }
 }

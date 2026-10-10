@@ -97,6 +97,9 @@ import com.lezi.babylog.domain.toModel
 
 // Split from CareLogTest kitchen sink by contract cluster (ticket 06).
 class CareLogRecordWriteTest {
+    @get:org.junit.Rule
+    val photoFiles = org.junit.rules.TemporaryFolder()
+
     @Test
     fun addRecordRejectsBabyDeletedAfterComposerOpened() = runTest {
         val fakes = Fakes()
@@ -1825,7 +1828,7 @@ class CareLogRecordWriteTest {
         val care = fakes.careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
         val now = 86_000_000L
-        val planPhotos = listOf("plans/bound-a.jpg", "plans/bound-b.jpg")
+        val planPhotos = listOf("bound-a.png", "bound-b.png").map(photoFiles::syntheticPhoto)
         val planId = care.createCarePlan(
             babyId = babyId,
             type = RecordType.NURSING,

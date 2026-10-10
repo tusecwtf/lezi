@@ -46,6 +46,8 @@ import com.lezi.babylog.feature.family.components.SecureWindowWhileVisible
 import com.lezi.babylog.feature.family.components.canConfirmFamilyDeletion
 import com.lezi.babylog.feature.family.components.familyDestructiveConfirmPresentation
 import com.lezi.babylog.sync.DeviceRemovedCleanupReceipt
+import com.lezi.babylog.sync.SourceCommandLogoutConsent
+import com.lezi.babylog.sync.SourceCommandLogoutState
 import com.lezi.babylog.sync.qr.MemberLoginQrCode
 import com.lezi.babylog.sync.qr.MemberLoginQrContentCodec
 import java.time.Instant
@@ -238,6 +240,7 @@ internal fun LeaveFamilyDialog(
 
 @Composable
 internal fun LogoutCurrentDeviceDialog(
+    sourcePreview: SourceCommandLogoutPreview,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
     busy: Boolean = false,
@@ -246,13 +249,14 @@ internal fun LogoutCurrentDeviceDialog(
     syncFeedback: String? = null,
     onSyncFirst: () -> Unit = {},
 ) {
-    val presentation = logoutDeviceConfirmPresentation(busy, pendingPublishCount)
+    val presentation = logoutDeviceConfirmPresentation(busy, pendingPublishCount, sourcePreview)
     val disclosure = pendingPublishCount?.let(::logoutPendingDisclosure)
     LeziAlertDialog(
         onDismissRequest = { if (presentation.dismissible) onDismiss() },
         title = { Text("退出这台设备？") },
         text = {
             Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
             ) {
                 Text(
@@ -266,6 +270,20 @@ internal fun LogoutCurrentDeviceDialog(
                         modifier = Modifier.semantics {
                             liveRegion = LiveRegionMode.Polite
                         },
+                    )
+                }
+                val sourceDisclosure = when (sourcePreview) {
+                    SourceCommandLogoutPreview.Checking -> "正在核对待确认的来源操作…"
+                    is SourceCommandLogoutPreview.Failed -> sourcePreview.message
+                    is SourceCommandLogoutPreview.Ready ->
+                        sourcePreview.consent?.let(::logoutSourceCommandDisclosure)
+                }
+                if (sourceDisclosure != null) {
+                    Text(
+                        sourceDisclosure,
+                        style = LeziTypography.BodyStrong,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                     )
                 }
                 if (syncFeedback != null) {
@@ -334,17 +352,51 @@ internal const val LOGOUT_SYNC_FIRST_FAILED =
 internal fun logoutDeviceConfirmPresentation(
     busy: Boolean,
     pendingPublishCount: Int?,
+    sourcePreview: SourceCommandLogoutPreview,
 ): FamilyDestructiveConfirmPresentation {
     val base = familyDestructiveConfirmPresentation(
         FamilyDestructiveAction.LogoutDevice,
         busy,
     )
+    if (busy) return base
+    when (sourcePreview) {
+        SourceCommandLogoutPreview.Checking -> return base.copy(label = "正在核对…", enabled = false)
+        is SourceCommandLogoutPreview.Failed -> return base.copy(enabled = false)
+        is SourceCommandLogoutPreview.Ready -> sourcePreview.consent?.let { consent ->
+            return base.copy(
+                label = when (consent.state) {
+                    SourceCommandLogoutState.Unknown -> "放弃核实并退出"
+                    SourceCommandLogoutState.ConfirmedRefreshRequired -> "放弃刷新并退出"
+                },
+            )
+        }
+    }
     val hasPendingDisclosure = pendingPublishCount != null && pendingPublishCount > 0
-    return if (hasPendingDisclosure && !busy) {
+    return if (hasPendingDisclosure) {
         base.copy(label = "仍然退出")
     } else {
         base
     }
+}
+
+/** Names only the frozen source preview; logout never claims to undo its server effects. */
+internal fun logoutSourceCommandDisclosure(consent: SourceCommandLogoutConsent): String {
+    val state = when (consent.state) {
+        SourceCommandLogoutState.Unknown -> "来源操作结果尚未确认"
+        SourceCommandLogoutState.ConfirmedRefreshRequired -> "来源操作已确认，仍需刷新本机"
+    }
+    val requests = if (consent.requestIds.isEmpty()) {
+        "请求：无法确认历史请求编号"
+    } else {
+        "请求（${consent.requestIds.size}）：\n${consent.requestIds.joinToString("\n")}"
+    }
+    val consequence = when (consent.state) {
+        SourceCommandLogoutState.Unknown ->
+            "退出会放弃上述来源操作的本机核实；不会撤销服务器上可能已经生效的操作。"
+        SourceCommandLogoutState.ConfirmedRefreshRequired ->
+            "退出会放弃上述来源操作的本机刷新；不会撤销服务器上已经生效的操作。"
+    }
+    return "$state\n服务器：${consent.serverOrigin ?: "未知的历史服务器"}\n$requests\n$consequence"
 }
 
 @Composable
@@ -375,15 +427,18 @@ internal fun DeviceRemovedReceiptDialog(
     )
 }
 
+// Cache the pattern without capturing the device's mutable locale or time zone.
 private val REMOVED_RECEIPT_DATE_TIME =
-    java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.getDefault())
-        .withZone(java.time.ZoneId.systemDefault())
+    java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.ROOT)
 
 /** One-time loss receipt: when this device was removed and what it cost locally. */
-internal fun deviceRemovedReceiptCopy(receipt: DeviceRemovedCleanupReceipt): String {
-    val removedAt = REMOVED_RECEIPT_DATE_TIME.format(
-        Instant.ofEpochMilli(receipt.removedAtEpochMillis),
-    )
+internal fun deviceRemovedReceiptCopy(
+    receipt: DeviceRemovedCleanupReceipt,
+    zoneId: java.time.ZoneId = java.time.ZoneId.systemDefault(),
+    locale: Locale = Locale.getDefault(),
+): String {
+    val removedAt = REMOVED_RECEIPT_DATE_TIME.withLocale(locale)
+        .withZone(zoneId).format(Instant.ofEpochMilli(receipt.removedAtEpochMillis))
     return "该设备于 $removedAt 被家庭管理员移除，已清理 ${receipt.clearedPendingCount} 条未同步内容。"
 }
 
@@ -526,3 +581,22 @@ internal fun DeleteFamilyDialog(
         },
     )
 }
+
+
+@Composable
+internal fun SourceCommandClearNoticeDialog(
+    notice: com.lezi.babylog.sync.sourcerelation.SourceCommandClearNotice,
+    onConfirm: () -> Unit,
+) {
+    LeziAlertDialog(onDismissRequest = onConfirm,
+        title = { Text("来源选择核对已结束") },
+        text = { Text(sourceCommandClearNoticeCopy(notice)) },
+        confirmButton = { com.lezi.babylog.designsystem.LeziTextButton(label = "我知道了", onClick = onConfirm) })
+}
+
+internal fun sourceCommandClearNoticeCopy(notice: com.lezi.babylog.sync.sourcerelation.SourceCommandClearNotice): String =
+    buildString {
+        if (notice.unknownCount > 0) append("有 ${notice.unknownCount} 项来源选择的服务器结果未确认。")
+        if (notice.confirmedCount > 0) append("有 ${notice.confirmedCount} 项选择已被服务器确认，但未完成本机核对。")
+        append("家庭访问结束后，本机核对状态已清除；服务器上的操作不会因此撤销。")
+    }

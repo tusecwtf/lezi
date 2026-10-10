@@ -11,8 +11,8 @@ if [[ -z "${version}" ]]; then
   version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "${SYNC_ROOT}/Cargo.toml" | head -1)"
 fi
 
-NAS_SSH="${NAS_SSH:-nas-account@192.168.77.4}"
-NAS_SSH_PORT="${NAS_SSH_PORT:-10000}"
+NAS_SSH="${NAS_SSH:?Set NAS_SSH to the explicitly approved user@NAS host}"
+NAS_SSH_PORT="${NAS_SSH_PORT:?Set NAS_SSH_PORT to the explicitly approved NAS port}"
 case "${NAS_SSH#*@}" in
   vps-host|192.0.2.36|203.0.113.10|192.0.2.97|192.0.2.105)
     echo "error: NAS scripts cannot target ${NAS_SSH}; the VPS CD line was removed 2026-09-06 and must not be recreated" >&2

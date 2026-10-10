@@ -218,7 +218,7 @@ class QuickRecordDraftSleepIntervalTest {
         assertEquals(42L, command.existingRecordId)
         assertEquals(open.timestamp, command.timestamp)
         assertEquals(tappedAt, command.endTimestamp)
-        assertEquals("""{"is_nap":true,"anomaly_flag":false}""", command.payloadJson)
+        assertEquals("""{"is_nap":true,"anomaly_flag":false}""", command.payloadJsonForTest)
         assertEquals(2, command.schemaVersion)
         assertEquals("午睡", command.note)
     }
@@ -243,7 +243,7 @@ class QuickRecordDraftSleepIntervalTest {
 
         assertEquals(
             """{"is_nap":false,"anomaly_flag":true}""",
-            command.payloadJson,
+            command.payloadJsonForTest,
         )
     }
 

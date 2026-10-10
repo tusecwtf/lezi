@@ -267,9 +267,9 @@ fn accepted_withdrawal(
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StoredResolutionReceipt {
+pub(super) struct StoredResolutionReceipt {
     request_hash: String,
-    result: ResolveConflictResult,
+    pub(super) result: ResolveConflictResult,
 }
 
 // Schema 13 choice-only resolution: `conflict_choices_json` stores exactly this
@@ -399,7 +399,7 @@ fn published_media_sha256(
     .ok_or(StoreError::InvalidStoredPayload)
 }
 
-fn project_lww_media_item(
+pub(super) fn project_lww_media_item(
     entity_type: &str,
     media_uuid: &str,
     value: &Value,
@@ -510,8 +510,13 @@ fn load_stable(
         )
         .optional()?;
     let Some(version_id) = head else {
-        // Fallback: entity projection without version head (pre-causal LWW row).
-        // Causal path treats absence of head as no stable version.
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM entities WHERE family_id=?1 AND entity_type=?2 AND client_uuid=?3)",
+            params![family_id, entity_type, client_uuid], |row| row.get(0),
+        )?;
+        if exists {
+            return Err(StoreError::InvalidStoredPayload);
+        }
         return Ok(None);
     };
     load_version(tx, database_path, family_id, &version_id)
@@ -530,7 +535,7 @@ fn load_version(
 }
 
 pub(super) fn load_validated_version(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     database_path: &Path,
     family_id: &str,
     version_id: &str,
@@ -1106,7 +1111,7 @@ fn upsert_entity_projection(
     Ok(())
 }
 
-fn insert_version(
+pub(super) fn insert_version(
     tx: &Transaction<'_>,
     family_id: &str,
     version_id: &str,
@@ -1175,7 +1180,7 @@ fn insert_version(
     Ok(())
 }
 
-fn set_stable_head(
+pub(super) fn set_stable_head(
     tx: &Transaction<'_>,
     family_id: &str,
     entity_type: &str,
@@ -1202,11 +1207,11 @@ fn project_stable_media(
     entity_type: &str,
     client_uuid: &str,
     media: &[CausalMediaItem],
+    prior: BTreeSet<String>,
     updated_at: i64,
     root_deleted: bool,
     tombstone_at: i64,
 ) -> Result<(), StoreError> {
-    let prior = load_live_associated_media_uuids(tx, family_id, entity_type, client_uuid)?;
     let keep: BTreeSet<String> = if root_deleted {
         BTreeSet::new()
     } else {
@@ -1355,37 +1360,6 @@ fn load_media_entity_row(
     }
 }
 
-fn load_live_associated_media_uuids(
-    tx: &Transaction<'_>,
-    family_id: &str,
-    entity_type: &str,
-    client_uuid: &str,
-) -> Result<BTreeSet<String>, StoreError> {
-    let (kind, field) = match entity_type {
-        "baby" => ("avatar", "baby_client_uuid"),
-        "record" => ("log", "record_client_uuid"),
-        "care_plan" => ("log", "care_plan_client_uuid"),
-        "wake_observation" => ("wake", "record_client_uuid"),
-        // custom_item and unknown roots never own media associations.
-        _ => return Ok(BTreeSet::new()),
-    };
-    let sql = format!(
-        "SELECT client_uuid FROM entities
-         WHERE family_id = ?1
-           AND entity_type = 'media'
-           AND deleted_at IS NULL
-           AND json_extract(payload_json, '$.kind') = ?2
-           AND json_extract(payload_json, '$.{field}') = ?3"
-    );
-    let mut statement = tx.prepare(&sql)?;
-    let rows = statement
-        .query_map(params![family_id, kind, client_uuid], |row| {
-            row.get::<_, String>(0)
-        })?
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    Ok(rows)
-}
-
 fn save_receipt(
     tx: &Transaction<'_>,
     family_id: &str,
@@ -1441,7 +1415,7 @@ fn save_receipt(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn save_version_provenance(
+pub(super) fn save_version_provenance(
     tx: &Transaction<'_>,
     family_id: &str,
     principal: &Principal,
@@ -1784,15 +1758,13 @@ fn stamp_root(
     if entity_type == "wake_observation" {
         let observer = previous
             .and_then(|p| p.get("observer_membership_id"))
-            .and_then(Value::as_str)
-            .map(|s| s.to_owned())
-            .unwrap_or_else(|| principal.membership_id.clone());
-        root.insert("observer_membership_id".to_owned(), Value::String(observer));
+            .cloned()
+            .unwrap_or_else(|| Value::String(principal.membership_id.clone()));
+        root.insert("observer_membership_id".to_owned(), observer);
     } else {
         let author = previous
             .and_then(|p| p.get("created_by_membership_id"))
             .cloned()
-            .filter(|v| !v.is_null())
             .unwrap_or_else(|| Value::String(principal.membership_id.clone()));
         root.insert("created_by_membership_id".to_owned(), author);
     }
@@ -2057,7 +2029,7 @@ fn claim_media_receipts(
     }
 }
 
-fn root_content_hash(
+pub(super) fn root_content_hash(
     root: &Map<String, Value>,
     media: &[CausalMediaItem],
     deleted: bool,
@@ -2717,6 +2689,12 @@ fn commit_accepted_new(
         &[],
         media,
     )?;
+    let prior_media = super::media_associations::live_ids_for_root(
+        ctx.tx,
+        &ctx.principal.family_id,
+        &mutation.entity_type,
+        &mutation.client_uuid,
+    )?;
     let rev = advance_rev(ctx.live_census_cache, ctx.tx, &ctx.principal.family_id)?;
     upsert_entity_projection(
         ctx.tx,
@@ -2735,6 +2713,7 @@ fn commit_accepted_new(
         &mutation.entity_type,
         &mutation.client_uuid,
         media,
+        prior_media,
         updated_at,
         mutation.deleted,
         deleted_at.unwrap_or_else(|| ctx.now.saturating_mul(1_000)),
@@ -2841,6 +2820,12 @@ fn commit_accepted_update(
         std::slice::from_ref(&stable.version_id),
         media,
     )?;
+    let prior_media = super::media_associations::live_ids_for_root(
+        ctx.tx,
+        &ctx.principal.family_id,
+        &mutation.entity_type,
+        &mutation.client_uuid,
+    )?;
     let rev = advance_rev(ctx.live_census_cache, ctx.tx, &ctx.principal.family_id)?;
     upsert_entity_projection(
         ctx.tx,
@@ -2859,6 +2844,7 @@ fn commit_accepted_update(
         &mutation.entity_type,
         &mutation.client_uuid,
         media,
+        prior_media,
         updated_at,
         mutation.deleted,
         deleted_at.unwrap_or_else(|| ctx.now.saturating_mul(1_000)),
@@ -2988,6 +2974,12 @@ fn commit_merged(
         &parents,
         &merged_media,
     )?;
+    let prior_media = super::media_associations::live_ids_for_root(
+        ctx.tx,
+        &ctx.principal.family_id,
+        &mutation.entity_type,
+        &mutation.client_uuid,
+    )?;
     let rev = advance_rev(ctx.live_census_cache, ctx.tx, &ctx.principal.family_id)?;
     upsert_entity_projection(
         ctx.tx,
@@ -3007,6 +2999,7 @@ fn commit_merged(
         &mutation.entity_type,
         &mutation.client_uuid,
         &projected_media,
+        prior_media,
         updated_at,
         merged_deleted,
         deleted_at.unwrap_or_else(|| ctx.now.saturating_mul(1_000)),
@@ -3199,6 +3192,7 @@ impl Store {
             tx_result.as_ref().ok().map(|tx| &**tx),
         )?;
         let tx = tx_result?;
+        require_current_principal(&tx, principal)?;
         let exact_replay = batch_is_exact_replay(&tx, principal, &units)?;
         if !exact_replay {
             let admission = self.causal_commit_limiter.check_and_record_in(
@@ -3485,6 +3479,7 @@ impl Store {
             tx_result.as_ref().ok().map(|tx| &**tx),
         )?;
         let tx = tx_result?;
+        require_current_principal(&tx, principal)?;
         let projection = match load_conflict_heads(
             &tx,
             &self.database_path,
@@ -3550,6 +3545,7 @@ impl Store {
             tx_result.as_ref().ok().map(|tx| &**tx),
         )?;
         let tx = tx_result?;
+        require_current_principal(&tx, principal)?;
         #[cfg(test)]
         super::conflict_snapshots::test_hook::resolution_entered(&principal.family_id);
         let request_hash = resolution_request_hash(&input)?;
@@ -3893,6 +3889,12 @@ impl Store {
             &version_id,
             now,
         )?;
+        let prior_media = super::media_associations::live_ids_for_root(
+            &tx,
+            &principal.family_id,
+            &entity_type,
+            &client_uuid,
+        )?;
         let rev = advance_rev(&self.live_census_cache, &tx, &principal.family_id)?;
         upsert_entity_projection(
             &tx,
@@ -3911,6 +3913,7 @@ impl Store {
             &entity_type,
             &client_uuid,
             &resolved_media,
+            prior_media,
             updated_at,
             resolved_deleted,
             deleted_at.unwrap_or_else(|| now.saturating_mul(1_000)),
@@ -4013,6 +4016,7 @@ impl Store {
         }
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        require_current_principal(&tx, principal)?;
         let metadata: Option<(String, String, String, String, String)> = tx
             .query_row(
                 "SELECT status, stable_version_id, entity_type, client_uuid, kind
@@ -4235,4 +4239,20 @@ impl<'de> serde::Deserialize<'de> for CausalUnitResult {
             reason: raw.reason,
         })
     }
+}
+
+/// An earlier HTTP authentication cannot authorize a write after identity removal wins the transaction.
+pub(super) fn require_current_principal(
+    tx: &Transaction<'_>,
+    principal: &Principal,
+) -> Result<(), StoreError> {
+    let membership: Option<String> = tx.query_row("SELECT role FROM memberships WHERE family_id=?1 AND membership_id=?2 AND left_at IS NULL",params![principal.family_id,principal.membership_id],|row|row.get(0)).optional()?;
+    if membership.as_deref() != Some(principal.role.as_str()) {
+        return Err(StoreError::MembershipDeleted);
+    }
+    let device: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM devices WHERE device_id=?1 AND membership_id=?2 AND status='active')",params![principal.device_id,principal.membership_id],|row|row.get(0))?;
+    if !device {
+        return Err(StoreError::DeviceRemoved);
+    }
+    Ok(())
 }

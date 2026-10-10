@@ -38,6 +38,99 @@ class TimelineWindowInvalidationDeviceTest {
     }
 
     @Test
+    fun modernClosedSleepHistoryDoesNotMaterializeOutsideTheRequestedWindow() = runBlocking {
+        val currentId = database.recordDao().upsert(
+            RecordEntity(clientUuid = "current-root", babyId = 1L, type = "formula", timestamp = 10_001L, updatedAt = 10_001L),
+        )
+        database.mediaAssetDao().upsert(
+            MediaAssetEntity(clientUuid = "current-photo", recordId = currentId, kind = "log",
+                localUri = "synthetic/current.jpg", createdAt = 10_001L, updatedAt = 10_001L),
+        )
+        var seeded = 0
+        for (count in listOf(10_000, 50_000)) {
+            database.withTransaction {
+                for (index in seeded until count) {
+                    val rootId = database.recordDao().upsert(
+                        RecordEntity(
+                            clientUuid = "history-sleep-$index", babyId = 1L, type = "sleep",
+                            timestamp = 1_000L, updatedAt = 1_000L,
+                            payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
+                        ),
+                    )
+                    database.mediaAssetDao().upsert(
+                        MediaAssetEntity(clientUuid = "history-root-photo-$index", recordId = rootId,
+                            kind = "log", localUri = "synthetic/root-$index.jpg", createdAt = 1_000L, updatedAt = 1_000L),
+                    )
+                    val wakeId = database.wakeObservationDao().upsert(
+                        WakeObservationEntity(
+                            clientUuid = "history-wake-$index",
+                            sleepRecordClientUuid = "history-sleep-$index",
+                            wakeTimestamp = 2_000L, updatedAt = 2_000L,
+                        ),
+                    )
+                    database.mediaAssetDao().upsert(
+                        MediaAssetEntity(
+                            clientUuid = "history-media-$index", wakeObservationId = wakeId,
+                            kind = "wake", localUri = "synthetic/$index.jpg",
+                            createdAt = 2_000L, updatedAt = 2_000L,
+                        ),
+                    )
+                }
+            }
+            seeded = count
+            val dao = database.timelineWindowDao()
+            // Resource contract: canonical projection must prune before loading entire graphs.
+            assertEquals(0, dao.listRecordRoots(1L, 20_000L, 30_000L).size)
+            assertEquals(0, dao.listWakeObservationRoots(1L, 20_000L, 30_000L).size)
+            assertEquals(0, dao.listActiveWakeMedia(1L, 20_000L, 30_000L).size)
+            assertEquals(0, dao.loadRecordProjection(1L, 20_000L, 30_000L).size)
+            assertEquals(1, dao.loadRecordProjectionForRoots(listOf("history-sleep-0")).size)
+            assertEquals(1, dao.listRecordRootsByClientUuids(listOf("history-sleep-0")).size)
+            // Count actual materialized root-photo candidates, not only SELECT statements.
+            // The old raw-null-end predicate returned count historical log photos here.
+            val emptyMediaCandidates = dao.listActiveLogMedia(1L, 20_000L, 30_000L, 20_000L, 30_000L, 20_000L, false)
+            val empty = dao.loadSnapshot(1L, 20_000L, 30_000L, 20_000L, 30_000L, 20_000L, false)
+            assertEquals(0, emptyMediaCandidates.size)
+            assertEquals(0, empty.records.size)
+            assertEquals(0, empty.media.size)
+            val currentMediaCandidates = dao.listActiveLogMedia(1L, 10_000L, 20_000L, 10_000L, 20_000L, 10_000L, false)
+            val current = dao.loadSnapshot(1L, 10_000L, 20_000L, 10_000L, 20_000L, 10_000L, false)
+            assertEquals(listOf("current-photo"), currentMediaCandidates.map { it.clientUuid })
+            assertEquals(listOf("current-root"), current.records.map { it.root.clientUuid })
+            assertEquals(listOf("current-photo"), current.media.map { it.clientUuid })
+            android.util.Log.i("TimelineWindowWork", "history=$count emptyLogMedia=${emptyMediaCandidates.size} currentLogMedia=${currentMediaCandidates.size} fullSnapshotMedia=${current.media.size}")
+        }
+    }
+
+    @Test
+    fun canonicalSourceTransitionInvalidatesAndJoinsOnlyTheRequestedRoots() = runBlocking {
+        val start = 1_700_000_000_000L
+        for ((uuid, at) in listOf("source" to start, "display" to start + 1, "outside" to start - 10_000)) {
+            database.recordDao().upsert(
+                RecordEntity(clientUuid = uuid, babyId = 1, type = "formula", timestamp = at, updatedAt = at),
+            )
+        }
+        val signals = Channel<Unit>(Channel.UNLIMITED)
+        val observation = launch(start = CoroutineStart.UNDISPATCHED) {
+            database.timelineWindowDao().observeInvalidations().collect { signals.send(Unit) }
+        }
+        withTimeout(2_000L) { signals.receive() }
+        database.sourceRelationDao().applyPullSummary(
+            relationId = "relation", recordClientUuid = "display", role = "display",
+            peerIds = listOf("source", "outside"), observedAt = start, autoAligned = true,
+        )
+        withTimeout(2_000L) { signals.receive() }
+        val snapshot = database.timelineWindowDao().loadSnapshot(
+            babyId = 1, recordStartInclusive = start, recordEndExclusive = start + 1_000,
+            planDayStart = start, planDayEnd = start + 1_000, nowMillis = start, includeOverdue = false,
+        )
+        assertEquals(setOf("source", "display"), snapshot.sourceRelations.map { it.recordClientUuid }.toSet())
+        assertEquals(true, snapshot.sourceRelations.single { it.recordClientUuid == "display" }.autoAligned)
+        assertEquals("source", snapshot.sourceRelations.single { it.recordClientUuid == "source" }.role)
+        observation.cancelAndJoin()
+    }
+
+    @Test
     fun fulfillmentCandidateMutationInvalidatesTheTimelineWindow() = runBlocking {
         val initialEmission = CompletableDeferred<Unit>()
         val emissions = async(start = CoroutineStart.UNDISPATCHED) {
@@ -411,7 +504,7 @@ class TimelineWindowInvalidationDeviceTest {
     }
 
     @Test
-    fun realRoomProjectionStaysThreeReadsAndSnapshotReadsSixIncludingTerminalReceiptJournal() =
+    fun realRoomProjectionStaysThreeReadsAndCompletedSnapshotReadsSeven() =
         runBlocking {
         val statements = Collections.synchronizedList(mutableListOf<String>())
         val directExecutor = Executor { command -> command.run() }
@@ -488,10 +581,10 @@ class TimelineWindowInvalidationDeviceTest {
                     )
                 }
 
-            // Sixth read is the terminal-receipt journal (listTerminalReceiptKeyAndEpochs).
-            assertEquals(6, snapshotCount(babyId = 1L, rootCount = 1))
-            assertEquals(6, snapshotCount(babyId = 2L, rootCount = 100))
-            assertEquals(6, snapshotCount(babyId = 3L, rootCount = 31 * 24))
+            // The sixth read is the receipt journal; the seventh reads bounded source-role/auto edges.
+            assertEquals(7, snapshotCount(babyId = 1L, rootCount = 1))
+            assertEquals(7, snapshotCount(babyId = 2L, rootCount = 100))
+            assertEquals(7, snapshotCount(babyId = 3L, rootCount = 31 * 24))
         } finally {
             counted.close()
         }

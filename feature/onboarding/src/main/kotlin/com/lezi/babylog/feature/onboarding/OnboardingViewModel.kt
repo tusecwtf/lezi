@@ -61,7 +61,7 @@ class OnboardingViewModel @Inject constructor(
             sync.memberLoginChecks().collect(familyWizard::observeMemberLoginCheck)
         }
         viewModelScope.launch {
-            combine(pendingMemberLogin, sync.session()) { pending, session -> pending to session }
+            combine(pendingMemberLogin, sync.sessionPresentation()) { pending, session -> pending to session }
                 .collect { (pending, session) ->
                     familyWizard.reconcilePendingMemberApproval(
                         FamilyWizardSnapshot.empty(FamilyWizardEntry.Onboarding).copy(

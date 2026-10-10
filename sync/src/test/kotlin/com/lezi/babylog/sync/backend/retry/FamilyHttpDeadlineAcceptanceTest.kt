@@ -29,6 +29,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.junit.Test
@@ -67,6 +68,296 @@ class FamilyHttpDeadlineAcceptanceTest {
         assertThat(ForegroundSyncCycle.MAX_ELAPSED_MILLIS).isEqualTo(120_000)
         assertThat(FamilyHttpOperation.DisasterRestore.budget.maxElapsedMillis).isEqualTo(120_000)
         assertThat(FamilyHttpOperation.DisasterRestore.budget.maxAttempts).isEqualTo(1)
+    }
+
+    @Test
+    fun ioFailureAtAnExpiredFamilyDeadlineUsesTheBudgetRatherThanUnreachable() = runBlocking {
+        for (operation in listOf("probe", "heartbeat", "metadata")) {
+            val clock = MutableElapsedClock(0)
+            val connection = JsonDeadlineConnection(
+                responseFailure = java.io.IOException("socket closed"),
+                onResponse = { clock.elapsedMillis = 8_001 },
+            )
+            val backend = familyHttpBackend(ArrayDeque(listOf(connection)), familyHttpClock = clock)
+            val failure = runCatching {
+                when (operation) {
+                    "probe" -> backend.anonymousHealth(TrustedEndpointProfile.systemPki(directSession().baseUrl))
+                    "heartbeat" -> backend.heartbeat(directSession())
+                    else -> backend.getAppUpdateMetadata(directSession())
+                }
+            }.exceptionOrNull()
+            assertThat(failure).isInstanceOf(FamilyHttpException::class.java)
+            assertThat((failure as FamilyHttpException).kind).isEqualTo(FamilyHttpFailureKind.ResponseTimedOut)
+            assertThat(connection.disconnected.get()).isTrue()
+        }
+    }
+
+    @Test
+    fun apkIoFailureUsesItsParentBudgetOnlyWhenThatBudgetIsExhausted() = runBlocking {
+        for (expired in listOf(false, true)) {
+            val clock = MutableElapsedClock(0)
+            val original = java.io.IOException("socket closed")
+            val connection = JsonDeadlineConnection(
+                responseFailure = original,
+                onResponse = { clock.elapsedMillis = if (expired) 8_001 else 7_999 },
+            )
+            val backend = familyHttpBackend(ArrayDeque(listOf(connection)), familyHttpClock = clock)
+            val failure = runCatching {
+                withContext(ElapsedBudgetContext(FamilyHttpFailureKind.SyncTookTooLong, 0, clock, 8_000)) {
+                    backend.downloadAppUpdateApk(directSession(), ByteArrayOutputStream())
+                }
+            }.exceptionOrNull()
+            if (expired) {
+                assertThat(failure).isInstanceOf(FamilyHttpException::class.java)
+                assertThat((failure as FamilyHttpException).kind).isEqualTo(FamilyHttpFailureKind.SyncTookTooLong)
+            } else {
+                assertOriginalIoFailurePreserved(failure, original)
+            }
+            assertThat(connection.disconnected.get()).isTrue()
+        }
+    }
+
+    @Test
+    fun ioFailureWithinTheFamilyDeadlineRetainsItsTransportClassification() = runBlocking {
+        for (operation in listOf("probe", "heartbeat", "metadata")) {
+            val clock = MutableElapsedClock(0)
+            val connection = JsonDeadlineConnection(
+                responseFailure = java.io.IOException("socket closed"),
+                onResponse = { clock.elapsedMillis = 7_999 },
+            )
+            val backend = familyHttpBackend(ArrayDeque(listOf(connection)), familyHttpClock = clock)
+            val failure = runCatching {
+                when (operation) {
+                    "probe" -> backend.anonymousHealth(TrustedEndpointProfile.systemPki(directSession().baseUrl))
+                    "heartbeat" -> backend.heartbeat(directSession())
+                    else -> backend.getAppUpdateMetadata(directSession())
+                }
+            }.exceptionOrNull()
+            assertThat(failure).isInstanceOf(FamilyHttpException::class.java)
+            assertThat((failure as FamilyHttpException).kind).isEqualTo(FamilyHttpFailureKind.Unreachable)
+            assertThat(connection.disconnected.get()).isTrue()
+        }
+    }
+
+    @Test
+    fun ioFailureAtTheRetryDeadlineKeepsTheRetryBudgetOwner() = runBlocking {
+        val clock = MutableElapsedClock(0)
+        val connection = JsonDeadlineConnection(
+            responseFailure = java.io.IOException("socket closed"),
+            onResponse = { clock.elapsedMillis = 30_001 },
+        )
+        val backend = familyHttpBackend(ArrayDeque(listOf(connection)), familyHttpClock = clock)
+        val failure = runCatching {
+            withContext(SyncRetryAttemptContext(SyncRetryOperation.Handshake, 0, clock)) {
+                backend.authenticatedHandshake(directSession())
+            }
+        }.exceptionOrNull()
+        assertThat(failure).isInstanceOf(SyncRetryBudgetExceededException::class.java)
+        assertThat(connection.disconnected.get()).isTrue()
+    }
+
+    @Test
+    fun trustFailuresTakePriorityOverAnExhaustedDeadline() = runBlocking {
+        for (failure in listOf(
+            javax.net.ssl.SSLException("synthetic TLS failure"),
+            java.io.IOException("synthetic certificate failure", java.security.cert.CertificateException("invalid")),
+        )) {
+            for (apk in listOf(false, true)) {
+                val clock = MutableElapsedClock(0)
+                val connection = JsonDeadlineConnection(
+                    responseFailure = failure,
+                    onResponse = { clock.elapsedMillis = 8_001 },
+                )
+                val backend = familyHttpBackend(ArrayDeque(listOf(connection)), familyHttpClock = clock)
+                val actual = runCatching {
+                    withContext(ElapsedBudgetContext(FamilyHttpFailureKind.SyncTookTooLong, 0, clock, 8_000)) {
+                        if (apk) backend.downloadAppUpdateApk(directSession(), ByteArrayOutputStream())
+                        else backend.getAppUpdateMetadata(directSession())
+                    }
+                }.exceptionOrNull()
+                assertOriginalIoFailurePreserved(actual, failure)
+                assertThat(connection.disconnected.get()).isTrue()
+            }
+        }
+    }
+
+    @Test
+    fun cancellationWinsOverExpiredBudgetAndIoOrTrustFailures() = runBlocking {
+        for (trustFailure in listOf(false, true)) {
+            val clock = MutableElapsedClock(0)
+            val requestJob = kotlinx.coroutines.Job()
+            val connection = JsonDeadlineConnection(
+                responseFailure = if (trustFailure) javax.net.ssl.SSLException("synthetic TLS failure")
+                    else java.io.IOException("socket closed"),
+                onResponse = {
+                    clock.elapsedMillis = 8_001
+                    requestJob.cancel()
+                },
+            )
+            val backend = familyHttpBackend(ArrayDeque(listOf(connection)), familyHttpClock = clock)
+            val failure = runCatching {
+                withContext(requestJob + ElapsedBudgetContext(FamilyHttpFailureKind.SyncTookTooLong, 0, clock, 8_000)) {
+                    backend.downloadAppUpdateApk(directSession(), ByteArrayOutputStream())
+                }
+            }.exceptionOrNull()
+            assertThat(failure).isInstanceOf(kotlinx.coroutines.CancellationException::class.java)
+            assertThat(connection.disconnected.get()).isTrue()
+        }
+    }
+
+    @Test
+    fun cancellationDisconnectsAnActivelyBlockedResponseBeforeItsTimeout() = runBlocking {
+        val reading = CountDownLatch(1)
+        val released = CountDownLatch(1)
+        val disconnected = AtomicBoolean(false)
+        val backend = HttpSyncBackend(
+            connectionFactory = SyncHttpConnectionFactory {
+                object : HttpURLConnection(URL("https://family.example.com/test")) {
+                    override fun connect() = Unit
+                    override fun usingProxy() = false
+                    override fun disconnect() { disconnected.set(true); released.countDown() }
+                    override fun getResponseCode(): Int {
+                        reading.countDown()
+                        released.await(3, TimeUnit.SECONDS)
+                        throw java.io.IOException("closed")
+                    }
+                }
+            },
+            nameResolver = FamilyHttpNameResolver { arrayOf(InetAddress.getLoopbackAddress()) },
+        )
+        val request = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).async {
+            backend.getAppUpdateMetadata(directSession())
+        }
+        try {
+            assertThat(reading.await(2, TimeUnit.SECONDS)).isTrue()
+            request.cancel()
+            assertThat(released.await(500, TimeUnit.MILLISECONDS)).isTrue()
+            assertThat(disconnected.get()).isTrue()
+            assertThat(runCatching { request.await() }.exceptionOrNull())
+                .isInstanceOf(kotlinx.coroutines.CancellationException::class.java)
+        } finally {
+            released.countDown()
+            request.cancel()
+        }
+    }
+
+    @Test
+    fun cancellingAnApkDownloadReleasesABlockedChunkWithoutWaitingForTheSocketTimeout() = runBlocking {
+        val reading = CountDownLatch(1)
+        val released = CountDownLatch(1)
+        val backend = HttpSyncBackend(
+            connectionFactory = SyncHttpConnectionFactory {
+                object : HttpURLConnection(URL("https://family.example.com/app.apk")) {
+                    override fun connect() = Unit
+                    override fun usingProxy() = false
+                    override fun disconnect() { released.countDown() }
+                    override fun getResponseCode() = 200
+                    override fun getContentLengthLong() = -1L
+                    override fun getInputStream(): InputStream = object : InputStream() {
+                        override fun read(): Int {
+                            reading.countDown()
+                            released.await(3, TimeUnit.SECONDS)
+                            throw java.io.IOException("closed chunk")
+                        }
+                    }
+                }
+            },
+        )
+        val request = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).async {
+            backend.downloadAppUpdateApk(directSession(), ByteArrayOutputStream())
+        }
+        try {
+            assertThat(reading.await(2, TimeUnit.SECONDS)).isTrue()
+            request.cancel()
+            assertThat(released.await(500, TimeUnit.MILLISECONDS)).isTrue()
+            assertThat(runCatching { request.await() }.exceptionOrNull())
+                .isInstanceOf(kotlinx.coroutines.CancellationException::class.java)
+        } finally {
+            released.countDown()
+            request.cancel()
+        }
+    }
+
+    @Test
+    fun successfulDnsConsumesTheSameDeadlineAsTheResponse() = runBlocking {
+        val clock = MutableElapsedClock(0)
+        val response = JsonDeadlineConnection(status = 201, body = ownerLoginBody(),
+            onResponse = { clock.elapsedMillis = 12_001 })
+        val backend = familyHttpBackend(ArrayDeque(listOf(response)),
+            nameResolver = FamilyHttpNameResolver {
+                clock.elapsedMillis = 2_900
+                arrayOf(InetAddress.getByName("127.0.0.1"))
+            }, familyHttpClock = clock)
+        val failure = runCatching { ownerLogin(backend) }.exceptionOrNull()
+        assertThat(failure).isInstanceOf(FamilyHttpException::class.java)
+        assertThat(response.readTimeout).isAtMost(9_100)
+    }
+
+    @Test
+    fun dnsConnectAndWriteEachConsumeTheSameAbsoluteResponseDeadline() = runBlocking {
+        val clock = MutableElapsedClock(0)
+        var timeoutAtResponse = 0
+        lateinit var response: JsonDeadlineConnection
+        response = JsonDeadlineConnection(
+            status = 201, body = ownerLoginBody(),
+            onConnect = { clock.elapsedMillis = 5_900 },
+            onWrite = { clock.elapsedMillis = 11_900 },
+            onResponse = { timeoutAtResponse = response.readTimeout },
+        )
+        val backend = familyHttpBackend(ArrayDeque(listOf(response)),
+            nameResolver = FamilyHttpNameResolver {
+                clock.elapsedMillis = 2_900
+                arrayOf(InetAddress.getLoopbackAddress())
+            }, familyHttpClock = clock)
+        assertThat(ownerLogin(backend).accessToken).isEqualTo("owner-access")
+        assertThat(timeoutAtResponse).isEqualTo(100)
+        assertThat(response.sentBody()).isNotEmpty()
+    }
+
+    @Test
+    fun lateConnectWriteAndBodySuccessAreRejectedAtTheirOwnPhaseBoundary() = runBlocking {
+        for (phase in listOf("connect", "write", "body")) {
+            val clock = MutableElapsedClock(0)
+            var responseReads = 0
+            val response = JsonDeadlineConnection(
+                status = 201, body = ownerLoginBody(),
+                onConnect = { if (phase == "connect") clock.elapsedMillis = 12_001 },
+                onWrite = { if (phase == "write") clock.elapsedMillis = 12_001 },
+                onBodyComplete = { if (phase == "body") clock.elapsedMillis = 12_001 },
+                onResponse = { responseReads++ },
+            )
+            val backend = familyHttpBackend(ArrayDeque(listOf(response)),
+                nameResolver = FamilyHttpNameResolver {
+                    clock.elapsedMillis = 2_900
+                    arrayOf(InetAddress.getLoopbackAddress())
+                }, familyHttpClock = clock)
+            val failure = runCatching { ownerLogin(backend) }.exceptionOrNull()
+            assertThat(failure).isInstanceOf(FamilyHttpException::class.java)
+            assertThat((failure as FamilyHttpException).kind).isEqualTo(FamilyHttpFailureKind.ResponseTimedOut)
+            assertThat(response.disconnected.get()).isTrue()
+            if (phase == "connect") assertThat(response.sentBody()).isEmpty()
+            if (phase != "body") assertThat(responseReads).isEqualTo(0)
+        }
+    }
+
+    @Test
+    fun connectionFactoryCannotRestartTheBudgetAlreadySpentAfterDns() = runBlocking {
+        val clock = MutableElapsedClock(0)
+        val response = JsonDeadlineConnection(status = 201, body = ownerLoginBody())
+        val backend = HttpSyncBackend(
+            connectionFactory = SyncHttpConnectionFactory {
+                clock.elapsedMillis = 12_001
+                response
+            },
+            nameResolver = FamilyHttpNameResolver {
+                clock.elapsedMillis = 2_900
+                arrayOf(InetAddress.getLoopbackAddress())
+            }, familyHttpClock = clock,
+        )
+        assertThat(runCatching { ownerLogin(backend) }.exceptionOrNull())
+            .isInstanceOf(FamilyHttpException::class.java)
+        assertThat(response.sentBody()).isEmpty()
+        assertThat(response.disconnected.get()).isTrue()
     }
 
     @Test
@@ -302,6 +593,92 @@ class FamilyHttpDeadlineAcceptanceTest {
     }
 
     @Test
+    fun receiptBackedSessionRetriesPreserveTheOriginalRequestIdentityAndContent() = runBlocking {
+        val endpoint = TrustedEndpointProfile.systemPki("https://family.example.com:8765")
+        val nonce = "original-request-00000000000000000001"
+        val secret = "original-secret-000000000000000000001"
+        val operations: List<suspend (HttpSyncBackend) -> Unit> = listOf(
+            { it.create(endpoint.origin, "Phone", "爸爸", nonce, "root", "Home") },
+            { it.ownerLogin(endpoint.origin, "Phone", nonce, "root", false) },
+            { it.ownerLogin(endpoint, "Phone", nonce, "root", true) },
+            { it.refresh(endpoint.origin, secret, nonce) },
+            { it.refresh(endpoint, secret, nonce) },
+            { it.claimMemberLogin(endpoint.origin, secret) },
+            { it.claimMemberLogin(endpoint, secret) },
+            { it.claimMemberLoginGrant(endpoint, secret, "Phone") },
+        )
+        for (operation in operations) {
+            val first = JsonDeadlineConnection(responseFailure = SocketTimeoutException("first response lost"))
+            val retry = JsonDeadlineConnection(responseFailure = SocketTimeoutException("retry response lost"))
+            val unused = JsonDeadlineConnection(body = "{}")
+            val backend = familyHttpBackend(ArrayDeque(listOf(first, retry, unused)))
+            assertThat(runCatching { operation(backend) }.exceptionOrNull())
+                .isInstanceOf(FamilyHttpException::class.java)
+            assertThat(first.opened.get()).isTrue()
+            assertThat(retry.opened.get()).isTrue()
+            assertThat(unused.opened.get()).isFalse()
+            assertThat(retry.sentBody()).isEqualTo(first.sentBody())
+            assertThat(retry.requestProperties).isEqualTo(first.requestProperties)
+        }
+    }
+
+    @Test
+    fun membershipWritesWithoutExactReceiptsNeverReplayALostResponse() = runBlocking {
+        val requestId = "request-00000000000000000000000001"
+        val operations: List<suspend (HttpSyncBackend) -> Unit> = listOf(
+            { it.createMemberLoginGrant(directSession(), TrustedEndpointProfile.systemPki(directSession().baseUrl), "member") },
+            { it.approveNewMemberLogin(directSession(), requestId) },
+            { it.bindExistingMemberLogin(directSession(), requestId, "member") },
+            { it.rejectMemberLogin(directSession(), requestId) },
+            { it.updateMyDisplayName(directSession(), "奶奶") },
+            { it.approveMemberRename(directSession(), requestId) },
+            { it.rejectMemberRename(directSession(), requestId) },
+            { it.cancelMyMemberRename(directSession()) },
+            { it.addFamilyMember(directSession(), "奶奶") },
+        )
+        for (operation in operations) {
+            val lost = JsonDeadlineConnection(responseFailure = SocketTimeoutException("committed response lost"))
+            val duplicate = JsonDeadlineConnection(body = "{}")
+            val backend = familyHttpBackend(ArrayDeque(listOf(lost, duplicate)))
+            assertThat(runCatching { operation(backend) }.exceptionOrNull())
+                .isInstanceOf(FamilyHttpException::class.java)
+            assertThat(lost.opened.get()).isTrue()
+            assertThat(duplicate.opened.get()).isFalse()
+        }
+    }
+
+    @Test
+    fun memberApplicationConnectFailureHasPositiveNotSentEvidence() = runBlocking {
+        val connection = JsonDeadlineConnection(connectFailure = SocketTimeoutException("connect failed"))
+        val backend = familyHttpBackend(ArrayDeque(listOf(connection)))
+        val failure = runCatching {
+            backend.requestMemberLogin("https://family.example.com", "爸爸", "Phone")
+        }.exceptionOrNull()
+        assertThat(failure).isInstanceOf(com.lezi.babylog.sync.backend.MemberLoginRequestNotSentException::class.java)
+        assertThat(connection.sentBody()).isEmpty()
+    }
+
+    @Test
+    fun memberRequestResponseLossDoesNotCreateASecondApplication() = runBlocking {
+        for (trustedOverload in listOf(false, true)) {
+            val committedButLost = JsonDeadlineConnection(
+                responseFailure = SocketTimeoutException("response lost after commit"),
+            )
+            val duplicate = JsonDeadlineConnection(status = 201, body = "{}")
+            val backend = familyHttpBackend(ArrayDeque(listOf(committedButLost, duplicate)))
+            val failure = runCatching {
+                if (trustedOverload) {
+                    backend.requestMemberLogin(TrustedEndpointProfile.systemPki("https://family.example.com"), "奶奶", "Phone")
+                } else {
+                    backend.requestMemberLogin("https://family.example.com", "奶奶", "Phone")
+                }
+            }.exceptionOrNull()
+            assertThat(failure).isInstanceOf(FamilyHttpException::class.java)
+            assertThat(duplicate.opened.get()).isFalse()
+        }
+    }
+
+    @Test
     fun addFamilyMemberDoesNotRetryAfterAConnectTimeout() = runBlocking {
         val first = JsonDeadlineConnection(
             connectFailure = SocketTimeoutException("connect timed out"),
@@ -437,19 +814,30 @@ private class JsonDeadlineConnection(
     private val connectFailure: Throwable? = null,
     private val writeBlocksUntilDisconnect: Boolean = false,
     private val slowResponseBytes: Boolean = false,
+    private val onResponse: () -> Unit = {},
+    private val onConnect: () -> Unit = {},
+    private val onWrite: () -> Unit = {},
+    private val onBodyComplete: () -> Unit = {},
 ) : HttpURLConnection(URL("https://family.example.com:8765/test")) {
     private val bytes = body.toByteArray(Charsets.UTF_8)
-    private val requestBytes = ByteArrayOutputStream()
+    private val requestBytes = object : ByteArrayOutputStream() {
+        override fun write(bytes: ByteArray, offset: Int, length: Int) {
+            onWrite()
+            super.write(bytes, offset, length)
+        }
+    }
     private val released = CountDownLatch(1)
     val opened = AtomicBoolean(false)
     val disconnected = AtomicBoolean(false)
     val writeReleasedByDisconnect = AtomicBoolean(false)
 
     override fun connect() {
+        onConnect()
         connectFailure?.let { throw it }
     }
 
     override fun getResponseCode(): Int {
+        onResponse()
         connectFailure?.let { throw it }
         responseFailure?.let { throw it }
         if (slowResponseBytes) {
@@ -476,7 +864,12 @@ private class JsonDeadlineConnection(
                 }
             }
         }
-        return ByteArrayInputStream(bytes)
+        return object : ByteArrayInputStream(bytes) {
+            override fun close() {
+                onBodyComplete()
+                super.close()
+            }
+        }
     }
 
     override fun getErrorStream(): InputStream = ByteArrayInputStream(bytes)
@@ -503,5 +896,17 @@ private class JsonDeadlineConnection(
         released.countDown()
     }
 
+    fun sentBody(): String = requestBytes.toString(Charsets.UTF_8.name())
+
     override fun usingProxy(): Boolean = false
+}
+
+/** Coroutine stacktrace recovery may copy IOException while preserving its original cause. */
+private fun assertOriginalIoFailurePreserved(actual: Throwable?, original: java.io.IOException) {
+    val failure = requireNotNull(actual)
+    assertThat(failure.javaClass).isEqualTo(original.javaClass)
+    assertThat(failure.message).isEqualTo(original.message)
+    val causes = generateSequence(failure) { it.cause }.toList()
+    assertThat(causes.any { it === original }).isTrue()
+    assertThat(causes.any { it is FamilyHttpException || it is SyncRetryBudgetExceededException }).isFalse()
 }

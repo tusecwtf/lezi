@@ -122,8 +122,12 @@ pub(super) fn entity(
         payload: payload.as_object().unwrap().clone(),
     }
 }
+pub(super) fn test_owners() -> &'static Mutex<BTreeMap<String, Principal>> {
+    static OWNERS: OnceLock<Mutex<BTreeMap<String, Principal>>> = OnceLock::new();
+    OWNERS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
 pub(super) fn family(store: &Store) -> String {
-    store
+    let created = store
         .create_family(
             CreateFamilyInput {
                 now: 1,
@@ -136,16 +140,37 @@ pub(super) fn family(store: &Store) -> String {
             },
             |_, _, _| ("owner-access".to_owned(), "owner-refresh".to_owned()),
         )
+        .unwrap();
+    let principal = Principal {
+        family_id: created.family_id.clone(),
+        role: "owner".to_owned(),
+        membership_id: created.membership_id,
+        device_id: created.device_id,
+    };
+    test_owners()
+        .lock()
         .unwrap()
-        .family_id
+        .insert(created.family_id.clone(), principal);
+    created.family_id
 }
 pub(super) fn owner_principal(family_id: &str) -> Principal {
-    Principal {
-        family_id: family_id.to_owned(),
-        role: "owner".to_owned(),
-        membership_id: "m-owner".to_owned(),
-        device_id: "d-owner".to_owned(),
-    }
+    test_owners()
+        .lock()
+        .unwrap()
+        .get(family_id)
+        .cloned()
+        .unwrap_or_else(|| Principal {
+            family_id: family_id.to_owned(),
+            role: "owner".to_owned(),
+            membership_id: "m-owner".to_owned(),
+            device_id: "d-owner".to_owned(),
+        })
+}
+
+pub(super) fn register_test_principal(store: &Store, principal: &Principal) {
+    let connection = store.connect().unwrap();
+    connection.execute("INSERT OR IGNORE INTO memberships(membership_id,family_id,role,display_name,display_name_key) VALUES (?1,?2,?3,?1,?1)",rusqlite::params![principal.membership_id,principal.family_id,principal.role]).unwrap();
+    connection.execute("INSERT OR IGNORE INTO devices(device_id,membership_id,device_name,device_name_key,status,created_at,last_used_at) VALUES (?1,?2,?1,?1,'active',1,1)",rusqlite::params![principal.device_id,principal.membership_id]).unwrap();
 }
 pub(super) fn publish_bundle(
     store: &Store,
@@ -344,6 +369,8 @@ impl FulfillmentCandidateFixture {
             membership_id: "m-peer".to_owned(),
             device_id: "d-peer".to_owned(),
         };
+        register_test_principal(&store, &member);
+        register_test_principal(&store, &peer);
         let baby_id = Uuid::new_v4();
         let plan_id = Uuid::new_v4();
         let other_plan_id = Uuid::new_v4();
@@ -479,4 +506,45 @@ impl FulfillmentCandidateFixture {
             .find(|entity| entity.client_uuid == self.candidate_id.to_string())
             .expect("candidate present")
     }
+}
+
+// Counts SQLite VM instructions across every connection opened by a measured
+// Store operation on this test thread. No timing claims use the probe: the
+// per-instruction callback intentionally adds measurement overhead.
+thread_local! {
+    static SQL_WORK_PROBE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+pub(in crate::store) fn install_sql_work_probe(connection: &rusqlite::Connection) {
+    if SQL_WORK_PROBE.with(|probe| probe.get().is_some()) {
+        connection.progress_handler(
+            1,
+            Some(|| {
+                SQL_WORK_PROBE.with(|probe| {
+                    if let Some(count) = probe.get() {
+                        probe.set(Some(count + 1));
+                    }
+                });
+                false
+            }),
+        );
+    }
+}
+
+pub(super) fn with_sql_work_probe<T>(work: impl FnOnce() -> T) -> (T, u64) {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            SQL_WORK_PROBE.with(|probe| probe.set(None));
+        }
+    }
+    SQL_WORK_PROBE.with(|probe| {
+        assert!(probe.get().is_none(), "nested SQLite work probe");
+        probe.set(Some(0));
+    });
+    let reset = Reset;
+    let value = work();
+    let count = SQL_WORK_PROBE.with(|probe| probe.get().unwrap());
+    drop(reset);
+    (value, count)
 }

@@ -57,7 +57,7 @@ class ReplicaSyncEngineFamilyBlobBindEmptyPutTest {
         assertThat(uploads.single().first).isEqualTo(MEDIA_CLONE)
         assertThat(uploads.single().second.toList()).isEmpty()
         assertThat(fixture.rig.immutableMediaSpool.openCounts[committedMutation(fixture)])
-            .isNull()
+            .isEqualTo(1) // Canonical local materialization; the network body remains empty.
         val unit = fixture.rig.backend.causalCommittedUnits.single().single()
         assertThat(unit.media.single().mediaUuid).isEqualTo(MEDIA_CLONE)
         assertThat(unit.media.single().sha256).isEqualTo(KNOWN_BYTES_1234_SHA256)
@@ -80,8 +80,9 @@ class ReplicaSyncEngineFamilyBlobBindEmptyPutTest {
         assertThat(uploads).hasSize(1)
         assertThat(uploads.single().first).isEqualTo(MEDIA_FRESH)
         assertThat(uploads.single().second.toList()).isEqualTo(KNOWN_BYTES_1234.toList())
+        // One canonical local copy and one full-body PUT.
         assertThat(fixture.rig.immutableMediaSpool.openCounts[committedMutation(fixture)])
-            .isEqualTo(1)
+            .isEqualTo(2)
         assertThat(fixture.rig.records.getByClientUuid(fixture.recordUuid)?.syncDirty).isFalse()
     }
 
@@ -101,14 +102,14 @@ class ReplicaSyncEngineFamilyBlobBindEmptyPutTest {
         assertThat(fixture.rig.backend.causalMediaPreimageBytes[1].second)
             .isEqualTo(KNOWN_BYTES_1234)
         assertThat(fixture.rig.immutableMediaSpool.openCounts[committedMutation(fixture)])
-            .isEqualTo(1)
+            .isEqualTo(2) // Canonical local materialization plus the fallback full PUT.
         assertThat(fixture.rig.records.getByClientUuid(fixture.recordUuid)?.syncDirty).isFalse()
     }
 
     private fun committedMutation(fixture: MediaFixture): String =
         fixture.rig.backend.causalCommittedUnits.single().single().mutationId
 
-    private fun seedDirtyRecordMedia(
+    private suspend fun seedDirtyRecordMedia(
         recordUuid: String,
         mediaUuid: String,
         localUri: String,
@@ -137,6 +138,13 @@ class ReplicaSyncEngineFamilyBlobBindEmptyPutTest {
             ),
         )
         rig.mediaFiles.preparedUploadBytes[localUri] = KNOWN_BYTES_1234
+        if (remoteUriAlreadyPublished) {
+            // Reconstruct a current-format published source including its durable provenance.
+            rig.mediaFiles.preparePublishedUpload(localUri, com.lezi.babylog.sync.media.PublishedMediaIdentity(
+                KNOWN_BYTES_1234_SHA256, 4, "image/jpeg", null, null,
+            )).close()
+            rig.conflictDetails.putTransportJournal("canonical-media-bytes-v1:$mediaUuid", localUri, 100)
+        }
         rig.media.seed(
             MediaAssetEntity(
                 recordId = recordId,
@@ -172,6 +180,8 @@ class ReplicaSyncEngineFamilyBlobBindEmptyPutTest {
                 baseVersion = "v-plan",
             ),
         )
+        // The published donor must have the same four bytes as its persisted identity.
+        rig.mediaFiles.preparedUploadBytes["/private/plan-photo.jpg"] = KNOWN_BYTES_1234
         rig.media.seed(
             MediaAssetEntity(
                 carePlanId = planId,

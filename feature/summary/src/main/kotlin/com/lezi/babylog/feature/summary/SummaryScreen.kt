@@ -60,6 +60,7 @@ import androidx.compose.ui.unit.dp
 import android.graphics.Paint as AndroidPaint
 import android.graphics.Typeface
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
@@ -343,7 +344,7 @@ fun SummaryRoute(
     LaunchedEffect(anchorDate) {
         vm.setAnchorDate(anchorDate)
     }
-    val ui by vm.ui.collectAsStateWithLifecycle()
+    val ui by vm.ui.collectAsStateWithLifecycle(minActiveState = Lifecycle.State.RESUMED)
     val selectedRange by vm.selectedRange.collectAsStateWithLifecycle()
     val shallowSyncStatus by vm.shallowSyncStatus.collectAsStateWithLifecycle()
     val isRefreshing by vm.isRefreshing.collectAsStateWithLifecycle()
@@ -395,10 +396,6 @@ internal fun SummaryContent(
 ) {
     val density = LeziThemeExt.density
     val chartCardPad = PaddingValues(density.cardPad)
-    val t = ui.totals
-    val chartDates = List(ui.range.dayCount) { offset ->
-        ui.rangeStartDate.plusDays(offset.toLong())
-    }
     // Non-essential range swap: Base enter / Fast exit; reduce-motion → 0.
     val rangeEnterMs = leziMotionMillis(LeziMotion.Base)
     val rangeExitMs = leziMotionMillis(LeziMotion.Fast)
@@ -443,13 +440,20 @@ internal fun SummaryContent(
                 )
 
                 AnimatedContent(
-                    targetState = ui.range,
+                    targetState = ui,
+                    contentKey = { it.range },
                     transitionSpec = {
                         fadeIn(animationSpec = tween(durationMillis = rangeEnterMs)) togetherWith
                             fadeOut(animationSpec = tween(durationMillis = rangeExitMs))
                     },
                     label = "summary_range_content",
-                ) { range ->
+                ) { snapshot ->
+                    val ui = snapshot
+                    val range = ui.range
+                    val t = ui.totals
+                    val chartDates = List(range.dayCount) { offset ->
+                        ui.rangeStartDate.plusDays(offset.toLong())
+                    }
                     // Range body emits multiple siblings; keep a Column so they
                     // retain spacedBy layout once lifted out of the outer Column
                     // into AnimatedContent (which does not arrange multi-root content).

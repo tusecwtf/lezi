@@ -307,6 +307,56 @@ class ImmutableMediaSpoolTest {
         ).isTrue()
     }
 
+    @Test
+    fun retainedSoleCopyIsVerifiedAndAdoptedIntoNewMutationWithoutNormalization() = runTest {
+        val root = ownedDirectory()
+        val files = QueueSourceMediaFiles("content://sole" to byteArrayOf(8, 6, 4, 2))
+        val old = spool(root, files).freezeGroup(MUTATION_ONE, listOf(source(MEDIA_ONE, "content://sole")))
+        files.bytes.clear()
+        val item = old.items.single()
+        val current = source(MEDIA_ONE, "content://missing").copy(
+            publishedIdentity = PublishedMediaIdentity(item.sha256, item.byteSize, item.mime,
+                item.width?.toInt(), item.height?.toInt()),
+            retainedSource = RetainedMediaSpoolSource(old.mutationId, item),
+        )
+        val adopted = spool(root, files).freezeGroup(MUTATION_TWO, listOf(current))
+        assertThat(adopted.items.single()).isEqualTo(item)
+        assertThat(spool(root, files).open(MUTATION_TWO, adopted.items.single()).readAll())
+            .isEqualTo(byteArrayOf(8, 6, 4, 2))
+        assertThat(spool(root, files).recoverGroup(MUTATION_ONE)?.group).isEqualTo(old)
+        assertThat(files.opens["content://missing"]).isNull()
+    }
+
+    @Test
+    fun retainedSourceWithDifferentDigestOrMetadataCannotBecomeNewOwnership() = runTest {
+        for (changeMime in listOf(false, true)) {
+            val root = ownedDirectory()
+            val files = QueueSourceMediaFiles("content://sole" to byteArrayOf(8, 6, 4, 2))
+            val old = spool(root, files).freezeGroup(MUTATION_ONE, listOf(source(MEDIA_ONE, "content://sole")))
+            val item = old.items.single()
+            val source = source(MEDIA_ONE).copy(
+                publishedIdentity = PublishedMediaIdentity(
+                    if (changeMime) item.sha256 else "0".repeat(64), item.byteSize,
+                    if (changeMime) "different" else item.mime, item.width?.toInt(), item.height?.toInt()),
+                retainedSource = RetainedMediaSpoolSource(old.mutationId, item),
+            )
+            assertThat(runCatching { spool(root, files).freezeGroup(MUTATION_TWO, listOf(source)) }.isFailure).isTrue()
+            assertThat(spool(root, files).recoverGroup(MUTATION_ONE)?.group).isEqualTo(old)
+        }
+    }
+
+    @Test
+    fun existingOwnedGroupCannotBeReinterpretedWithDifferentCanonicalMetadata() = runTest {
+        val root = ownedDirectory()
+        val files = QueueSourceMediaFiles("content://sole" to byteArrayOf(8, 6, 4, 2))
+        val original = spool(root, files).freezeGroup(MUTATION_ONE, listOf(source(MEDIA_ONE, "content://sole")))
+        val item = original.items.single()
+        val changed = source(MEDIA_ONE).copy(publishedIdentity = PublishedMediaIdentity(
+            item.sha256, item.byteSize, "changed metadata", 2, 3))
+        assertThat(runCatching { spool(root, files).freezeGroup(MUTATION_ONE, listOf(changed)) }.isFailure).isTrue()
+        assertThat(spool(root, files).recoverGroup(MUTATION_ONE)?.group).isEqualTo(original)
+    }
+
     private fun ownedDirectory(): File =
         Files.createTempDirectory("immutable-media-spool-test-").toFile()
             .also(ownedDirectories::add)

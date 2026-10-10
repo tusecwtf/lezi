@@ -13,9 +13,9 @@ import com.lezi.babylog.sync.session.TrustedEndpointProfile
 import com.lezi.babylog.sync.session.matchesOrigin
 
 class ReauthRequiredException : IllegalStateException("登录已失效，请重新登录或申请")
-class RemoteDeviceRemovedException : IllegalStateException("这台设备已被移出家庭")
-class RemoteMembershipDeletedException : IllegalStateException("你的家庭成员身份已被删除")
-class RemoteFamilyDeletedException : IllegalStateException("这个家庭已被删除")
+class RemoteDeviceRemovedException(val actedFor: SyncSession? = null) : IllegalStateException("这台设备已被移出家庭")
+class RemoteMembershipDeletedException(val actedFor: SyncSession? = null) : IllegalStateException("你的家庭成员身份已被删除")
+class RemoteFamilyDeletedException(val actedFor: SyncSession? = null) : IllegalStateException("这个家庭已被删除")
 
 /**
  * Server rejected authoritative sync because the client is below minSupported
@@ -202,6 +202,11 @@ internal class RefreshingSyncBackend(
         request: SourceRelationResolveGroupRequest,
     ) = authenticated(session) { delegate.resolveSourceRelationGroup(it, request) }
 
+    override suspend fun readCurrentSourceRelations(
+        session: SyncSession,
+        request: CurrentSourceRelationsRequest,
+    ) = authenticated(session) { delegate.readCurrentSourceRelations(it, request) }
+
     private suspend fun <T> authenticated(
         requested: SyncSession,
         operation: suspend (SyncSession) -> T,
@@ -239,7 +244,7 @@ internal class RefreshingSyncBackend(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: SyncHttpException) {
-            failure.remoteTerminalRemovalOrNull()?.let { removal ->
+            failure.remoteTerminalRemovalOrNull(current)?.let { removal ->
                 if (!sameDevice(preferences.session.first(), requested)) {
                     throw IllegalStateException("过期会话的设备撤销已忽略")
                 }
@@ -248,21 +253,27 @@ internal class RefreshingSyncBackend(
             failure.clientUpdateRequiredOrNull()?.let { throw it }
             if (failure.statusCode != 401) throw failure
             current = sessionMutex.withLock {
-                refreshOrRequireReauth(currentCredentialsFor(requested), refreshEndpoint)
+                val stored = currentCredentialsFor(requested)
+                if (stored.reauthRequired) throw ReauthRequiredException()
+                // A different request may already have rotated the failed token.
+                if (!sameCredentials(stored, current) && stored.hasUsableAccess()) stored
+                else refreshOrRequireReauth(stored, refreshEndpoint)
             }
             try {
                 operation(current)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (retryFailure: SyncHttpException) {
-                retryFailure.remoteTerminalRemovalOrNull()?.let { removal ->
+                retryFailure.remoteTerminalRemovalOrNull(current)?.let { removal ->
                     if (!sameDevice(preferences.session.first(), requested)) {
                         throw IllegalStateException("过期会话的设备撤销已忽略")
                     }
                     throw removal
                 }
                 retryFailure.clientUpdateRequiredOrNull()?.let { throw it }
-                if (retryFailure.statusCode == 401) requireReauth(requested)
+                if (retryFailure.statusCode == 401) sessionMutex.withLock {
+                    requireReauth(current)
+                }
                 throw retryFailure
             }
         }
@@ -280,6 +291,11 @@ internal class RefreshingSyncBackend(
         if (stored.deviceId.isBlank() || requested.deviceId.isBlank()) return true
         return stored.familyId == requested.familyId && stored.deviceId == requested.deviceId
     }
+
+    private fun sameCredentials(stored: SyncSession, actedFor: SyncSession): Boolean =
+        sameDevice(stored, actedFor) &&
+            stored.accessToken == actedFor.accessToken &&
+            stored.refreshToken == actedFor.refreshToken
 
     private fun SyncSession.hasUsableAccess(): Boolean =
         accessToken.isNotBlank() && accessExpiresAtEpochSeconds > clock.nowMillis() / 1_000L
@@ -305,7 +321,7 @@ internal class RefreshingSyncBackend(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: SyncHttpException) {
-            failure.remoteTerminalRemovalOrNull()?.let { throw it }
+            failure.remoteTerminalRemovalOrNull(session)?.let { throw it }
             if (failure.statusCode == 401) requireReauth(session)
             throw failure
         }
@@ -320,31 +336,37 @@ internal class RefreshingSyncBackend(
         ) {
             requireReauth(session)
         }
-        return session.copy(
+        val rotated = session.copy(
             accessToken = refreshed.accessToken,
             refreshToken = refreshed.refreshToken,
             accessExpiresAtEpochSeconds = refreshed.accessExpiresAtEpochSeconds,
             reauthRequired = false,
             familyName = refreshed.familyName,
-        ).also { preferences.saveRefreshedSession(it) }
+        )
+        if (preferences.saveRefreshedSessionIfCurrent(session, rotated)) {
+            return currentCredentialsFor(session)
+        }
+        // A login, clear, or another credential owner won while HTTP was in flight.
+        // Never replay the old response over that winner.
+        return currentCredentialsFor(session).also {
+            check(!it.reauthRequired && it.hasUsableAccess()) { "刷新期间会话已变化，请重试" }
+        }
     }
 
     private suspend fun requireReauth(actedFor: SyncSession): Nothing {
-        val stored = preferences.session.first()
-        if (!sameDevice(stored, actedFor)) {
+        if (!preferences.clearDeviceCredentialsForReauthIfCurrent(actedFor)) {
             throw IllegalStateException("过期会话的失败已忽略")
         }
-        preferences.clearDeviceCredentialsForReauth()
         throw ReauthRequiredException()
     }
 }
 
-private fun SyncHttpException.remoteTerminalRemovalOrNull(): IllegalStateException? {
+private fun SyncHttpException.remoteTerminalRemovalOrNull(actedFor: SyncSession): IllegalStateException? {
     if (statusCode != 401) return null
     return when (syncHttpCodeOrNull(responseBody)) {
-        "device_removed" -> RemoteDeviceRemovedException()
-        "membership_deleted" -> RemoteMembershipDeletedException()
-        "family_deleted" -> RemoteFamilyDeletedException()
+        "device_removed" -> RemoteDeviceRemovedException(actedFor)
+        "membership_deleted" -> RemoteMembershipDeletedException(actedFor)
+        "family_deleted" -> RemoteFamilyDeletedException(actedFor)
         else -> null
     }
 }

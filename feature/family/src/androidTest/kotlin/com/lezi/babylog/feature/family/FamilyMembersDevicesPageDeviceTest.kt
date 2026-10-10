@@ -3,6 +3,7 @@ package com.lezi.babylog.feature.family
 import com.lezi.babylog.feature.family.members.RemoveMemberConfirmDialog
 
 import com.lezi.babylog.feature.family.members.LogoutCurrentDeviceDialog
+import com.lezi.babylog.feature.family.members.SourceCommandLogoutPreview
 import com.lezi.babylog.feature.family.members.DeviceRemovedReceiptDialog
 import com.lezi.babylog.sync.DeviceRemovedCleanupReceipt
 
@@ -256,7 +257,11 @@ class FamilyMembersDevicesPageDeviceTest {
     fun currentDeviceLogoutExplainsServerFirstFullLocalClear() {
         compose.setContent {
             LeziTheme {
-                LogoutCurrentDeviceDialog(onConfirm = {}, onDismiss = {})
+                LogoutCurrentDeviceDialog(
+                    sourcePreview = SourceCommandLogoutPreview.Ready(null),
+                    onConfirm = {},
+                    onDismiss = {},
+                )
             }
         }
 
@@ -279,6 +284,7 @@ class FamilyMembersDevicesPageDeviceTest {
             compose.setContent {
                 LeziTheme {
                     LogoutCurrentDeviceDialog(
+                        sourcePreview = SourceCommandLogoutPreview.Ready(null),
                         onConfirm = {},
                         onDismiss = {},
                         pendingPublishCount = 34,
@@ -308,6 +314,7 @@ class FamilyMembersDevicesPageDeviceTest {
         compose.setContent {
             LeziTheme {
                 LogoutCurrentDeviceDialog(
+                    sourcePreview = SourceCommandLogoutPreview.Ready(null),
                     onConfirm = {},
                     onDismiss = {},
                     pendingPublishCount = 0,

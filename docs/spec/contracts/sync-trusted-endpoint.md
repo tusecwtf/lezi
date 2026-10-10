@@ -8,7 +8,7 @@
 > （0.3.13 因果代见 ADR-0019/0020/0021）
 > UI/UX：[家庭服务器与身份 UI](../../design/2026-07-30-trusted-sync-onboarding-ui.md)
 
-> 当前 tree 是 **0.5.3**；协议代 / wire 身份仍是 **0.4.0**（code 21 / Room 28 / 契约 5）。
+> 当前发布身份以 [`platform.md`](../platform.md) 与兼容目录为准；协议代 / wire 身份仍是 **0.4.0**。不要把协议代的历史 Room/契约数字当当前本地数据版本。
 
 > 已按 [`causal-sync-wire.md`](./causal-sync-wire.md) 启用 `causal_sync_v2`
 > commit-first、完整 ConflictSnapshot 与 choice-only resolution。家庭 NAS 是否已到该代以 live health 为准。
@@ -466,3 +466,14 @@ Room dirty/发布回执或 media。
 - LocalWrite no-pull 快速路径已启用，且不推进 pull cursor。
 - 旧 `sync-home-lan` 合同已删除；不得据 git 历史中的旧文恢复旧 wire、配置或界面。
 - 生产只保留可信 HTTPS、每设备会话、成员申请/审批与单次成员登录授权；旧网络身份、邀请加入和长期家庭凭证不提供兼容旁路。
+
+### Optional media identity negotiation
+
+`causal_media_identity_v1` is additive setup-status/health metadata only. It is not part of the
+exact authenticated `causal_sync_v2` handshake set and does not change protocol 0.4.0, schema 13,
+or floor 21. A new client opts each pull page into `X-Lezi-Media-Identity: v1`; old clients receive
+the original response shape. See [causal wire §7.1](./causal-sync-wire.md#71-negotiated-media-byte-identity)
+for the separate four-key `media_identity`, byte budgets, legacy MIME preservation and evidence rules.
+A missing capability only blocks a media operation that actually lacks required identity; no-photo
+rounds continue. Missing or malformed proof from an advertised server is a protocol failure, not an
+upgrade prompt, and cannot advance local facts/cursor or discard dirty work.

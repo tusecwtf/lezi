@@ -1,4 +1,6 @@
 package com.lezi.babylog.sync.session
+
+// 192.168.77.10 is a synthetic RFC1918 LAN test endpoint, never a deployment default.
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit

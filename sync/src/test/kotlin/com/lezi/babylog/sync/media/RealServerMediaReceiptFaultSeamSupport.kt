@@ -34,7 +34,6 @@ import com.lezi.babylog.sync.session.SyncSession
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
-import org.junit.Assume.assumeTrue
 
 internal class RealServerMediaReceiptFaultFixture private constructor(
     val server: IsolatedLeziSyncServer,
@@ -88,7 +87,7 @@ internal class RealServerMediaReceiptFaultFixture private constructor(
 
     fun commitForwards(): Int = proxy.commitForwards.get() - baselineCommitForwards
 
-    fun newEngine() = ReplicaSyncEngine(
+    fun newEngine(backend: com.lezi.babylog.sync.backend.SyncBackend = this.backend) = ReplicaSyncEngine(
         backend = backend,
         preferences = preferences,
         recordDao = records,
@@ -114,6 +113,15 @@ internal class RealServerMediaReceiptFaultFixture private constructor(
         conflictSnapshotCacheDao = conflictDetails,
         sourceRelationDao = sourceRelations,
     )
+
+    /** Independent local replica; shares only the real endpoint and authenticated identity. */
+    suspend fun freshReceiver(): RealServerMediaReceiptFaultFixture {
+        val freshSession = session.copy(pullCursor = 0)
+        val freshPreferences = MemorySyncPreferences(freshSession)
+        freshPreferences.rememberEndpoint(proxy.endpoint)
+        return RealServerMediaReceiptFaultFixture(server, proxy, backend, freshPreferences, freshSession)
+            .also { it.families.seed(FamilyEntity(ownerUserId = 1, createdAt = 0)) }
+    }
 
     data class SeededMedia(
         val recordUuid: String,
@@ -219,9 +227,9 @@ internal class RealServerMediaReceiptFaultFixture private constructor(
     }
 
     companion object {
-        suspend fun open(): RealServerMediaReceiptFaultFixture {
+        suspend fun open(controlledReceiptClock: Boolean = false): RealServerMediaReceiptFaultFixture {
             assumeToolsPresent()
-            val server = IsolatedLeziSyncServer.start()
+            val server = IsolatedLeziSyncServer.start(controlledReceiptClock)
             val proxy = try {
                 DeterministicHttpsFaultProxy.start(server)
             } catch (error: Throwable) {
@@ -235,7 +243,7 @@ internal class RealServerMediaReceiptFaultFixture private constructor(
                         url.openConnection() as HttpURLConnection
                     },
                     trustedEndpointResolver = TrustedEndpointResolver { endpoint },
-                    clientVersionCode = 21,
+                    clientVersionCode = 35,
                 )
                 val created = backend.create(
                     baseUrl = proxy.origin,
@@ -292,18 +300,9 @@ internal class RealServerMediaReceiptFaultFixture private constructor(
         }
 
         private fun assumeToolsPresent() {
-            assumeTrue(
-                "openssl required for isolated TLS fixture",
-                ProcessBuilder("openssl", "version").start().waitFor() == 0,
-            )
-            assumeTrue(
-                "curl required for isolated TLS readiness probe",
-                ProcessBuilder("curl", "--version").start().waitFor() == 0,
-            )
-            assumeTrue(
-                "sqlite3 required to inspect isolated data-root receipts",
-                runCatching { resolveSqlite3() }.isSuccess,
-            )
+            check(ProcessBuilder("openssl", "version").start().waitFor() == 0) { "openssl required" }
+            check(ProcessBuilder("curl", "--version").start().waitFor() == 0) { "curl required" }
+            resolveSqlite3()
         }
 
         private fun resolveSqlite3(): String {

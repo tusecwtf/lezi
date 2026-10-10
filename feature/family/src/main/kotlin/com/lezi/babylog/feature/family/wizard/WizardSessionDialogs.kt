@@ -459,13 +459,15 @@ internal fun MemberApprovalWaitingDialog(
 ) {
     LeziAlertDialog(
         onDismissRequest = { if (!busy) onKeepOffline() },
-        title = { Text("等待管理员确认") },
+        title = { Text(if (request.remoteOutcomeUnknown) "申请结果待确认" else "等待管理员确认") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
-                Text("已申请：${request.displayName}")
+                Text("家庭称呼：${request.displayName}")
                 Text("设备：${request.deviceName}")
                 Text(
-                    "申请将在 24 小时内失效。管理员下次前台打开 App 后可以批准或拒绝。",
+                    if (request.remoteOutcomeUnknown) {
+                        com.lezi.babylog.sync.MemberLoginOutcomeUnknownException(request).message.orEmpty()
+                    } else "申请将在 24 小时内失效。管理员下次前台打开 App 后可以批准或拒绝。",
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -481,7 +483,7 @@ internal fun MemberApprovalWaitingDialog(
                         cancelling -> "正在取消…"
                         busy -> "正在检查…"
                         else -> "检查结果"
-                    }, onClick = onCheck, enabled = !busy)
+                    }, onClick = onCheck, enabled = !busy && !request.remoteOutcomeUnknown)
         },
     )
 }

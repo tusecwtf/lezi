@@ -94,6 +94,9 @@ import com.lezi.babylog.domain.toModel
 
 // Split from CareLogTest kitchen sink by contract cluster (ticket 06).
 class CareLogMediaTest {
+    @get:org.junit.Rule
+    val photoFiles = org.junit.rules.TemporaryFolder()
+
     @Test
     fun carePlanPhotosCreateUpdateFulfillAndTombstoneKeepOwnership() = runTest {
         val sync = RecordingSyncPort()
@@ -636,7 +639,7 @@ class CareLogMediaTest {
         val care = fakes.careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
         val now = 80_000_000L
-        val planPhotos = listOf("plans/n1.jpg", "plans/n2.jpg", "plans/n3.jpg")
+        val planPhotos = listOf("n1.png", "n2.png", "n3.png").map(photoFiles::syntheticPhoto)
         val planId = care.createCarePlan(
             babyId = babyId,
             type = RecordType.NURSING,
@@ -689,7 +692,7 @@ class CareLogMediaTest {
         val care = fakes.careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
         val now = 81_000_000L
-        val planPhotos = listOf("plans/a.jpg", "plans/b.jpg")
+        val planPhotos = listOf("a.png", "b.png").map(photoFiles::syntheticPhoto)
         val planId = care.createCarePlan(
             babyId = babyId,
             type = RecordType.NURSING,
@@ -746,7 +749,7 @@ class CareLogMediaTest {
         val care = fakes.careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
         val now = 82_000_000L
-        val planPhotos = listOf("plans/x.jpg", "plans/y.jpg")
+        val planPhotos = listOf("x.png", "y.png").map(photoFiles::syntheticPhoto)
         val planId = care.createCarePlan(
             babyId = babyId,
             type = RecordType.NURSING,
@@ -894,23 +897,25 @@ class CareLogMediaTest {
         val care = fakes.careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
         val now = 84_000_000L
+        val oldPhotos = listOf("old-a.png", "old-b.png").map(photoFiles::syntheticPhoto)
+        val currentPhoto = photoFiles.syntheticPhoto("live-only.png")
         val planId = care.createCarePlan(
             babyId = babyId,
             type = RecordType.NURSING,
             scheduledAt = now + 60_000L,
             payloadJson =
                 """{"left_min":0,"right_min":0,"order":"LR","record_mode":"end"}""",
-            photoLocalPaths = listOf("plans/old-a.jpg", "plans/old-b.jpg"),
+            photoLocalPaths = oldPhotos,
             nowMillis = now,
         )
         // Simulate plan photos changing after timer started (no UI photo args on complete).
         care.updateCarePlan(
             carePlanId = planId,
             scheduledAt = now + 60_000L,
-            photoLocalPaths = listOf("plans/live-only.jpg"),
+            photoLocalPaths = listOf(currentPhoto),
             nowMillis = now + 1L,
         )
-        assertThat(care.listCarePlanPhotoPaths(planId)).containsExactly("plans/live-only.jpg")
+        assertThat(care.listCarePlanPhotoPaths(planId)).containsExactly(currentPhoto)
 
         val recordId = care.completeNursing(
             babyId = babyId,
@@ -923,8 +928,8 @@ class CareLogMediaTest {
             carePlanId = planId,
             nowMillis = now + 2L,
         )
-        assertThat(care.listRecordPhotoPaths(recordId)).containsExactly("plans/live-only.jpg")
-        assertThat(care.listCarePlanPhotoPaths(planId)).containsExactly("plans/live-only.jpg")
+        assertThat(care.listRecordPhotoPaths(recordId)).containsExactly(currentPhoto)
+        assertThat(care.listCarePlanPhotoPaths(planId)).containsExactly(currentPhoto)
     }
     @Test
     fun completeNursingClonedPlanPhotosKeepSharedPathWhileEitherOwnerActive() = runTest {
@@ -934,7 +939,7 @@ class CareLogMediaTest {
         val care = fakes.careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
         val now = 85_000_000L
-        val planPhotos = listOf("plans/share-a.jpg", "plans/share-b.jpg")
+        val planPhotos = listOf("share-a.png", "share-b.png").map(photoFiles::syntheticPhoto)
         val planId = care.createCarePlan(
             babyId = babyId,
             type = RecordType.NURSING,

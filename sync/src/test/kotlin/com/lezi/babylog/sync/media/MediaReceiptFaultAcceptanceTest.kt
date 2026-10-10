@@ -54,6 +54,9 @@ import org.junit.Test
  * ADB devices = 0.
  */
 class MediaReceiptFaultAcceptanceTest {
+    // Spool reads count both canonical local materialization and HTTP bodies; codec/source
+    // reads remain separately pinned to one per source in each case.
+
     @Test
     fun c1_lostPrepareResponse_retriesExactBytesWithoutUriReread() = runTest {
         val fixture = seedRecordMedia(
@@ -86,7 +89,7 @@ class MediaReceiptFaultAcceptanceTest {
         assertThat(rig.backend.causalMediaPreimageBytes.single().second).isEqualTo(frozenBytes)
         assertThat(rig.mediaFiles.prepareUploadCounts[localUri]).isEqualTo(1)
         val mutationId = pending.mutation.mutationId
-        assertThat(rig.immutableMediaSpool.openCounts[mutationId]).isEqualTo(1)
+        assertThat(rig.immutableMediaSpool.openCounts[mutationId]).isEqualTo(2)
 
         rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
@@ -99,7 +102,7 @@ class MediaReceiptFaultAcceptanceTest {
         assertThat(rig.backend.causalCommittedUnits.single().single().mutationId)
             .isEqualTo(mutationId)
         assertThat(rig.mediaFiles.prepareUploadCounts[localUri]).isEqualTo(1)
-        assertThat(rig.immutableMediaSpool.openCounts[mutationId]).isEqualTo(2)
+        assertThat(rig.immutableMediaSpool.openCounts[mutationId]).isEqualTo(3)
         assertThat(rig.immutableMediaSpool.discardedMutationIds).containsExactly(mutationId)
         assertThat(rig.conflictDetails.getFrozenMediaSpoolManifest(mutationId)).isNull()
         assertThat(rig.records.getByClientUuid("record-h38-lost-prepare")?.syncDirty).isFalse()
@@ -145,7 +148,7 @@ class MediaReceiptFaultAcceptanceTest {
         assertDurableBytes(rig, MEDIA_COMMIT to frozenBytes)
         assertThat(rig.backend.causalMediaPreimageBytes.single().second).isEqualTo(frozenBytes)
         assertThat(rig.mediaFiles.prepareUploadCounts[localUri]).isEqualTo(1)
-        assertThat(rig.immutableMediaSpool.openCounts[mutationId]).isEqualTo(1)
+        assertThat(rig.immutableMediaSpool.openCounts[mutationId]).isEqualTo(2)
         assertThat(rig.records.getByClientUuid("record-h38-lost-commit")?.mutationId)
             .isEqualTo(mutationId)
 
@@ -159,7 +162,7 @@ class MediaReceiptFaultAcceptanceTest {
         assertThat(rig.backend.causalMediaPreimageBytes).hasSize(1)
         assertThat(rig.backend.causalMediaPreimageBytes.single().second).isEqualTo(frozenBytes)
         assertThat(rig.mediaFiles.prepareUploadCounts[localUri]).isEqualTo(1)
-        assertThat(rig.immutableMediaSpool.openCounts[mutationId]).isEqualTo(1)
+        assertThat(rig.immutableMediaSpool.openCounts[mutationId]).isEqualTo(2)
         assertThat(rig.immutableMediaSpool.discardedMutationIds).containsExactly(mutationId)
         assertThat(rig.conflictDetails.getFrozenMediaSpoolManifest(mutationId)).isNull()
         assertThat(rig.records.getByClientUuid("record-h38-lost-commit")?.syncDirty).isFalse()
@@ -255,8 +258,8 @@ class MediaReceiptFaultAcceptanceTest {
             .isEqualTo(mutationId)
         assertThat(rig.mediaFiles.prepareUploadCounts[localUri]).isEqualTo(1)
         assertThat(rig.mediaFiles.prepareUploadCounts[secondUri]).isEqualTo(1)
-        // open: first + second attempt + second resume = 3; first receipt skips reopen.
-        assertThat(rig.immutableMediaSpool.openCounts[mutationId]).isEqualTo(3)
+        // Two canonical local copies plus three PUT attempts; the retained first receipt still skips re-upload.
+        assertThat(rig.immutableMediaSpool.openCounts[mutationId]).isEqualTo(5)
         assertThat(rig.immutableMediaSpool.discardedMutationIds).containsExactly(mutationId)
         assertThat(receiptHits.get()).isEqualTo(3)
     }
@@ -405,7 +408,10 @@ class MediaReceiptFaultAcceptanceTest {
         )
         assertThat(journal.phase).isEqualTo(CausalMediaSettlementPhase.CommitUnknown)
         assertThat(journal.receipts).hasSize(1)
-        assertThat(rig.backend.causalMediaPreimageBytes.single().second).isEqualTo(frozenBytes)
+        assertThat(rig.backend.causalMediaPreimageBytes.map { it.second.toList() })
+            .containsExactly(frozenBytes.toList(), frozenBytes.toList()).inOrder()
+        assertThat(rig.backend.causalCommittedUnits).hasSize(2)
+        assertThat(rig.backend.causalCommittedUnits[1]).isEqualTo(rig.backend.causalCommittedUnits[0])
         assertThat(rig.mediaFiles.prepareUploadCounts[localUri]).isEqualTo(1)
         assertThat(rig.immutableMediaSpool.discardedMutationIds).isEmpty()
         assertThat(rig.records.getByClientUuid("record-h38-expired-commit")?.syncDirty).isTrue()
@@ -413,9 +419,8 @@ class MediaReceiptFaultAcceptanceTest {
             rig.conflictDetails.getTerminalReceipt("record", "record-h38-expired-commit"),
         ).isNull()
 
-        // Expiry stays non-terminal: the next round still commits the same envelope
-        // (CommitUnknown replay). Production may skip a second PUT when a prepared
-        // receipt already exists; the occupancy lock is "not a terminal receipt".
+        // Repeated expiry exhausted one bounded restage, retaining CommitUnknown.
+        // The next round still replays the exact envelope before any further upload.
         rig.backend.nextCausalCommitFailure = null
         var replayed = false
         rig.backend.onCausalCommit = { units ->
@@ -548,7 +553,7 @@ class MediaReceiptFaultAcceptanceTest {
             assertDurableBytes(rig, mediaUuid to frozenBytes)
             assertThat(rig.backend.causalMediaPreimageBytes.single().second).isEqualTo(frozenBytes)
             assertThat(rig.mediaFiles.prepareUploadCounts[localUri]).isEqualTo(1)
-            assertThat(rig.immutableMediaSpool.openCounts[mutationId]).isEqualTo(1)
+            assertThat(rig.immutableMediaSpool.openCounts[mutationId]).isEqualTo(2)
             assertThat(rig.immutableMediaSpool.discardedMutationIds).containsExactly(mutationId)
             assertThat(rig.conflictDetails.getFrozenMediaSpoolManifest(mutationId)).isNull()
         }
@@ -745,7 +750,7 @@ class MediaReceiptFaultAcceptanceTest {
         assertThat(unit.media.single().mediaUuid).isEqualTo(mediaUuid)
         assertThat(rig.backend.causalMediaPreimageBytes).hasSize(1)
         assertThat(rig.mediaFiles.prepareUploadCounts[localUri]).isEqualTo(1)
-        assertThat(rig.immutableMediaSpool.openCounts[unit.mutationId]).isEqualTo(1)
+        assertThat(rig.immutableMediaSpool.openCounts[unit.mutationId]).isEqualTo(2)
         assertThat(rig.immutableMediaSpool.discardedMutationIds).containsExactly(unit.mutationId)
         // Stable pinned digest for the evidence table (bytes [0x38,0x09,0x45,0x56]).
         assertThat(digest).isEqualTo(sha256Hex(byteArrayOf(0x38.toByte(), 0x09, 0x45, 0x56)))

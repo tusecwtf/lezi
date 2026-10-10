@@ -1,7 +1,7 @@
 package com.lezi.babylog.designsystem
 
 import android.os.Build
-import android.view.HapticFeedbackConstants
+import androidx.core.view.HapticFeedbackConstantsCompat
 import android.view.View
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.compositionLocalOf
@@ -17,10 +17,11 @@ import androidx.compose.ui.platform.LocalView
  *   (record saved, delete executed, timer started/paused/completed, baby cycled).
  * - [Reject] — the requested action was refused.
  *
- * Both resolve to the platform outcome vocabulary ([HapticFeedbackConstants.CONFIRM] /
- * [HapticFeedbackConstants.REJECT], API 30+) because the Compose BOM only exposes
+ * Both resolve to the platform outcome vocabulary ([HapticFeedbackConstantsCompat.CONFIRM] /
+ * [HapticFeedbackConstantsCompat.REJECT], API 30+) because the Compose BOM only exposes
  * LongPress / TextHandleMove; below API 30 the Compose LongPress tier is the closest
- * settings-respecting fallback.
+ * settings-respecting fallback. Compat constants express the same platform values
+ * without requiring API 30 merely to select a value in this pure JVM-tested seam.
  */
 enum class LeziHapticTone { Confirm, Reject }
 
@@ -44,8 +45,8 @@ internal fun leziHapticChannel(
     if (sdkInt >= Build.VERSION_CODES.R) {
         LeziHapticChannel.Platform(
             when (tone) {
-                LeziHapticTone.Confirm -> HapticFeedbackConstants.CONFIRM
-                LeziHapticTone.Reject -> HapticFeedbackConstants.REJECT
+                LeziHapticTone.Confirm -> HapticFeedbackConstantsCompat.CONFIRM
+                LeziHapticTone.Reject -> HapticFeedbackConstantsCompat.REJECT
             },
         )
     } else {

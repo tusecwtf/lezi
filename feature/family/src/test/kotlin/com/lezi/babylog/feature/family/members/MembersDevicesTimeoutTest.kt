@@ -1,5 +1,7 @@
 package com.lezi.babylog.feature.family.members
 
+import kotlinx.coroutines.flow.map
+import com.lezi.babylog.sync.session.toPresentation
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.common.failure.FailureCategory
 import com.lezi.babylog.core.common.failure.failureExplanation
@@ -27,6 +29,7 @@ class MembersDevicesTimeoutTest {
         )
         val timedOut = FamilyHttpException(FamilyHttpFailureKind.AddressNotFound)
         val sync = object : SyncPort by NoOpSyncPort() {
+            override fun sessionPresentation() = session().map { it.toPresentation() }
             override fun session(): Flow<SyncSession> = flowOf(
                 SyncSession(
                     familyId = "family-a",

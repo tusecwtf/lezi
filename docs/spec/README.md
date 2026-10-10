@@ -61,3 +61,5 @@ Spec 驱动的规格集：**产品 → 平台 → 分层架构 → 各层规格�
   `product.md`、`platform.md` 与各 contracts 文头维护，引用处以"以
   `app/build.gradle.kts` + `config/android-release-compatibility.json` 为准"措辞，不重复
   硬编码。
+
+Release proof and blockers: [validation-gates.md](validation-gates.md).

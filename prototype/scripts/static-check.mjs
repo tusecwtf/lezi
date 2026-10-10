@@ -79,7 +79,9 @@ check("无禁用品牌字符串", !forbiddenBrand.test(allText));
 check("品牌名为乐记", /乐记/.test(html) && !/PiyoLog/.test(allText));
 check("便量 4 档", (html.match(/name="poop-only-amount"/g) || []).length === 4 && (html.match(/name="poop-amount"/g) || []).length === 4);
 check("稠度 4 档", ((html.match(/id="poop-only-texture"[\s\S]*?<\/select>/) || [""])[0].match(/<option/g) || []).length === 4);
-check("小便/洗澡一键路径", /type === "diaper"/.test(js) && /type === "bath"/.test(js) && /小便记录已保存/.test(js));
+// Retired historical one-click pee/bath assertion: docs/spec/product.md §1
+// requires every new record to be confirmed in a Composer before persistence.
+// The frozen visual demo is not a behavior contract or Android acceptance gate.
 check("日记与编辑字段", idSet.has("diary-dialog") && idSet.has("edit-type-fields") && /fillEditTypeFields/.test(js));
 check("无 TODO/FIXME 残留", !/\bTODO\b|\bFIXME\b/.test(`${html}\n${js}\n${css}`));
 

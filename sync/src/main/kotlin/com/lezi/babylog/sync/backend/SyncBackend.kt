@@ -9,6 +9,7 @@ import com.lezi.babylog.sync.conflict.FetchedConflictSnapshotPage
 import com.lezi.babylog.sync.media.SyncMediaUploadSource
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.CAPABILITY_CAUSAL_SYNC_V2
+import com.lezi.babylog.sync.session.CAPABILITY_NURSING_PLAN_INTENT_V1
 import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 
@@ -29,10 +30,20 @@ data class SyncEntity(
     /** Wire §12.3 optional source-relation summary on record roots. */
     val sourceRelationSummary: PullSourceRelationSummary? = null,
     /**
-     * Wire §7 causal-root `media[]` on the same pull entity. Independent media
-     * entities do not carry `sha256`; skip/reuse reads this list instead.
+     * Existing optional causal-root manifest. Kept for already trusted legacy
+     * pages; independent media use the separately negotiated [mediaIdentity].
      */
     val media: List<CausalMediaItem> = emptyList(),
+    /** Pull-only four-key byte identity, negotiated by X-Lezi-Media-Identity: v1. */
+    val mediaIdentity: PullMediaIdentity? = null,
+)
+
+/** Deliberately independent of canonical/conflict media metadata (legacy MIME can be null). */
+data class PullMediaIdentity(
+    val mediaUuid: String,
+    val role: String,
+    val sha256: String,
+    val byteSize: Long,
 )
 
 /** Wire §7 conflict_summary closed keys on ordinary pull entities. */
@@ -84,6 +95,8 @@ data class SourceRelationResult(
     val mediaRetained: Boolean? = null,
     val code: String? = null,
     val latestVersions: Map<String, String> = emptyMap(),
+    /** Local settlement projection; never part of the immutable mutation receipt wire body. */
+    val currentProjection: CurrentSourceRelationsSnapshot? = null,
 )
 
 /**
@@ -190,7 +203,7 @@ data class CausalMediaItem(
     val role: String,
     val sha256: String,
     val byteSize: Long,
-    val mime: String,
+    val mime: String?,
     val width: Long? = null,
     val height: Long? = null,
 )
@@ -540,6 +553,14 @@ data class DisasterRestoreMediaSpec(
     val sha256: String,
 )
 
+/** Closed membership and historical display intent, adopted by the restored Owner. */
+data class DisasterRestoreSourceRelation(
+    val relationId: String,
+    val displayClientUuid: String,
+    val sourceClientUuids: List<String>,
+    val autoAligned: Boolean,
+)
+
 data class DisasterRestoreStatus(
     val batchId: String,
     val status: String,
@@ -551,9 +572,10 @@ data class DisasterRestoreStatus(
 
 internal const val AUTHENTICATED_SYNC_PROTOCOL_VERSION = 1
 
-/** Complete 0.4.0 generation requested by every authenticated handshake. */
+/** Paired0.5.5 value-domain revision; SQL shape remains13. */
 internal val REQUIRED_CAUSAL_WIRE_CAPABILITIES = setOf(
     CAPABILITY_CAUSAL_SYNC_V2,
+    CAPABILITY_NURSING_PLAN_INTENT_V1,
 )
 
 data class SyncHandshakePrincipal(
@@ -650,6 +672,7 @@ interface SyncBackend {
         requestId: String,
         entities: List<SyncEntity>,
         media: List<DisasterRestoreMediaSpec>,
+        sourceRelations: List<DisasterRestoreSourceRelation>,
     ): DisasterRestoreStatus =
         throw UnsupportedOperationException("Disaster restore is not implemented")
 
@@ -884,6 +907,13 @@ interface SyncBackend {
         request: SourceRelationResolveGroupRequest,
     ): SourceRelationResult = throw UnsupportedOperationException("Source relation resolve-group is not implemented")
 
+    /** Authenticated read of complete current groups; does not advance ordinary pull. */
+    suspend fun readCurrentSourceRelations(
+        session: SyncSession,
+        request: CurrentSourceRelationsRequest,
+    ): CurrentSourceRelationsSnapshot =
+        throw UnsupportedOperationException("Current source relation projection is not supported")
+
     suspend fun memberDirectory(session: SyncSession): FamilyMemberDirectorySnapshot
     /** Owner updates immediately; ordinary Member receives a pending approval request. */
     suspend fun updateMyDisplayName(
@@ -987,3 +1017,8 @@ interface SyncBackend {
      */
     fun releaseForegroundKeepAliveToIdleTtl() = Unit
 }
+
+/** Positive transport evidence that no member application body was offered to the socket. */
+class MemberLoginRequestNotSentException(cause: Throwable) : java.io.IOException(
+    "加入申请尚未发送，可以重试", cause,
+)

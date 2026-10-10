@@ -2,6 +2,7 @@
 
 use super::super::*;
 use super::test_support::*;
+use crate::model::Entity;
 use serde_json::json;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -394,21 +395,39 @@ fn live_candidate_may_reference_tombstoned_record() {
     let fx = FulfillmentCandidateFixture::seed();
     fx.publish_first_accept();
 
-    let connection = rusqlite::Connection::open(fx._directory.path().join("lezi.db")).unwrap();
-    connection
-        .execute(
-            "INSERT INTO memberships(membership_id, family_id, role, display_name, display_name_key)
-             VALUES ('m-member', ?1, 'member', '成员', '成员')",
-            rusqlite::params![fx.family_id],
+    let connection = fx.store.connect().unwrap();
+    let payload:String=connection.query_row("SELECT payload_json FROM entities WHERE family_id=?1 AND entity_type='record' AND client_uuid=?2",rusqlite::params![fx.family_id,fx.record_id.to_string()],|r|r.get(0)).unwrap();
+    let dead = Entity {
+        entity_type: "record".to_owned(),
+        client_uuid: fx.record_id.to_string(),
+        updated_at: 80,
+        deleted_at: Some(80),
+        payload: serde_json::from_str(&payload).unwrap(),
+    };
+    let base:String=connection.query_row("SELECT version_id FROM entity_stable_heads WHERE family_id=?1 AND entity_type='record' AND client_uuid=?2",rusqlite::params![fx.family_id,fx.record_id.to_string()],|r|r.get(0)).unwrap();
+    let mut root = dead.payload;
+    root.insert("updated_at".to_owned(), serde_json::json!(dead.updated_at));
+    let result = fx
+        .store
+        .causal_commit(
+            &fx.owner,
+            vec![CausalMutation {
+                mutation_id: Uuid::new_v4().to_string(),
+                base_version: Some(base),
+                entity_type: "record".to_owned(),
+                client_uuid: fx.record_id.to_string(),
+                root,
+                media: vec![],
+                deleted: true,
+            }],
+            100,
         )
         .unwrap();
-    let updated = connection
-        .execute(
-            "UPDATE entities SET deleted_at = 80 WHERE entity_type = 'record' AND client_uuid = ?1",
-            rusqlite::params![fx.record_id.to_string()],
-        )
-        .unwrap();
-    assert_eq!(updated, 1);
+    assert_eq!(result.results[0].status, "accepted");
+    assert!(result.results[0].stable_deleted_at.is_some());
+    let tombstones:(Option<i64>,Option<i64>)=connection.query_row("SELECT e.deleted_at,v.deleted_at FROM entities e JOIN entity_stable_heads h ON h.family_id=e.family_id AND h.entity_type=e.entity_type AND h.client_uuid=e.client_uuid JOIN entity_versions v ON v.family_id=h.family_id AND v.version_id=h.version_id WHERE e.family_id=?1 AND e.entity_type='record' AND e.client_uuid=?2",rusqlite::params![fx.family_id,fx.record_id.to_string()],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert!(tombstones.0.is_some());
+    assert_eq!(tombstones.0, tombstones.1);
 
     fx.store
         .validate_authority_graph(10 * 1024 * 1024, |_, _, _| Ok(true))
@@ -439,14 +458,40 @@ fn completed_care_plan_may_reference_tombstoned_fulfilled_record() {
         10,
     )
     .unwrap();
-    let connection = rusqlite::Connection::open(fx._directory.path().join("lezi.db")).unwrap();
-    let updated = connection
-        .execute(
-            "UPDATE entities SET deleted_at = 80 WHERE entity_type = 'record' AND client_uuid = ?1",
-            rusqlite::params![fx.record_id.to_string()],
+    let connection = fx.store.connect().unwrap();
+    let payload:String=connection.query_row("SELECT payload_json FROM entities WHERE family_id=?1 AND entity_type='record' AND client_uuid=?2",rusqlite::params![fx.family_id,fx.record_id.to_string()],|r|r.get(0)).unwrap();
+    let dead = Entity {
+        entity_type: "record".to_owned(),
+        client_uuid: fx.record_id.to_string(),
+        updated_at: 80,
+        deleted_at: Some(80),
+        payload: serde_json::from_str(&payload).unwrap(),
+    };
+    let base:String=connection.query_row("SELECT version_id FROM entity_stable_heads WHERE family_id=?1 AND entity_type='record' AND client_uuid=?2",rusqlite::params![fx.family_id,fx.record_id.to_string()],|r|r.get(0)).unwrap();
+    let mut root = dead.payload;
+    root.insert("updated_at".to_owned(), serde_json::json!(dead.updated_at));
+    let result = fx
+        .store
+        .causal_commit(
+            &fx.owner,
+            vec![CausalMutation {
+                mutation_id: Uuid::new_v4().to_string(),
+                base_version: Some(base),
+                entity_type: "record".to_owned(),
+                client_uuid: fx.record_id.to_string(),
+                root,
+                media: vec![],
+                deleted: true,
+            }],
+            100,
         )
         .unwrap();
-    assert_eq!(updated, 1);
+    assert_eq!(result.results[0].status, "accepted");
+    assert!(result.results[0].stable_deleted_at.is_some());
+    let tombstones:(Option<i64>,Option<i64>)=connection.query_row("SELECT e.deleted_at,v.deleted_at FROM entities e JOIN entity_stable_heads h ON h.family_id=e.family_id AND h.entity_type=e.entity_type AND h.client_uuid=e.client_uuid JOIN entity_versions v ON v.family_id=h.family_id AND v.version_id=h.version_id WHERE e.family_id=?1 AND e.entity_type='record' AND e.client_uuid=?2",rusqlite::params![fx.family_id,fx.record_id.to_string()],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert!(tombstones.0.is_some());
+    assert_eq!(tombstones.0, tombstones.1);
+
     fx.store
         .validate_authority_graph(10 * 1024 * 1024, |_, _, _| Ok(true))
         .expect("tombstoned fulfillment must not fail-close family startup");

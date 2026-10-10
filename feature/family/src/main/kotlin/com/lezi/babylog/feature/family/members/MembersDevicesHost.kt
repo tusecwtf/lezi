@@ -15,6 +15,8 @@ import com.lezi.babylog.feature.family.components.validateFamilyNameInput
 import com.lezi.babylog.sync.backend.DisplayNameUpdateResult
 import com.lezi.babylog.sync.DeviceRemovedCleanupReceipt
 import com.lezi.babylog.sync.FamilyMember
+import com.lezi.babylog.sync.SourceCommandLogoutConsent
+import com.lezi.babylog.sync.SourceCommandLogoutConsentChangedException
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.qr.MemberLoginQrCode
 import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
@@ -24,6 +26,7 @@ import com.lezi.babylog.sync.SyncTrigger
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -61,6 +64,27 @@ data class MembersDevicesUi(
     val familyName: String? get() = identity.familyName
 }
 
+/** Retained command receipt. UI recreation observes the same target and terminal result. */
+data class FamilyMemberCommand(
+    val id: Long,
+    val target: String,
+    val pending: Boolean = true,
+    val success: Boolean = false,
+    val message: String = "",
+    val failureKind: FailureKind? = null,
+    /** Process-memory only; never persist the login grant in saved instance state. */
+    val qrCode: MemberLoginQrCode? = null,
+)
+
+/** Process-local confirmation state; a successful null preview proves no pending source work. */
+sealed interface SourceCommandLogoutPreview {
+    data object Checking : SourceCommandLogoutPreview
+    data class Ready(val consent: SourceCommandLogoutConsent?) : SourceCommandLogoutPreview
+    data class Failed(
+        val message: String = "无法核对来源操作，暂时不能退出。请取消后重新打开重试。",
+    ) : SourceCommandLogoutPreview
+}
+
 internal data class FamilyMembersState(
     val familyId: String = "",
     val members: List<FamilyMember> = emptyList(),
@@ -87,7 +111,7 @@ internal class MembersDevicesActions(
         previous: FamilyMembersState,
         showErrors: Boolean,
     ): FamilyMembersState = memberRefreshMutex.withLock {
-        val session = sync.session().first()
+        val session = sync.sessionPresentation().first()
         if (!session.isJoined) {
             return@withLock FamilyMembersState()
         }
@@ -118,7 +142,7 @@ internal class MembersDevicesActions(
             } else {
                 Result.success(emptyList())
             }
-            if (sync.session().first().familyId != session.familyId) return@withLock loading
+            if (sync.sessionPresentation().first().familyId != session.familyId) return@withLock loading
             if (result.isSuccess && pendingResult.isSuccess && pendingRenameResult.isSuccess) {
                 FamilyMembersState(
                     familyId = session.familyId,
@@ -178,6 +202,44 @@ class MembersDevicesHost private constructor(
         updateLocalDisplayName = {},
     )
 
+    private var nextCommandId = 0L
+    private val mutableCommand = MutableStateFlow<FamilyMemberCommand?>(null)
+    val command: StateFlow<FamilyMemberCommand?> = mutableCommand
+
+    fun consumeCommand(id: Long) {
+        if (mutableCommand.value?.let { it.id == id && !it.pending } == true) {
+            mutableCommand.value = null
+        }
+    }
+
+    private fun launchCommand(
+        target: String,
+        callback: (Boolean, String, FailureKind?) -> Unit,
+        action: suspend ((Boolean, String, FailureKind?) -> Unit) -> Unit,
+    ) {
+        // Claim synchronously, before launch: duplicate taps and recreated callers share this gate.
+        if (mutableCommand.value != null) return
+        val receipt = FamilyMemberCommand(++nextCommandId, target)
+        mutableCommand.value = receipt
+        viewModelScope.launch {
+            try {
+                action { success, message, kind ->
+                    mutableCommand.value = (mutableCommand.value?.takeIf { it.id == receipt.id } ?: receipt).copy(
+                        pending = false, success = success, message = message, failureKind = kind,
+                    )
+                    callback(success, message, kind)
+                }
+            } catch (cancelled: CancellationException) {
+                mutableCommand.value = null
+                throw cancelled
+            } catch (error: Throwable) {
+                val kind = familyFailureKind(error)
+                mutableCommand.value = receipt.copy(pending = false, failureKind = kind)
+                callback(false, "", kind)
+            }
+        }
+    }
+
     private val familyMembers = MutableStateFlow(FamilyMembersState())
     private val destructiveAction = FamilyDestructiveActionGate()
     private val actions = MembersDevicesActions(sync) { loading ->
@@ -185,14 +247,14 @@ class MembersDevicesHost private constructor(
     }
 
     private val localIdentity = combine(
-        sync.session().map(::localFamilyIdentityReloadKey).distinctUntilChanged(),
+        sync.sessionPresentation().map(::localFamilyIdentityReloadKey).distinctUntilChanged(),
         LocalFamilyIdentityInvalidations.epoch,
     ) { _, _ ->
         localIdentityProvider()
     }
 
     val ui: StateFlow<MembersDevicesUi> = combine(
-        sync.session(),
+        sync.sessionPresentation(),
         familyMembers,
         localIdentity,
     ) { session, memberState, identity ->
@@ -237,6 +299,43 @@ class MembersDevicesHost private constructor(
     /** Inline failure copy after a sync-first round; never blocks 仍然退出. */
     val logoutSyncFeedback = MutableStateFlow<String?>(null)
 
+    private val mutableLogoutSourcePreview =
+        MutableStateFlow<SourceCommandLogoutPreview>(SourceCommandLogoutPreview.Checking)
+    val logoutSourcePreview: StateFlow<SourceCommandLogoutPreview> = mutableLogoutSourcePreview
+    private var logoutPreviewGeneration = 0L
+    private var logoutPreviewJob: Job? = null
+
+    /** Load once per visible dialog. Never refresh this snapshot behind its final click. */
+    fun openLogoutConfirmation() {
+        val generation = ++logoutPreviewGeneration
+        logoutPreviewJob?.cancel()
+        mutableLogoutSourcePreview.value = SourceCommandLogoutPreview.Checking
+        logoutSyncFeedback.value = null
+        logoutPreviewJob = viewModelScope.launch {
+            val preview = try {
+                sync.prepareSourceCommandLogout().fold(
+                    onSuccess = { SourceCommandLogoutPreview.Ready(it) },
+                    onFailure = { SourceCommandLogoutPreview.Failed() },
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                SourceCommandLogoutPreview.Failed()
+            }
+            if (logoutPreviewGeneration == generation) {
+                mutableLogoutSourcePreview.value = preview
+            }
+        }
+    }
+
+    /** Closing/recreating the dialog retires its ephemeral consent, including late loads. */
+    fun closeLogoutConfirmation() {
+        ++logoutPreviewGeneration
+        logoutPreviewJob?.cancel()
+        logoutPreviewJob = null
+        mutableLogoutSourcePreview.value = SourceCommandLogoutPreview.Checking
+    }
+
     /**
      * Fires one Foreground sync round so the logout dialog can refresh the
      * pending count in place. Best-effort: failures surface as inline feedback
@@ -259,6 +358,13 @@ class MembersDevicesHost private constructor(
     }
 
     /** Durable one-time receipt of the remote-removal cleanup, or null. */
+    val sourceCommandClearNotice = sync.sourceCommandClearNotice()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    fun acknowledgeSourceCommandClearNotice(notice: com.lezi.babylog.sync.sourcerelation.SourceCommandClearNotice) {
+        viewModelScope.launch { sync.acknowledgeSourceCommandClearNotice(notice) }
+    }
+
     val deviceRemovedReceipt: StateFlow<DeviceRemovedCleanupReceipt?> =
         sync.deviceRemovedReceipt()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
@@ -283,54 +389,70 @@ class MembersDevicesHost private constructor(
         }
     }
 
-    fun approveNewMemberLogin(requestId: String, onDone: (FailureKind?) -> Unit) {
+    private fun refreshMembersAfterCommit() {
         viewModelScope.launch {
+            try {
+                familyMembers.value = actions.refreshMembersNow(familyMembers.value, showErrors = true)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // The command already committed. Explicit roster refresh remains available.
+            }
+        }
+    }
+
+    fun approveNewMemberLogin(requestId: String, onDone: (FailureKind?) -> Unit = {}) {
+        launchCommand("review_member:$requestId", { _, _, kind -> onDone(kind) }) { report ->
             val result = actions.approveNewMemberLogin(requestId)
             if (result.isSuccess) {
-                familyMembers.value = actions.refreshMembersNow(familyMembers.value, showErrors = true)
+                refreshMembersAfterCommit()
             }
-            onDone(result.exceptionOrNull()?.let(::familyFailureKind))
+            report(result.isSuccess, "成员申请已处理", result.exceptionOrNull()?.let(::familyFailureKind))
         }
     }
 
     fun bindExistingMemberLogin(
         requestId: String,
         membershipId: String,
-        onDone: (FailureKind?) -> Unit,
+        onDone: (FailureKind?) -> Unit = {},
     ) {
-        viewModelScope.launch {
+        launchCommand("review_member:$requestId", { _, _, kind -> onDone(kind) }) { report ->
             val result = actions.runWithUiTimeout { sync.bindExistingMemberLogin(requestId, membershipId) }
             if (result.isSuccess) {
-                familyMembers.value = actions.refreshMembersNow(familyMembers.value, showErrors = true)
+                refreshMembersAfterCommit()
             }
-            onDone(result.exceptionOrNull()?.let(::familyFailureKind))
+            report(result.isSuccess, "成员申请已处理", result.exceptionOrNull()?.let(::familyFailureKind))
         }
     }
 
     fun rejectMemberLogin(
         request: PendingMemberLoginRequest,
-        onDone: (FailureKind?) -> Unit,
+        onDone: (FailureKind?) -> Unit = {},
     ) {
-        viewModelScope.launch {
+        launchCommand("review_member:${request.requestId}", { _, _, kind -> onDone(kind) }) { report ->
             val result = actions.runWithUiTimeout { sync.rejectMemberLogin(request.requestId) }
             if (result.isSuccess) {
-                familyMembers.value = actions.refreshMembersNow(familyMembers.value, showErrors = true)
+                refreshMembersAfterCommit()
             }
-            onDone(result.exceptionOrNull()?.let(::familyFailureKind))
+            report(result.isSuccess, "成员申请已处理", result.exceptionOrNull()?.let(::familyFailureKind))
         }
     }
 
     fun createMemberLoginQr(
         membershipId: String,
-        onResult: (Result<MemberLoginQrCode>) -> Unit,
+        onResult: (Result<MemberLoginQrCode>) -> Unit = {},
     ) {
-        viewModelScope.launch {
-            onResult(actions.runWithUiTimeout { sync.createMemberLoginQrCode(membershipId) })
+        launchCommand("members_list", { _, _, _ -> }) { report ->
+            val result = actions.runWithUiTimeout { sync.createMemberLoginQrCode(membershipId) }
+            mutableCommand.value = mutableCommand.value?.copy(qrCode = result.getOrNull())
+            report(result.isSuccess, if (result.isSuccess) "" else "二维码生成失败，请重试",
+                result.exceptionOrNull()?.let(::familyFailureKind))
+            onResult(result)
         }
     }
 
-    fun leave(onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit) {
-        viewModelScope.launch {
+    fun leave(onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit = { _, _, _ -> }) {
+        launchCommand("confirm_leave", onDone) { report ->
             var outcome: Triple<Boolean, String, FailureKind?>? = null
             val accepted = destructiveAction.run {
                 val result = actions.runWithUiTimeout { sync.leave() }
@@ -344,26 +466,51 @@ class MembersDevicesHost private constructor(
                 )
                 if (result.isSuccess) familyMembers.value = FamilyMembersState()
             }
-            if (accepted) outcome?.let { (success, message, kind) -> onDone(success, message, kind) }
+            if (accepted) outcome?.let { (success, message, kind) -> report(success, message, kind) }
         }
     }
 
-    fun logoutCurrentDevice(onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit) {
-        viewModelScope.launch {
+    fun logoutCurrentDevice(
+        preview: SourceCommandLogoutPreview,
+        onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit = { _, _, _ -> },
+    ) {
+        // The click must refer to the exact preview rendered by this dialog.
+        if (preview !is SourceCommandLogoutPreview.Ready ||
+            mutableLogoutSourcePreview.value !== preview
+        ) return
+        launchCommand("confirm_device_logout", onDone) { report ->
             var outcome: Triple<Boolean, String, FailureKind?>? = null
             val accepted = destructiveAction.run {
-                val result = actions.runWithUiTimeout { sync.logoutCurrentDevice() }
-                if (result.isSuccess) familyMembers.value = FamilyMembersState()
+                val result = actions.runWithUiTimeout {
+                    preview.consent?.let { sync.logoutCurrentDevice(it) }
+                        ?: sync.logoutCurrentDevice()
+                }
+                if (result.isSuccess) {
+                    familyMembers.value = FamilyMembersState()
+                    closeLogoutConfirmation()
+                } else if (result.exceptionOrNull() is SourceCommandLogoutConsentChangedException) {
+                    mutableLogoutSourcePreview.value = SourceCommandLogoutPreview.Failed(
+                        "来源操作已变化，请取消后重新打开退出确认。",
+                    )
+                }
                 outcome = Triple(
                     result.isSuccess,
                     result.fold(
                         onSuccess = { "这台设备已退出家庭" },
-                        onFailure = { "" },
+                        onFailure = {
+                            if (it is SourceCommandLogoutConsentChangedException) {
+                                "来源操作已变化，请重新核对退出确认。"
+                            } else {
+                                ""
+                            }
+                        },
                     ),
-                    result.exceptionOrNull()?.let(::familyFailureKind),
+                    result.exceptionOrNull()
+                        ?.takeUnless { it is SourceCommandLogoutConsentChangedException }
+                        ?.let(::familyFailureKind),
                 )
             }
-            if (accepted) outcome?.let { (success, message, kind) -> onDone(success, message, kind) }
+            if (accepted) outcome?.let { (success, message, kind) -> report(success, message, kind) }
         }
     }
 
@@ -371,9 +518,9 @@ class MembersDevicesHost private constructor(
         deviceId: String,
         deviceName: String,
         isCurrent: Boolean,
-        onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit,
+        onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit = { _, _, _ -> },
     ) {
-        viewModelScope.launch {
+        launchCommand("revoke_device:$deviceId", onDone) { report ->
             var outcome: Triple<Boolean, String, FailureKind?>? = null
             val accepted = destructiveAction.run {
                 val result = actions.runWithUiTimeout { sync.revokeFamilyDevice(deviceId) }
@@ -381,8 +528,7 @@ class MembersDevicesHost private constructor(
                     if (isCurrent) {
                         familyMembers.value = FamilyMembersState()
                     } else {
-                        familyMembers.value =
-                            actions.refreshMembersNow(familyMembers.value, showErrors = true)
+                        refreshMembersAfterCommit()
                     }
                 }
                 val label = deviceName.trim().ifBlank { "这台设备" }
@@ -397,7 +543,7 @@ class MembersDevicesHost private constructor(
                     result.exceptionOrNull()?.let(::familyFailureKind),
                 )
             }
-            if (accepted) outcome?.let { (success, message, kind) -> onDone(success, message, kind) }
+            if (accepted) outcome?.let { (success, message, kind) -> report(success, message, kind) }
         }
     }
 
@@ -408,15 +554,14 @@ class MembersDevicesHost private constructor(
     fun removeMember(
         membershipId: String,
         displayName: String,
-        onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit,
+        onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit = { _, _, _ -> },
     ) {
-        viewModelScope.launch {
+        launchCommand("remove_member:$membershipId", onDone) { report ->
             var outcome: Triple<Boolean, String, FailureKind?>? = null
             val accepted = destructiveAction.run {
                 val result = actions.runWithUiTimeout { sync.removeMember(membershipId) }
                 if (result.isSuccess) {
-                    familyMembers.value =
-                        actions.refreshMembersNow(familyMembers.value, showErrors = true)
+                    refreshMembersAfterCommit()
                     val label = displayName.trim().ifBlank { "家人" }
                     outcome = Triple(true, "已删除成员「$label」", null)
                 } else {
@@ -428,21 +573,21 @@ class MembersDevicesHost private constructor(
                     )
                 }
             }
-            if (accepted) outcome?.let { (success, message, kind) -> onDone(success, message, kind) }
+            if (accepted) outcome?.let { (success, message, kind) -> report(success, message, kind) }
         }
     }
 
     fun renameFamily(
         familyName: String,
-        onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit,
+        onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit = { _, _, _ -> },
     ) {
-        viewModelScope.launch {
+        launchCommand("rename_family", onDone) { report ->
             validateFamilyNameInput(familyName)?.let {
-                onDone(false, it, FailureKind.InvalidInput)
-                return@launch
+                report(false, it, FailureKind.InvalidInput)
+                return@launchCommand
             }
             val result = actions.runWithUiTimeout { sync.renameFamily(familyName.trim()) }
-            onDone(
+            report(
                 result.isSuccess,
                 result.fold(
                     onSuccess = { "家庭名已更新" },
@@ -455,23 +600,25 @@ class MembersDevicesHost private constructor(
 
     fun updateMyDisplayName(
         displayName: String,
-        onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit,
+        onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit = { _, _, _ -> },
     ) {
-        viewModelScope.launch {
+        launchCommand("edit_my_display_name", onDone) { report ->
             validateFamilyDisplayNameInput(displayName)?.let {
-                onDone(false, it, FailureKind.InvalidInput)
-                return@launch
+                report(false, it, FailureKind.InvalidInput)
+                return@launchCommand
             }
             val result = actions.runWithUiTimeout { sync.updateMyDisplayName(displayName.trim()) }
             val outcome = result.getOrNull()
             if (outcome is DisplayNameUpdateResult.Updated) {
-                updateLocalDisplayName(outcome.displayName)
+                viewModelScope.launch {
+                    runCatching { updateLocalDisplayName(outcome.displayName) }
+                        .onFailure { if (it is CancellationException) throw it }
+                }
             }
             if (outcome != null) {
-                familyMembers.value =
-                    actions.refreshMembersNow(familyMembers.value, showErrors = true)
+                refreshMembersAfterCommit()
             }
-            onDone(
+            report(
                 result.isSuccess,
                 result.fold(
                     onSuccess = {
@@ -490,19 +637,18 @@ class MembersDevicesHost private constructor(
 
     fun addFamilyMember(
         displayName: String,
-        onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit,
+        onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit = { _, _, _ -> },
     ) {
-        viewModelScope.launch {
+        launchCommand("add_family_member", onDone) { report ->
             validateFamilyDisplayNameInput(displayName)?.let {
-                onDone(false, it, FailureKind.InvalidInput)
-                return@launch
+                report(false, it, FailureKind.InvalidInput)
+                return@launchCommand
             }
             val result = actions.runWithUiTimeout { sync.addFamilyMember(displayName.trim()) }
             if (result.isSuccess) {
-                familyMembers.value =
-                    actions.refreshMembersNow(familyMembers.value, showErrors = true)
+                refreshMembersAfterCommit()
             }
-            onDone(
+            report(
                 result.isSuccess,
                 result.fold(
                     onSuccess = { "已添加「${it.displayName}」，可继续生成登录二维码" },
@@ -516,19 +662,18 @@ class MembersDevicesHost private constructor(
     fun renameFamilyMember(
         membershipId: String,
         displayName: String,
-        onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit,
+        onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit = { _, _, _ -> },
     ) {
-        viewModelScope.launch {
+        launchCommand("rename_member:$membershipId", onDone) { report ->
             validateFamilyDisplayNameInput(displayName)?.let {
-                onDone(false, it, FailureKind.InvalidInput)
-                return@launch
+                report(false, it, FailureKind.InvalidInput)
+                return@launchCommand
             }
             val result = actions.runWithUiTimeout { sync.renameFamilyMember(membershipId, displayName.trim()) }
             if (result.isSuccess) {
-                familyMembers.value =
-                    actions.refreshMembersNow(familyMembers.value, showErrors = true)
+                refreshMembersAfterCommit()
             }
-            onDone(
+            report(
                 result.isSuccess,
                 result.fold(
                     onSuccess = { "成员称呼已更新" },
@@ -542,20 +687,19 @@ class MembersDevicesHost private constructor(
     fun renameFamilyDevice(
         deviceId: String,
         deviceName: String,
-        onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit,
+        onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit = { _, _, _ -> },
     ) {
-        viewModelScope.launch {
+        launchCommand("rename_device:$deviceId", onDone) { report ->
             val normalized = deviceName.trim()
             if (normalized.isEmpty()) {
-                onDone(false, "请填写设备称呼", FailureKind.InvalidInput)
-                return@launch
+                report(false, "请填写设备称呼", FailureKind.InvalidInput)
+                return@launchCommand
             }
             val result = actions.runWithUiTimeout { sync.renameFamilyDevice(deviceId, normalized) }
             if (result.isSuccess) {
-                familyMembers.value =
-                    actions.refreshMembersNow(familyMembers.value, showErrors = true)
+                refreshMembersAfterCommit()
             }
-            onDone(
+            report(
                 result.isSuccess,
                 result.fold(
                     onSuccess = { "设备称呼已更新" },
@@ -569,9 +713,9 @@ class MembersDevicesHost private constructor(
     fun decideMemberRename(
         request: PendingMemberRenameRequest,
         approve: Boolean,
-        onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit,
+        onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit = { _, _, _ -> },
     ) {
-        viewModelScope.launch {
+        launchCommand("members_list", onDone) { report ->
             val result = actions.runWithUiTimeout {
                 if (approve) {
                     sync.approveMemberRename(request.requestId)
@@ -580,10 +724,9 @@ class MembersDevicesHost private constructor(
                 }
             }
             if (result.isSuccess) {
-                familyMembers.value =
-                    actions.refreshMembersNow(familyMembers.value, showErrors = true)
+                refreshMembersAfterCommit()
             }
-            onDone(
+            report(
                 result.isSuccess,
                 result.fold(
                     onSuccess = { if (approve) "改名申请已确认" else "改名申请已拒绝" },
@@ -594,14 +737,13 @@ class MembersDevicesHost private constructor(
         }
     }
 
-    fun cancelMyMemberRename(onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit) {
-        viewModelScope.launch {
+    fun cancelMyMemberRename(onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit = { _, _, _ -> }) {
+        launchCommand("members_list", onDone) { report ->
             val result = actions.runWithUiTimeout { sync.cancelMyMemberRename() }
             if (result.isSuccess) {
-                familyMembers.value =
-                    actions.refreshMembersNow(familyMembers.value, showErrors = true)
+                refreshMembersAfterCommit()
             }
-            onDone(
+            report(
                 result.isSuccess,
                 result.fold(
                     onSuccess = { "改名申请已撤回" },
@@ -615,9 +757,9 @@ class MembersDevicesHost private constructor(
     fun deleteFamily(
         familyName: String,
         rootPassword: String,
-        onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit,
+        onDone: (success: Boolean, message: String, kind: FailureKind?) -> Unit = { _, _, _ -> },
     ) {
-        viewModelScope.launch {
+        launchCommand("delete_family", onDone) { report ->
             var outcome: Triple<Boolean, String, FailureKind?>? = null
             val accepted = destructiveAction.run {
                 val result = actions.runWithUiTimeout { sync.deleteFamily(familyName, rootPassword) }
@@ -631,7 +773,7 @@ class MembersDevicesHost private constructor(
                 )
                 if (result.isSuccess) familyMembers.value = FamilyMembersState()
             }
-            if (accepted) outcome?.let { (success, message, kind) -> onDone(success, message, kind) }
+            if (accepted) outcome?.let { (success, message, kind) -> report(success, message, kind) }
         }
     }
 }

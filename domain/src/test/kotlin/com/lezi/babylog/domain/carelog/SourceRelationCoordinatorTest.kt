@@ -2,6 +2,18 @@ package com.lezi.babylog.domain.carelog
 
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.database.DatabaseTransactionRunner
+import com.lezi.babylog.sync.backend.SyncBackend
+import com.lezi.babylog.sync.backend.CurrentSourceRelationsRequest
+import com.lezi.babylog.sync.backend.CurrentSourceRelationsSnapshot
+import com.lezi.babylog.sync.backend.CurrentSourceRelationRecord
+import com.lezi.babylog.sync.backend.CurrentSourceRelationGroup
+import com.lezi.babylog.sync.session.SyncSession
+import com.lezi.babylog.sync.session.FamilyRole
+import com.lezi.babylog.sync.session.TrustedEndpointProfile
+import com.lezi.babylog.sync.sourcerelation.SourceRelationCommandOwner
+import java.lang.reflect.Proxy
+import java.io.IOException
 import com.lezi.babylog.core.database.causal.AUTO_NEAR_NEIGHBOR_MUTATION_PREFIX
 import com.lezi.babylog.core.database.causal.SourceRelationEntity
 import com.lezi.babylog.core.database.causal.SourceRelationMemberEntity
@@ -22,7 +34,7 @@ class SourceRelationCoordinatorTest {
 
     private val records = FakeRecordDao()
     private val sourceRelations = FakeSourceRelationDao()
-    private val backend = RecordingSourceRelationPort()
+    private val backend = RecordingSourceRelationPort(sourceRelations)
 
     private fun coordinator(
         membershipId: String = "m-self",
@@ -37,7 +49,7 @@ class SourceRelationCoordinatorTest {
     )
 
     @Test
-    fun authorDeclare_persistsRelationWithoutTombstone() {
+    fun authorDeclareReturnsSyncSettledRelationWithoutDomainRewrite() {
         runBlocking {
             records.upsert(entity("mine", "m-self", "v-mine"))
             records.upsert(entity("theirs", "m-other", "v-theirs"))
@@ -52,7 +64,7 @@ class SourceRelationCoordinatorTest {
             assertThat(outcome).isInstanceOf(SourceRelationOutcome.Accepted::class.java)
             val accepted = outcome as SourceRelationOutcome.Accepted
             assertThat(accepted.displayClientUuid).isEqualTo("theirs")
-            assertThat(sourceRelations.get("rel-1")).isNotNull()
+            assertThat(sourceRelations.get("rel-1")?.createdAt).isEqualTo(123L)
             assertThat(sourceRelations.listMembers("rel-1").map { it.role to it.recordClientUuid })
                 .containsExactly("display" to "theirs", "source" to "mine")
             assertThat(records.getByClientUuid("mine")!!.deletedAt).isNull()
@@ -91,7 +103,7 @@ class SourceRelationCoordinatorTest {
     }
 
     @Test
-    fun ownerResolve_persistsFullGroupSourceRelation() {
+    fun ownerResolveReturnsSyncSettledGroupWithoutDomainRewrite() {
         runBlocking {
             records.upsert(entity("a", "m1", "v-a"))
             records.upsert(entity("b", "m2", "v-b"))
@@ -107,6 +119,7 @@ class SourceRelationCoordinatorTest {
                 displayClientUuid = "a",
             )
             assertThat(outcome).isInstanceOf(SourceRelationOutcome.Accepted::class.java)
+            assertThat(sourceRelations.get("rel-owner")?.createdAt).isEqualTo(123L)
             assertThat(backend.resolveCalls.single().displayClientUuid).isEqualTo("a")
             assertThat(backend.resolveCalls.single().memberClientUuids).containsExactly("a", "b")
             assertThat(
@@ -152,6 +165,43 @@ class SourceRelationCoordinatorTest {
                 sourceRelations.getDeclaration(backend.declareCalls.single().mutationId)!!.status,
             ).isEqualTo("superseded")
         }
+    }
+
+    @Test
+    fun explicitRepeatAfterUnknownTransportUsesOriginalSyncOperation() = runBlocking {
+        records.upsert(entity("mine", "m-self", "v-mine"))
+        records.upsert(entity("theirs", "m-other", "v-theirs"))
+        backend.declareFailure = IOException("response lost")
+        val initial = coordinator().declareEquivalent("mine", "theirs") as SourceRelationOutcome.Rejected
+        assertThat(initial.code).isEqualTo("transport")
+        assertThat(initial.message).contains("原家庭服务器")
+        val original = backend.declareCalls.single()
+        assertThat(sourceRelations.getDeclaration(original.mutationId)?.status).isEqualTo("pending")
+        backend.declareFailure = null
+        backend.declareResult = SourceRelationResult(
+            "accepted", "relation-retry", "theirs", listOf("mine"), true,
+        )
+        assertThat(coordinator().declareEquivalent("mine", "theirs"))
+            .isInstanceOf(SourceRelationOutcome.Accepted::class.java)
+        assertThat(backend.declareCalls).containsExactly(original, original).inOrder()
+        assertThat(sourceRelations.get("relation-retry")?.mutationId).isEqualTo(original.mutationId)
+        assertThat(sourceRelations.getDeclaration(original.mutationId)?.status).isEqualTo("consumed")
+    }
+
+    @Test
+    fun confirmedRemoteChoiceWithUnavailableCurrentReadSurfacesRefreshNeeded() = runBlocking {
+        records.upsert(entity("mine", "m-self", "v-mine"))
+        records.upsert(entity("theirs", "m-other", "v-theirs"))
+        backend.declareResult = SourceRelationResult("accepted", "relation", "theirs", listOf("mine"), true)
+        backend.readFailure = UnsupportedOperationException("old server")
+        val outcome = coordinator().declareEquivalent("mine", "theirs")
+        assertThat(outcome).isInstanceOf(SourceRelationOutcome.ConfirmedRefreshRequired::class.java)
+        assertThat((outcome as SourceRelationOutcome.ConfirmedRefreshRequired).message).contains("更新原服务器")
+        assertThat(sourceRelations.listAll()).isEmpty()
+        backend.readFailure = null
+        assertThat(coordinator().declareEquivalent("mine", "theirs"))
+            .isInstanceOf(SourceRelationOutcome.Accepted::class.java)
+        assertThat(backend.declareCalls).hasSize(1)
     }
 
     @Test
@@ -261,26 +311,69 @@ class SourceRelationCoordinatorTest {
         )
 }
 
-private class RecordingSourceRelationPort : SyncPort by NoOpSyncPort() {
-    // delegate
-    var declareResult: SourceRelationResult = SourceRelationResult(status = "rejected")
-    var resolveResult: SourceRelationResult = SourceRelationResult(status = "rejected")
+/** The production sync command owner settles rows; only the remote transport is faked. */
+private class RecordingSourceRelationPort(
+    sourceRelations: FakeSourceRelationDao,
+) : SyncPort by NoOpSyncPort() {
+    var declareResult: SourceRelationResult = SourceRelationResult(status = "rejected", code = "invalid")
+    var resolveResult: SourceRelationResult = SourceRelationResult(status = "rejected", code = "invalid")
     var declareFailure: Throwable? = null
+    var readFailure: Throwable? = null
+    var currentResult: SourceRelationResult? = null
     val declareCalls = mutableListOf<SourceRelationDeclareRequest>()
     val resolveCalls = mutableListOf<SourceRelationResolveGroupRequest>()
+    private val session = SyncSession(
+        familyId = "family", membershipId = "m-self", deviceId = "device", role = FamilyRole.Owner,
+        pullGeneration = "generation", accessToken = "test-token",
+        serverHost = "original.example", serverPort = 443, serverScheme = "https",
+    )
+    // A synchronous test response is legal for the suspend transport boundary. Any unrelated
+    // transport call fails loudly; the production owner and its DAO writes remain real.
+    private val transport = Proxy.newProxyInstance(
+        SyncBackend::class.java.classLoader,
+        arrayOf(SyncBackend::class.java),
+    ) { _, method, args ->
+        when (method.name) {
+            "declareSourceRelation" -> {
+                declareCalls += args!![1] as SourceRelationDeclareRequest
+                declareFailure?.let { throw it }
+                currentResult = declareResult
+                declareResult
+            }
+            "resolveSourceRelationGroup" -> {
+                resolveCalls += args!![1] as SourceRelationResolveGroupRequest
+                currentResult = resolveResult
+                resolveResult
+            }
+            "readCurrentSourceRelations" -> {
+                readFailure?.let { throw it }
+                val request = args!![1] as CurrentSourceRelationsRequest
+                val result = requireNotNull(currentResult)
+                val group = CurrentSourceRelationGroup(requireNotNull(result.relationId),
+                    requireNotNull(result.displayClientUuid), result.sourceClientUuids.sorted())
+                CurrentSourceRelationsSnapshot(request.familyId, request.generation, 100,
+                    request.recordClientUuids, group.memberClientUuids.map {
+                        CurrentSourceRelationRecord(it, "live", group.relationId)
+                    }, listOf(group))
+            }
+            else -> error("Unexpected transport call: ${method.name}")
+        }
+    } as SyncBackend
+    private val owner = SourceRelationCommandOwner(
+        sourceRelationDao = sourceRelations,
+        journalDao = FakeConflictSnapshotCacheDao(),
+        transactionRunner = object : DatabaseTransactionRunner {
+            override suspend fun <T> run(block: suspend () -> T): T = block()
+        },
+        backend = transport,
+        currentSession = { session },
+        currentEndpoint = { TrustedEndpointProfile.systemPki(session.baseUrl) },
+        nowMillis = { 123L },
+    )
 
-    override suspend fun declareSourceRelation(
-        request: SourceRelationDeclareRequest,
-    ): SourceRelationResult {
-        declareCalls += request
-        declareFailure?.let { throw it }
-        return declareResult
-    }
+    override suspend fun declareSourceRelation(request: SourceRelationDeclareRequest): SourceRelationResult =
+        owner.declare(request)
 
-    override suspend fun resolveSourceRelationGroup(
-        request: SourceRelationResolveGroupRequest,
-    ): SourceRelationResult {
-        resolveCalls += request
-        return resolveResult
-    }
+    override suspend fun resolveSourceRelationGroup(request: SourceRelationResolveGroupRequest): SourceRelationResult =
+        owner.resolveGroup(request)
 }

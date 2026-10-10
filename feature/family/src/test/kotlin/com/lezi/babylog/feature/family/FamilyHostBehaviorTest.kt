@@ -1,5 +1,9 @@
 package com.lezi.babylog.feature.family
 
+// 192.168.77.10 is a synthetic RFC1918 LAN test endpoint, never a deployment default.
+
+import kotlinx.coroutines.flow.map
+import com.lezi.babylog.sync.session.toPresentation
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.domain.family.FamilyWizardController
 import com.lezi.babylog.domain.LocalFamilyIdentity
@@ -48,9 +52,87 @@ import org.junit.runner.Description
  * Behavior contracts for ticket-24 hosts (not reflection-only surface lists).
  * Uses [SyncPort] fakes for roster refresh / approval and wizard QR thin-delegate path.
  */
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class FamilyHostBehaviorTest {
     @get:Rule
     val mainDispatcherRule = FamilyMainDispatcherRule()
+
+    @Test
+    fun qrFailureIsRetainedForRecreatedUiInsteadOfLostCallback() =
+        runTest(mainDispatcherRule.testDispatcher) {
+            val release = CompletableDeferred<Unit>()
+            val sync = object : SyncPort by NoOpSyncPort() {
+                override suspend fun createMemberLoginQrCode(membershipId: String): Result<com.lezi.babylog.sync.qr.MemberLoginQrCode> {
+                    release.await()
+                    return Result.failure(IllegalStateException("synthetic failure"))
+                }
+            }
+            val host = com.lezi.babylog.feature.family.members.MembersDevicesHost(
+                sync, LocalFamilyIdentity("device-1", "管理员", 1),
+            )
+            host.createMemberLoginQr("member-a")
+            runCurrent()
+            assertThat(host.command.value?.pending).isTrue()
+            release.complete(Unit)
+            advanceUntilIdle()
+            assertThat(host.command.value?.pending).isFalse()
+            assertThat(host.command.value?.success).isFalse()
+            assertThat(host.command.value?.message).isEqualTo("二维码生成失败，请重试")
+        }
+
+    @Test
+    fun memberRemovalReceiptSurvivesRecreationAndRejectsSecondTarget() =
+        runTest(mainDispatcherRule.testDispatcher) {
+            val release = CompletableDeferred<Unit>()
+            val removed = mutableListOf<String>()
+            val sync = object : SyncPort by NoOpSyncPort() {
+                override suspend fun removeMember(membershipId: String): Result<Unit> {
+                    release.await()
+                    removed += membershipId
+                    return Result.success(Unit)
+                }
+            }
+            val host = com.lezi.babylog.feature.family.members.MembersDevicesHost(
+                sync, LocalFamilyIdentity("device-1", "管理员", 1),
+            )
+            host.removeMember("member-a", "家人甲")
+            host.removeMember("member-b", "家人乙")
+            runCurrent()
+            release.complete(Unit)
+            advanceUntilIdle()
+            assertThat(removed).containsExactly("member-a")
+            assertThat(host.command.value?.target).isEqualTo("remove_member:member-a")
+            assertThat(host.command.value?.success).isTrue()
+        }
+
+    @Test
+    fun renameRemainsSingleFlightAndPublishesOutcomeToRecreatedUi() =
+        runTest(mainDispatcherRule.testDispatcher) {
+            val release = CompletableDeferred<Unit>()
+            val names = mutableListOf<String>()
+            val sync = object : SyncPort by NoOpSyncPort() {
+                override suspend fun renameFamily(familyName: String?): Result<Unit> {
+                    release.await()
+                    names += familyName.orEmpty()
+                    return Result.success(Unit)
+                }
+            }
+            val host = com.lezi.babylog.feature.family.members.MembersDevicesHost(
+                sync, LocalFamilyIdentity("device-1", "管理员", 1),
+            )
+            host.renameFamily("新的家庭")
+            host.renameFamily("重复提交")
+            runCurrent()
+            assertThat(host.command.value?.pending).isTrue()
+            release.complete(Unit)
+            advanceUntilIdle()
+            assertThat(names).containsExactly("新的家庭")
+            val restoredOutcome = host.command.value!!
+            assertThat(restoredOutcome.success).isTrue()
+            assertThat(restoredOutcome.message).isEqualTo("家庭名已更新")
+            host.consumeCommand(restoredOutcome.id)
+            assertThat(host.command.value).isNull()
+        }
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test
@@ -70,6 +152,7 @@ class FamilyHostBehaviorTest {
                         refreshToken = "ref",
                     ),
                 )
+                override fun sessionPresentation() = session().map { it.toPresentation() }
                 override fun session(): Flow<SyncSession> = sessionState
                 override suspend fun listFamilyMembers(): Result<List<FamilyMember>> {
                     requestStarted.complete(Unit)
@@ -123,6 +206,7 @@ class FamilyHostBehaviorTest {
                     refreshToken = "ref",
                 ),
             )
+            override fun sessionPresentation() = session().map { it.toPresentation() }
             override fun session(): Flow<SyncSession> = sessionState
             override suspend fun listFamilyMembers() = Result.success(listOf(member))
             override suspend fun listPendingMemberLogins() = Result.success(listOf(pending))
@@ -158,6 +242,7 @@ class FamilyHostBehaviorTest {
                     refreshToken = "ref",
                 ),
             )
+            override fun sessionPresentation() = session().map { it.toPresentation() }
             override fun session(): Flow<SyncSession> = sessionState
             override suspend fun listFamilyMembers(): Result<List<FamilyMember>> =
                 throw cancellation

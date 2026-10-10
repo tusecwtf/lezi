@@ -1,0 +1,6 @@
+BASELINE DEFECT CONFIRMED
+Source: ee2a9c5 schema-cutover-steps.sh app_update_prepublish remote body
+Synthetic Docker adapter sent SIGTERM only to its own recorded remote-shell child after publication.
+Exit status: -15
+Expected: exact old pair restored. Observed: new pair retained; old snapshot exists; no restore-complete marker.
+No SSH, container, NAS, credentials, database or cross-process observation was used.

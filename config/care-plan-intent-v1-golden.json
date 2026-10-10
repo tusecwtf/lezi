@@ -1,0 +1,140 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "ordinary-nursing-intent",
+      "type": "nursing",
+      "note": null,
+      "payload": {
+        "left_min": 0,
+        "right_min": 0,
+        "order": "LR",
+        "record_mode": "end"
+      },
+      "plan_valid": true,
+      "record_valid": false
+    },
+    {
+      "id": "marked-nursing-intent",
+      "type": "nursing",
+      "note": "[[lezi:next-feed:v1]]",
+      "payload": {
+        "left_min": 0,
+        "right_min": 0,
+        "order": "LR",
+        "record_mode": "end"
+      },
+      "plan_valid": true,
+      "record_valid": false
+    },
+    {
+      "id": "nursing-fact",
+      "type": "nursing",
+      "note": null,
+      "payload": {
+        "left_min": 2,
+        "right_min": 3,
+        "order": "LR",
+        "record_mode": "end"
+      },
+      "plan_valid": true,
+      "record_valid": true
+    },
+    {
+      "id": "negative-nursing",
+      "type": "nursing",
+      "note": null,
+      "payload": {
+        "left_min": -1,
+        "right_min": 2,
+        "order": "LR",
+        "record_mode": "end"
+      },
+      "plan_valid": false,
+      "record_valid": false
+    },
+    {
+      "id": "invalid-nursing-order",
+      "type": "nursing",
+      "note": null,
+      "payload": {
+        "left_min": 0,
+        "right_min": 0,
+        "order": "XX",
+        "record_mode": "end"
+      },
+      "plan_valid": false,
+      "record_valid": false
+    },
+    {
+      "id": "ordinary-formula-zero",
+      "type": "formula",
+      "note": null,
+      "payload": {
+        "amount_ml": 0
+      },
+      "plan_valid": false,
+      "record_valid": false
+    },
+    {
+      "id": "marked-formula-zero",
+      "type": "formula",
+      "note": "[[lezi:next-feed:v1]]",
+      "payload": {
+        "amount_ml": 0
+      },
+      "plan_valid": true,
+      "record_valid": false
+    },
+    {
+      "id": "ordinary-pumped-zero",
+      "type": "pumped_feed",
+      "note": null,
+      "payload": {
+        "amount_ml": 0
+      },
+      "plan_valid": false,
+      "record_valid": false
+    },
+    {
+      "id": "marked-pumped-zero",
+      "type": "pumped_feed",
+      "note": "[[lezi:next-feed:v1]]",
+      "payload": {
+        "amount_ml": 0
+      },
+      "plan_valid": true,
+      "record_valid": false
+    },
+    {
+      "id": "marked-express-zero",
+      "type": "pump_express",
+      "note": "[[lezi:next-feed:v1]]",
+      "payload": {
+        "amount_ml": 0
+      },
+      "plan_valid": false,
+      "record_valid": false
+    },
+    {
+      "id": "ordinary-formula-one",
+      "type": "formula",
+      "note": null,
+      "payload": {
+        "amount_ml": 1
+      },
+      "plan_valid": true,
+      "record_valid": true
+    },
+    {
+      "id": "formula-over-limit",
+      "type": "formula",
+      "note": null,
+      "payload": {
+        "amount_ml": 1000
+      },
+      "plan_valid": false,
+      "record_valid": false
+    }
+  ]
+}

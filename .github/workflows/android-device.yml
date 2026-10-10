@@ -1,0 +1,45 @@
+name: Android device contracts
+on:
+  # Device gates are explicitly opt-in; a push or PR must not start ADB/emulators.
+  workflow_dispatch:
+concurrency:
+  group: android-device-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  device:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [26, 35]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Room and all module device/Compose contracts
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api }}
+          arch: x86_64
+          disable-animations: true
+          # Use only the runner's existing KVM access; otherwise use software emulation.
+          # Do not broaden device permissions or rewrite host security configuration.
+          disable-linux-hw-accel: auto
+          script: ./gradlew connectedDebugAndroidTest --stacktrace --no-daemon
+      - name: Device reports (including failures)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: device-reports-api-${{ matrix.api }}
+          path: |
+            **/build/reports/androidTests/
+            **/build/outputs/androidTest-results/

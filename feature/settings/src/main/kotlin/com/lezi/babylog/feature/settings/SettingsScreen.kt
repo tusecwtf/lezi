@@ -206,7 +206,7 @@ class SettingsViewModel @Inject constructor(
     val ui = combine(
         localSettings,
         careLog.observeCustomItems(),
-        syncPort.session(),
+        syncPort.sessionPresentation(),
     ) { local, customItems, session ->
         SettingsUi(
             settings = local.settings,
@@ -334,19 +334,17 @@ class SettingsViewModel @Inject constructor(
     fun setCarePlanLocalReminders(enabled: Boolean) =
         viewModelScope.launch { careLog.setCarePlanLocalRemindersEnabled(enabled) }
 
-    fun confirmSystemCalendar(calendarId: String, disclosureLevel: Int) =
-        viewModelScope.launch {
-            // Provider/storage failure keeps the dialog state unchanged
-            // instead of crashing from a confirm tap.
-            runCatching { systemCalendarConfiguration.confirm(calendarId, disclosureLevel) }
-                .onFailure { error -> if (error is CancellationException) throw error }
-        }
+    private val calendarSetupCommand = com.lezi.babylog.feature.settings.calendar.SystemCalendarSetupCommand(systemCalendarConfiguration)
+    val calendarSetupState = calendarSetupCommand.state
 
-    fun disableSystemCalendar() =
-        viewModelScope.launch {
-            runCatching { systemCalendarConfiguration.disable() }
-                .onFailure { error -> if (error is CancellationException) throw error }
-        }
+    fun consumeCalendarSetupResult() = calendarSetupCommand.consume()
+
+    fun confirmSystemCalendar(calendarId: String, disclosureLevel: Int) = viewModelScope.launch {
+        calendarSetupCommand.confirm(com.lezi.babylog.feature.settings.calendar.SystemCalendarSetupSelection(calendarId, disclosureLevel))
+    }
+
+    fun disableSystemCalendar() = viewModelScope.launch { calendarSetupCommand.disable() }
+
     fun setShowAvgSleep(enabled: Boolean) =
         viewModelScope.launch { settingsStore.setShowAvgSleep(enabled) }
     fun setComparePrevWeek(enabled: Boolean) =
@@ -641,21 +639,21 @@ fun SettingsRoute(
     }
 
     if (showSystemCalendarSetup) {
+        val calendarCommandState by vm.calendarSetupState.collectAsStateWithLifecycle()
         SystemCalendarSetupDialog(
             currentCalendarId = ui.settings.systemCalendarId,
             currentDisclosureLevel = ui.settings.systemCalendarDisclosureLevel,
+            commandState = calendarCommandState,
             onConfirm = { selection ->
-                vm.confirmSystemCalendar(
-                    selection.calendarId,
-                    selection.disclosureLevel,
-                )
-                showSystemCalendarSetup = false
+                vm.confirmSystemCalendar(selection.calendarId, selection.disclosureLevel)
             },
-            onDisable = {
-                vm.disableSystemCalendar()
-                showSystemCalendarSetup = false
+            onDisable = { vm.disableSystemCalendar() },
+            onDismiss = {
+                if (!calendarCommandState.busy) {
+                    vm.consumeCalendarSetupResult()
+                    showSystemCalendarSetup = false
+                }
             },
-            onDismiss = { showSystemCalendarSetup = false },
         )
     }
 

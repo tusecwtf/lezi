@@ -37,7 +37,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
@@ -122,7 +121,25 @@ import com.lezi.babylog.sync.backend.FakeSyncBackend
 import com.lezi.babylog.sync.backend.testPreparedMedia
 
 // Split from RealSyncPortTest kitchen sink by contract cluster (ticket 05).
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class RealSyncPortIdentityClearTest {
+    @Test
+    fun terminalResponseForOldCredentialsCannotClearANewerHealthyGeneration() = runTest {
+        val original = joinedSession("family-a")
+        val rig = SyncRig(original)
+        rig.awaitStartupRecovery()
+        rig.backend.beforePullReturn = {
+            rig.preferences.saveSession(original.copy(accessToken = "new-access", refreshToken = "new-refresh"))
+            throw RemoteDeviceRemovedException(original)
+        }
+        val result = rig.port.sync(SyncTrigger.PullToRefresh)
+        assertThat(result.isFailure).isTrue()
+        assertThat(rig.preferences.current().accessToken).isEqualTo("new-access")
+        assertThat(rig.preferences.current().refreshToken).isEqualTo("new-refresh")
+        assertThat(rig.preferences.pendingDeviceRemovalClear).isFalse()
+        assertThat(rig.preferences.deviceRemovedReceiptValue).isNull()
+    }
+
     @Test
     fun confirmedFamilyDeleteStagesFullClearAndRetiresEveryLocalFamilyTrace() = runTest {
         val clearGate = TestRemovedDeviceLocalClearGate()
@@ -133,7 +150,7 @@ class RealSyncPortIdentityClearTest {
             ),
             removedDeviceLocalClearGate = clearGate,
         )
-        rig.awaitStartupRecovery()
+        rig.awaitInitialReplicaBarrier()
 
         val result = rig.port.deleteFamily("  乐乐一家  ", "root-password-secret")
 
@@ -154,7 +171,7 @@ class RealSyncPortIdentityClearTest {
         )
         val preferences = MemorySyncPreferences(original)
         val failedRemoteRig = SyncRig(session = original, syncPreferences = preferences)
-        failedRemoteRig.awaitStartupRecovery()
+        failedRemoteRig.awaitInitialReplicaBarrier()
         failedRemoteRig.backend.deleteFailure = SyncHttpException(503)
 
         assertThat(
@@ -172,7 +189,7 @@ class RealSyncPortIdentityClearTest {
             syncPreferences = preferences,
             removedDeviceLocalClearGate = interruptedGate,
         )
-        interruptedRig.awaitStartupRecovery()
+        interruptedRig.awaitInitialReplicaBarrier()
         assertThat(
             interruptedRig.port.deleteFamily("乐乐一家", "root-password-secret").isFailure,
         ).isTrue()
@@ -219,7 +236,7 @@ class RealSyncPortIdentityClearTest {
             session = original,
             removedDeviceLocalClearGate = explicitGate,
         )
-        explicit.awaitStartupRecovery()
+        explicit.awaitInitialReplicaBarrier()
         explicit.backend.deleteFailure = RemoteFamilyDeletedException()
 
         assertThat(
@@ -233,7 +250,7 @@ class RealSyncPortIdentityClearTest {
             session = original,
             removedDeviceLocalClearGate = genericGate,
         )
-        generic.awaitStartupRecovery()
+        generic.awaitInitialReplicaBarrier()
         generic.backend.deleteFailure = SyncHttpException(401)
 
         assertThat(
@@ -251,7 +268,7 @@ class RealSyncPortIdentityClearTest {
             session = joinedSession("family-a").copy(role = FamilyRole.Member),
             removedDeviceLocalClearGate = clearGate,
         )
-        rig.awaitStartupRecovery()
+        rig.awaitInitialReplicaBarrier()
 
         val result = rig.port.leave()
 
@@ -266,7 +283,7 @@ class RealSyncPortIdentityClearTest {
         val original = joinedSession("family-a").copy(role = FamilyRole.Member)
         val preferences = MemorySyncPreferences(original)
         val failedRemoteRig = SyncRig(session = original, syncPreferences = preferences)
-        failedRemoteRig.awaitStartupRecovery()
+        failedRemoteRig.awaitInitialReplicaBarrier()
         failedRemoteRig.backend.leaveFailure = SyncHttpException(503)
 
         assertThat(failedRemoteRig.port.leave().isFailure).isTrue()
@@ -282,7 +299,7 @@ class RealSyncPortIdentityClearTest {
             syncPreferences = preferences,
             removedDeviceLocalClearGate = interruptedGate,
         )
-        interruptedRig.awaitStartupRecovery()
+        interruptedRig.awaitInitialReplicaBarrier()
         assertThat(interruptedRig.port.leave().isFailure).isTrue()
         assertThat(preferences.current()).isEqualTo(original)
         assertThat(preferences.pendingMembershipDeletionClear).isTrue()
@@ -325,7 +342,7 @@ class RealSyncPortIdentityClearTest {
             session = joinedSession("family-a").copy(role = FamilyRole.Owner),
             removedDeviceLocalClearGate = clearGate,
         )
-        rig.awaitStartupRecovery()
+        rig.awaitInitialReplicaBarrier()
 
         val result = rig.port.logoutCurrentDevice()
 
@@ -346,7 +363,7 @@ class RealSyncPortIdentityClearTest {
                 session = joinedSession("family-a").copy(role = FamilyRole.Owner),
                 removedDeviceLocalClearGate = clearGate,
             )
-            rig.awaitStartupRecovery()
+            rig.awaitInitialReplicaBarrier()
 
             val clearing = async { rig.port.logoutCurrentDevice() }
             clearGate.firstCall.await()
@@ -368,7 +385,7 @@ class RealSyncPortIdentityClearTest {
         val original = joinedSession("family-a").copy(role = FamilyRole.Member)
         val preferences = MemorySyncPreferences(original)
         val failedRemoteRig = SyncRig(session = original, syncPreferences = preferences)
-        failedRemoteRig.awaitStartupRecovery()
+        failedRemoteRig.awaitInitialReplicaBarrier()
         failedRemoteRig.backend.deviceLogoutFailure = SyncHttpException(503)
 
         assertThat(failedRemoteRig.port.logoutCurrentDevice().isFailure).isTrue()
@@ -384,22 +401,29 @@ class RealSyncPortIdentityClearTest {
             syncPreferences = preferences,
             removedDeviceLocalClearGate = interruptedGate,
         )
-        interruptedRig.awaitStartupRecovery()
+        interruptedRig.awaitInitialReplicaBarrier()
         assertThat(interruptedRig.port.logoutCurrentDevice().isFailure).isTrue()
         assertThat(preferences.current()).isEqualTo(original)
         assertThat(preferences.pendingDeviceRemovalClear).isTrue()
 
         val resumedGate = TestRemovedDeviceLocalClearGate()
-        val resumedRig = SyncRig(
+        val deviceMarkerRetired = CompletableDeferred<Unit>()
+        SyncRig(
             session = original,
             syncPreferences = preferences,
+            ownedPreferences = object : SyncPreferences by preferences {
+                override suspend fun clearPendingDeviceRemovalClear() {
+                    preferences.clearPendingDeviceRemovalClear()
+                    deviceMarkerRetired.complete(Unit)
+                }
+            },
             removedDeviceLocalClearGate = resumedGate,
         )
         resumedGate.firstCall.await()
-        withTimeout(2_000) { preferences.session.filter { !it.isJoined }.first() }
-        // The durable marker retires strictly after the session flip inside the
-        // same recovery: await the recovery instead of racing its edits.
-        resumedRig.awaitStartupRecovery()
+        // Empty session is published before the terminal marker retires. The
+        // startup first-load signal precedes both and cannot fence this phase.
+        // Await the actual marker write, without virtual time or IO timing guesses.
+        deviceMarkerRetired.await()
         assertThat(preferences.current()).isEqualTo(SyncSession())
         assertThat(preferences.pendingDeviceRemovalClear).isFalse()
     }
@@ -446,15 +470,16 @@ class RealSyncPortIdentityClearTest {
         )
         val rig = SyncRig(session = retained)
         rig.awaitStartupRecovery()
+        // Startup recovery and session observation are separate real-IO jobs.
+        // Await the published state itself; a runTest virtual timeout can expire
+        // before the session collector gets CPU. runTest bounds test liveness.
         assertThat(
-            withTimeout(2_000) {
-                rig.port.status().filter { it == SyncStatus.ReauthRequired }.first()
-            },
+            rig.port.status().first { it == SyncStatus.ReauthRequired },
         ).isEqualTo(SyncStatus.ReauthRequired)
         assertThat(rig.preferences.current().familyId).isEqualTo("family-a")
         assertThat(rig.preferences.current().pullCursor).isEqualTo(retained.pullCursor)
         // Credentials gone: reauth surface, not a joined sync session.
-        assertThat(rig.port.session().first().isJoined).isFalse()
+        assertThat(rig.port.sessionPresentation().first().isJoined).isFalse()
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.ReauthRequired)
     }
 

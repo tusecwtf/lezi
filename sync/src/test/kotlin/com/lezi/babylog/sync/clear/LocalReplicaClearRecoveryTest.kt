@@ -103,7 +103,7 @@ class LocalReplicaClearRecoveryTest {
         assertThat(result.isSuccess).isTrue()
         assertThat(roomCalls).isEqualTo(1)
         assertThat(rig.pending.pending).isNull()
-        assertThat(rig.transactions.runCount).isEqualTo(2)
+        assertThat(rig.transactions.runCount).isEqualTo(3)
     }
     @Test
     fun domainCancellationWinsWhenReplicaFinalizationAlsoFails() = runTest {
@@ -139,7 +139,7 @@ class LocalReplicaClearRecoveryTest {
         assertThat(callbackDepth).isEqualTo(1)
         assertThat(rig.pending.stageDepths).containsExactly(1)
         assertThat(rig.pending.deleteDepths).containsExactly(1)
-        assertThat(rig.transactions.runCount).isEqualTo(2)
+        assertThat(rig.transactions.runCount).isEqualTo(3)
         assertThat(rig.pending.pending).isNull()
     }
     @Test

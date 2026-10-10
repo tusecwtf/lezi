@@ -33,6 +33,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -126,6 +127,7 @@ import com.lezi.babylog.sync.backend.deadline.FamilyHttpFailureKind
 import com.lezi.babylog.sync.backend.testPreparedMedia
 
 // Split from RealSyncPortTest kitchen sink by contract cluster (ticket 05).
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class RealSyncPortSessionLifecycleTest {
     @Test
     fun mediaCleanupLeavesPendingMarkerWhenReplicaBarrierIsHeld() = runTest {
@@ -279,6 +281,46 @@ class RealSyncPortSessionLifecycleTest {
     }
 
     @Test
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    fun foregroundPendingMemberCheckReportsBusyWhileStartupOwnsTheReplicaBarrier() = runTest {
+        val initial = SyncSession(serverHost = "192.168.1.20", serverPort = 8787)
+        val preferences = MemorySyncPreferences(initial, blockFirstSecretMigration = true)
+        val rig = SyncRig(session = initial, syncPreferences = preferences)
+        var statusCalls = 0
+        rig.backend.beforeMemberLoginStatusReturn = { statusCalls += 1 }
+        try {
+            // This existing fixture signal is completed from the real IO startup
+            // coroutine while it owns syncMutex, not from the test scheduler.
+            preferences.secretMigrationStarted.await()
+            preferences.savePendingMemberLogin(
+                rig.backend.nextMemberLoginReceipt,
+                displayName = "爸爸",
+                deviceName = "Pixel 9",
+            )
+            rig.backend.memberLoginStatuses += MemberLoginStatus.Rejected
+            val before = currentTime
+
+            val failure = rig.port.sync(SyncTrigger.Foreground).exceptionOrNull()
+
+            assertThat(failure).isInstanceOf(FamilyHttpException::class.java)
+            assertThat((failure as FamilyHttpException).kind)
+                .isEqualTo(FamilyHttpFailureKind.HouseholdSyncing)
+            assertThat(currentTime - before).isEqualTo(2_000L)
+            assertThat(statusCalls).isEqualTo(0)
+            assertThat(preferences.pendingMemberLogin.first()?.requestId)
+                .isEqualTo(rig.backend.nextMemberLoginReceipt.requestId)
+            assertThat(rig.backend.memberLoginStatuses.toList())
+                .containsExactly(MemberLoginStatus.Rejected)
+        } finally {
+            preferences.releaseSecretMigration.complete(Unit)
+            rig.awaitStartupRecovery()
+            // An unjoined LocalWrite is a no-op, but must acquire the same mutex:
+            // its return fences the released startup work without another poll.
+            rig.port.sync(SyncTrigger.LocalWrite).getOrThrow()
+        }
+    }
+
+    @Test
     fun foregroundPendingMemberCheckPublishesTheExactTerminalResultToOpenUi() = runTest {
         val initial = SyncSession(
             serverHost = "192.168.1.20",
@@ -286,6 +328,11 @@ class RealSyncPortSessionLifecycleTest {
         )
         val preferences = MemorySyncPreferences(initial)
         val rig = SyncRig(session = initial, syncPreferences = preferences)
+        rig.awaitStartupRecovery()
+        // firstLoad happens while startup still owns syncMutex. Before installing
+        // a pending request, this unjoined no-op acquires that same mutex without
+        // the coordinator's timed wait and fences actual startup completion.
+        rig.port.sync(SyncTrigger.Foreground).getOrThrow()
         preferences.savePendingMemberLogin(
             rig.backend.nextMemberLoginReceipt,
             displayName = "爸爸",
@@ -293,15 +340,21 @@ class RealSyncPortSessionLifecycleTest {
         )
         rig.backend.memberLoginStatuses += MemberLoginStatus.Rejected
         val observed = async { rig.port.memberLoginChecks().first() }
-        runCurrent()
+        try {
+            runCurrent()
 
-        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+            val result = rig.port.sync(SyncTrigger.Foreground)
+            result.getOrThrow() // Preserve the actual failure cause if this regresses.
+            assertThat(result.isSuccess).isTrue()
 
-        assertThat(withTimeout(2_000) { observed.await() }).isEqualTo(
-            MemberLoginCheckResult.Terminal(MemberLoginStatus.Rejected),
-        )
-        assertThat(preferences.current().isJoined).isFalse()
-        assertThat(preferences.pendingMemberLogin.first()).isNull()
+            assertThat(withTimeout(2_000) { observed.await() }).isEqualTo(
+                MemberLoginCheckResult.Terminal(MemberLoginStatus.Rejected, rig.backend.nextMemberLoginReceipt.requestId),
+            )
+            assertThat(preferences.current().isJoined).isFalse()
+            assertThat(preferences.pendingMemberLogin.first()).isNull()
+        } finally {
+            observed.cancelAndJoin()
+        }
     }
 
     @Test
@@ -312,6 +365,7 @@ class RealSyncPortSessionLifecycleTest {
         )
         val preferences = MemorySyncPreferences(initial)
         val rig = SyncRig(session = initial, syncPreferences = preferences)
+        rig.awaitInitialReplicaBarrier()
         preferences.savePendingMemberLogin(
             rig.backend.nextMemberLoginReceipt,
             displayName = "爸爸",
@@ -390,7 +444,7 @@ class RealSyncPortSessionLifecycleTest {
             serverPort = 8787,
         )
         val rig = SyncRig(session = configured)
-        rig.awaitStartupRecovery()
+        rig.awaitInitialReplicaBarrier()
         rig.pendingDomainRecovery.failures += IllegalStateException("provider unavailable")
 
         val failure = rig.port.saveEndpointConfig(
@@ -439,7 +493,7 @@ class RealSyncPortSessionLifecycleTest {
             serverPort = 8787,
         )
         val rig = SyncRig(session = configured)
-        rig.awaitStartupRecovery()
+        rig.awaitInitialReplicaBarrier()
         rig.pendingReplicaCleanup.pending = pendingReplicaCleanup()
         rig.pendingReplicaCleanup.loadFailures += IllegalStateException("marker unavailable")
 
@@ -461,7 +515,7 @@ class RealSyncPortSessionLifecycleTest {
             serverPort = 8787,
         )
         val rig = SyncRig(session = configured)
-        rig.awaitStartupRecovery()
+        rig.awaitInitialReplicaBarrier()
         val automaticSyncGate = CompletableDeferred<Unit>()
         rig.backend.handshakeGate = automaticSyncGate
         rig.backend.pullStarted = CompletableDeferred()
@@ -506,7 +560,7 @@ class RealSyncPortSessionLifecycleTest {
             serverPort = 8787,
         )
         val rig = SyncRig(session = configured)
-        rig.awaitStartupRecovery()
+        rig.awaitInitialReplicaBarrier()
         val automaticSyncGate = CompletableDeferred<Unit>()
         rig.backend.handshakeGate = automaticSyncGate
         rig.backend.pullStarted = CompletableDeferred()
@@ -566,7 +620,7 @@ class RealSyncPortSessionLifecycleTest {
             session = SyncSession(),
             syncPreferences = preferences,
         )
-        rig.awaitStartupRecovery()
+        rig.awaitInitialReplicaBarrier()
         rig.foreground.setForeground(false)
         rig.backend.pullFailures += SyncHttpException(503)
         val payload = MemberLoginQrPayload(
@@ -579,12 +633,12 @@ class RealSyncPortSessionLifecycleTest {
 
         val result = rig.port.claimMemberLoginQr(payload, "Pixel Tablet").getOrThrow()
 
-        assertThat(result.session.isJoined).isTrue()
+        assertThat(result.sessionPresentation.isJoined).isTrue()
         assertThat(result.dataRecovery).isEqualTo(InitialFamilyDataRecovery.NotRequired)
         assertThat(rig.backend.pullCursors).isEmpty()
         rig.foreground.setForeground(true)
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isFailure).isTrue()
-        assertThat(rig.port.session().first().isJoined).isTrue()
+        assertThat(rig.port.sessionPresentation().first().isJoined).isTrue()
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Error)
         assertThat(rig.backend.memberLoginGrantClaims)
             .containsExactly(Triple(endpoint, payload.grant, "Pixel Tablet"))
@@ -593,7 +647,7 @@ class RealSyncPortSessionLifecycleTest {
     @Test
     fun ownerCreatesOneQrCodeFromTheTrustedEndpointAndServerLandingUrl() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
-        rig.awaitStartupRecovery()
+        rig.awaitInitialReplicaBarrier()
         rig.backend.nextMemberLoginGrant = rig.backend.nextMemberLoginGrant.copy(
             landingUrl = "http://192.168.1.20:8767/join",
         )
@@ -613,13 +667,31 @@ class RealSyncPortSessionLifecycleTest {
             serverHost = "192.168.1.20",
             serverPort = 8787,
         )
-        val rig = SyncRig(session = configured)
-        rig.awaitStartupRecovery()
+        val backend = RecordingSyncBackend()
+        val initialSyncStarted = CompletableDeferred<Unit>()
+        val initialSyncCancelled = CompletableDeferred<Unit>()
         val automaticSyncGate = CompletableDeferred<Unit>()
-        rig.backend.anonymousHealthGate = automaticSyncGate
-        rig.backend.createStarted = CompletableDeferred()
-        rig.backend.releaseCreate = CompletableDeferred()
-        rig.backend.nextPull = PullResult(
+        val rig = SyncRig(
+            session = configured,
+            syncBackend = object : SyncBackend by backend {
+                override suspend fun authenticatedHandshake(
+                    session: SyncSession,
+                ): com.lezi.babylog.sync.backend.AuthenticatedSyncHandshake {
+                    initialSyncStarted.complete(Unit)
+                    try {
+                        automaticSyncGate.await()
+                        return backend.authenticatedHandshake(session)
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        initialSyncCancelled.complete(Unit)
+                        throw cancelled
+                    }
+                }
+            },
+        )
+        rig.awaitInitialReplicaBarrier()
+        backend.createStarted = CompletableDeferred()
+        backend.releaseCreate = CompletableDeferred()
+        backend.nextPull = PullResult(
             entities = emptyList(),
             cursor = 7,
             generation = "current-generation",
@@ -633,8 +705,8 @@ class RealSyncPortSessionLifecycleTest {
                 familyName = "乐乐家",
             ).getOrThrow()
         }
-        rig.backend.createStarted!!.await()
-        val changingNetwork = async {
+        backend.createStarted!!.await()
+        val changingNetwork = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
             rig.port.saveEndpointConfig(
                 FamilyEndpointConfig(
                     host = "192.168.1.99",
@@ -642,20 +714,29 @@ class RealSyncPortSessionLifecycleTest {
                 ),
             ).exceptionOrNull()
         }
-        runCurrent()
+        try {
+            backend.releaseCreate!!.complete(Unit)
+            val created = creating.await()
+            val blocked = changingNetwork.await()
 
-        rig.backend.releaseCreate!!.complete(Unit)
-        val created = creating.await()
-        rig.foreground.setForeground(false)
-        automaticSyncGate.complete(Unit)
-        val blocked = changingNetwork.await()
+            // Initial sync actually enters authenticatedHandshake, not anonymousHealth.
+            // The create/network commands finish while that first sync is still parked.
+            initialSyncStarted.await()
+            assertThat(created.dataRecovery).isEqualTo(InitialFamilyDataRecovery.NotRequired)
+            assertThat(backend.pullCursors).isEmpty()
+            assertThat(blocked).isInstanceOf(DifferentFamilyServerException::class.java)
+            assertThat(rig.preferences.current().serverHost).isEqualTo("192.168.1.20")
+            assertThat(rig.preferences.current().isJoined).isTrue()
+            assertThat(rig.preferences.current().familyId).isEqualTo(created.sessionPresentation.familyId)
 
-        assertThat(created.dataRecovery).isEqualTo(InitialFamilyDataRecovery.NotRequired)
-        assertThat(rig.backend.pullCursors).isEmpty()
-        assertThat(blocked).isInstanceOf(DifferentFamilyServerException::class.java)
-        assertThat(rig.preferences.current().serverHost).isEqualTo("192.168.1.20")
-        assertThat(rig.preferences.current().isJoined).isTrue()
-        assertThat(rig.preferences.current().familyId).isEqualTo(created.session.familyId)
+            // Observe cancellation before releasing the gate; never race a new pull.
+            rig.foreground.setForeground(false)
+            initialSyncCancelled.await()
+            assertThat(backend.pullCursors).isEmpty()
+        } finally {
+            rig.foreground.setForeground(false)
+            automaticSyncGate.complete(Unit)
+        }
     }
 
     @Test
@@ -665,7 +746,7 @@ class RealSyncPortSessionLifecycleTest {
             serverPort = 8787,
         )
         val rig = SyncRig(session = configured)
-        rig.awaitStartupRecovery()
+        rig.awaitInitialReplicaBarrier()
         rig.pendingReplicaCleanup.pending = pendingReplicaCleanup()
         rig.pendingReplicaCleanup.loadFailures += IllegalStateException("marker unavailable")
 

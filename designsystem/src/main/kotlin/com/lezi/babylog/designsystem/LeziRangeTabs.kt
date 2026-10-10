@@ -22,6 +22,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
@@ -65,54 +66,62 @@ fun <T> LeziRangeTabs(
                 animationSpec = tween(durationMillis = tabMotionMs),
                 label = "range_tab_indicator",
             )
-            Box(
-                Modifier
-                    .offset { IntOffset(indicatorOffset.roundToPx(), 0) }
-                    .width(tabWidth)
-                    .fillMaxHeight()
-                    .clip(tabShape)
-                    .background(MaterialTheme.colorScheme.surface)
-                    .border(
-                        1.dp,
-                        MaterialTheme.colorScheme.outline.copy(alpha = 0.35f),
-                        tabShape,
-                    ),
-            )
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(gap),
-            ) {
-                items.forEach { item ->
-                    val on = item == selected
-                    val textColor by animateColorAsState(
-                        targetValue = if (on) {
-                            MaterialTheme.colorScheme.onSurface
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                        animationSpec = tween(durationMillis = tabMotionMs),
-                        label = "range_tab_text",
-                    )
+            // Measure the text row first. The indicator is an overlay and must not
+            // derive its height from the unbounded constraints of a scrolling page.
+            Box(Modifier.fillMaxWidth()) {
+                Box(Modifier.matchParentSize()) {
                     Box(
                         Modifier
-                            .weight(1f)
+                            .offset { IntOffset(indicatorOffset.roundToPx(), 0) }
+                            .width(tabWidth)
+                            .testTag("range_tab_indicator")
+                            .fillMaxHeight()
                             .clip(tabShape)
-                            .heightIn(min = LeziSpacing.Touch)
-                            .selectable(
-                                selected = on,
-                                role = Role.Tab,
-                                onClick = { onSelect(item) },
-                            )
-                            .padding(vertical = LeziSpacing.Sm),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            label(item),
-                            style = LeziTypography.Label,
-                            color = textColor,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+                            .background(MaterialTheme.colorScheme.surface)
+                            .border(
+                                1.dp,
+                                MaterialTheme.colorScheme.outline.copy(alpha = 0.35f),
+                                tabShape,
+                            ),
+                    )
+                }
+
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(gap),
+                ) {
+                    items.forEach { item ->
+                        val on = item == selected
+                        val textColor by animateColorAsState(
+                            targetValue = if (on) {
+                                MaterialTheme.colorScheme.onSurface
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            animationSpec = tween(durationMillis = tabMotionMs),
+                            label = "range_tab_text",
                         )
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .clip(tabShape)
+                                .heightIn(min = LeziSpacing.Touch)
+                                .selectable(
+                                    selected = on,
+                                    role = Role.Tab,
+                                    onClick = { onSelect(item) },
+                                )
+                                .padding(vertical = LeziSpacing.Sm),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                label(item),
+                                style = LeziTypography.Label,
+                                color = textColor,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                     }
                 }
             }

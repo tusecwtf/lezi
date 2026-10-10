@@ -4,5 +4,10 @@
     xmlns:tools="http://schemas.android.com/tools">
     <application
         android:usesCleartextTraffic="true"
-        tools:replace="android:usesCleartextTraffic" />
+        tools:replace="android:usesCleartextTraffic">
+        <service
+            android:name="com.lezi.babylog.validation.RendererStartupProbeService"
+            android:exported="false"
+            android:process=":export_renderer" />
+    </application>
 </manifest>

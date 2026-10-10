@@ -1,0 +1,7 @@
+NAS package validated: version=0.5.4 image=lezi-sync:0.5.4 archive=lezi-sync-0.5.4-linux-amd64.tar
+NAS package validated: version=0.5.4 image=lezi-sync:0.5.4 archive=lezi-sync-0.5.4-linux-amd64.tar
+NAS package validated: version=0.5.3 image=lezi-sync:0.5.3 archive=lezi-sync-0.5.3-linux-amd64.tar
+NAS package validated: version=0.5.3 image=lezi-sync:0.5.3 archive=lezi-sync-0.5.3-linux-amd64.tar
+NAS package validated: version=0.5.2 image=lezi-sync:0.5.2 archive=lezi-sync-0.5.2-linux-amd64.tar
+NAS package validated: version=0.5.2 image=lezi-sync:0.5.2 archive=lezi-sync-0.5.2-linux-amd64.tar
+NAS 0.5.4/0.5.3/0.5.2 full packaging, rollback identity, and check-only regressions passed

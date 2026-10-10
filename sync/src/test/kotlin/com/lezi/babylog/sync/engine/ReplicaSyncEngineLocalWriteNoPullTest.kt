@@ -1284,17 +1284,15 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
                 syncDirty = true,
             ),
         )
-        rig.immutableMediaSpool.freezeGroup(
-            mutationId,
-            listOf(
-                com.lezi.babylog.sync.media.ImmutableMediaSpoolSource(
-                    mediaUuid = mediaUuid,
-                    role = com.lezi.babylog.sync.media.CausalMediaRole.Log,
-                    localUri = localUri,
-                ),
-            ),
-        )
+        // The engine writes immutable source evidence BEFORE normalization. Crash after
+        // the sidecar is complete but before its first Room manifest, not before capture.
+        rig.conflictDetails.failNextFrozenManifestWrite = java.io.IOException("crash before Room manifest")
+        assertThat(runCatching { rig.engine.synchronize(session, SyncTrigger.LocalWrite) }.isFailure).isTrue()
         assertThat(rig.conflictDetails.getFrozenMediaSpoolManifest(mutationId)).isNull()
+        assertThat(rig.conflictDetails.getTransportJournal("media-freeze-capture-v1:$mutationId")).isNotNull()
+        assertThat(rig.immutableMediaSpool.recoverGroup(mutationId))
+            .isInstanceOf(com.lezi.babylog.sync.media.ImmutableMediaSpoolRecovery.Complete::class.java)
+        assertThat(rig.backend.causalCommittedUnits).isEmpty()
 
         rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
@@ -1341,7 +1339,7 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
     }
 
     @Test
-    fun removedRoomSlotLeavesPartialOrCompleteJournalAndPerformsNoNetworkWrite() = runTest {
+    fun removedRoomSlotPinsPartialOrCompleteJournalAndPerformsNoNetworkWrite() = runTest {
         listOf(false, true).forEach { completeJournal ->
             val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
             val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
@@ -1424,7 +1422,14 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
 
             assertThat(rig.backend.causalMediaPreimageBytes).isEmpty()
             assertThat(rig.backend.causalCommittedUnits).isEmpty()
-            assertThat(rig.conflictDetails.getFrozenMediaSpoolManifest(mutationId)).isNull()
+            // No matching capture means no authority to reinterpret the sidecar. Keep its
+            // sole bytes under a durable quarantine owner across recovery/GC and restart.
+            assertThat(rig.conflictDetails.getFrozenMediaSpoolManifest(mutationId)).isNotNull()
+            assertThat(requireNotNull(rig.conflictDetails.getTransportJournal(
+                com.lezi.babylog.sync.disasterrecovery.RestoreArtifactRetirement.KEY)).payloadJson)
+                .contains(mutationId)
+            assertThat(rig.conflictDetails.getFrozenMutation("record",
+                if (completeJournal) "record-complete-slot-drift" else "record-partial-slot-drift")).isNull()
             val evidence = requireNotNull(rig.immutableMediaSpool.recoverGroup(mutationId))
             assertThat(evidence.group.items.map { it.mediaUuid }).contains(firstMediaUuid)
             if (completeJournal) {

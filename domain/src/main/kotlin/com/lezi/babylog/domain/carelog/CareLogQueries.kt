@@ -39,6 +39,13 @@ internal class CareLogQueries(
 ) {
     private val fulfillmentSurface = FulfillmentSurface(fulfillmentCandidateDao)
 
+    suspend fun projectedRecords(
+        babyId: Long,
+        startInclusive: Long,
+        endExclusive: Long,
+    ): List<ProjectedRecordEntity> =
+        recordWakeProjectionDao.loadRecordProjection(babyId, startInclusive, endExclusive)
+
     fun observeRecords(
         babyId: Long,
         startDayInclusive: LocalDate,
@@ -188,8 +195,8 @@ internal class CareLogQueries(
         val matchingTypeKeys = RecordType.entries
             .filter { type ->
                 (
-                    type == RecordType.WEIGHT &&
-                        queryNeedsConvertedWeightCandidate
+                    type == RecordType.SLEEP ||
+                        type == RecordType.WEIGHT && queryNeedsConvertedWeightCandidate
                     ) ||
                     type.candidateSearchTerms().any { term ->
                         typeTermMatchesQuery(term, normalizedQuery)
@@ -204,10 +211,9 @@ internal class CareLogQueries(
         ).asSequence()
             .map { it.toModel() }
             .filter { it.clientUuid !in hiddenSourceClientUuids }
-            .filter { it.matchesVisibleSearchText(normalizedQuery) }
             .toList()
         val sleepIds = hits.filter { it.type == RecordType.SLEEP }.map { it.clientUuid }
-        if (sleepIds.isEmpty()) return hits
+        if (sleepIds.isEmpty()) return hits.filter { it.matchesVisibleSearchText(normalizedQuery) }
         // Explicit-root projection refuses more than MAX_EXPLICIT_PROJECTION_ROOTS
         // ids. Search can match every sleep of a long history, so project in
         // capped batches and keep hit order.
@@ -219,16 +225,18 @@ internal class CareLogQueries(
             .map(ProjectedRecordEntity::toDomainRecord)
             .associateBy { it.clientUuid }
         return hits.map { hit -> projected[hit.clientUuid] ?: hit }
+            .filter { it.matchesVisibleSearchText(normalizedQuery) }
     }
 
     suspend fun recentCareSummary(
         babyId: Long,
         zone: ZoneId,
         hiddenSourceClientUuids: Set<String> = emptySet(),
+        now: Long = RecordTime.currentTimeMillis(),
     ): WidgetSummaryDto {
         val baby = babyDao.get(babyId)?.toModel()
-        val day = LocalDate.now(zone)
-        val now = RecordTime.currentTimeMillis()
+        // The date and stale-open cutoff must belong to the same clock snapshot.
+        val day = Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
         val dayStart = day.atStartOfDay(zone).toInstant().toEpochMilli()
         // Bounded widget read (was a full-history projection scan). The window
         // overlap clause carries today's point facts plus every sleep whose

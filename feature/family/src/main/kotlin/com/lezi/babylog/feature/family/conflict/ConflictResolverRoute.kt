@@ -61,7 +61,7 @@ import com.lezi.babylog.sync.backend.ConflictResolveRequest
 import com.lezi.babylog.sync.backend.ConflictWithdrawRequest
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.PolicyClock
-import com.lezi.babylog.sync.session.SyncSession
+import com.lezi.babylog.sync.session.SyncSessionPresentation
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
@@ -169,7 +169,7 @@ class ConflictResolverHost internal constructor(
     private val resolveConflict: suspend (String, ConflictResolveRequest) -> ConflictResolveOutcome,
     private val withdrawConflict: suspend (String, ConflictWithdrawRequest) -> ConflictResolveOutcome =
         { _, _ -> ConflictResolveOutcome.Rejected("not_implemented", "撤回未实现") },
-    private val sessions: Flow<SyncSession>,
+    private val sessions: Flow<SyncSessionPresentation>,
     private val nowMillis: () -> Long,
     savedStateHandle: SavedStateHandle,
     private val actorNames: Flow<Map<String, String>> = kotlinx.coroutines.flow.flowOf(emptyMap()),
@@ -187,7 +187,7 @@ class ConflictResolverHost internal constructor(
         loadConflict = careLog::loadConflictDetail,
         resolveConflict = careLog::resolveConflict,
         withdrawConflict = careLog::withdrawConflictBranches,
-        sessions = syncPort.session(),
+        sessions = syncPort.sessionPresentation(),
         nowMillis = clock::nowMillis,
         savedStateHandle = savedStateHandle,
         actorNames = syncPort.familyMemberDirectory().map { members ->

@@ -1,4 +1,5 @@
 package com.lezi.babylog.sync.session
+import com.lezi.babylog.core.common.validation.StartupBoundaryObservation
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -15,7 +16,11 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
@@ -67,6 +72,7 @@ data class DisasterRestoreEntityVersion(
     val clientUuid: String,
     val updatedAt: Long,
     val restored: Boolean,
+    val localEvidence: String? = null,
 )
 
 data class DisasterRestoreRequestIds(
@@ -128,8 +134,42 @@ data class SyncSession(
             "pullCursor=$pullCursor, reauthRequired=$reauthRequired, credentials=<redacted>)"
 }
 
+enum class TerminalRemovalKind { Device, Membership, Family }
+
+/** Non-secret identity/trust fence for a candidate member operation. */
+data class MemberReconnectOwner(
+    val familyId: String,
+    val membershipId: String,
+    val deviceId: String,
+    val role: FamilyRole,
+    val origin: String,
+    val reauthRequired: Boolean,
+    val endpoint: TrustedEndpointProfile?,
+) {
+    companion object {
+        fun of(session: SyncSession, endpoint: TrustedEndpointProfile?) = MemberReconnectOwner(
+            session.familyId, session.membershipId, session.deviceId, session.role,
+            session.baseUrl, session.reauthRequired, endpoint,
+        )
+    }
+}
+
 interface SyncPreferences {
+    suspend fun stageTerminalRemovalIfCurrent(
+        expected: SyncSession,
+        kind: TerminalRemovalKind,
+        receipt: DeviceRemovedCleanupReceipt? = null,
+    ): Boolean
+
     val session: Flow<SyncSession>
+    val familyReadSnapshot: Flow<FamilyReadSnapshot>
+        get() = session.map { FamilyReadSnapshot(it.toPresentation(), identityEpoch = null) }
+    /** A delayed directory fetch may commit only to the identity epoch captured before it began. */
+    suspend fun saveFamilyMemberDirectoryIfCurrent(
+        expectedIdentityEpoch: Long,
+        generation: String,
+        members: List<FamilyMember>,
+    ): Boolean = false
     val verifiedEndpoint: Flow<TrustedEndpointProfile?>
     val familyMemberDirectory: Flow<List<FamilyMember>>
         get() = kotlinx.coroutines.flow.flowOf(emptyList())
@@ -148,7 +188,7 @@ interface SyncPreferences {
     val disasterRestoreCheckpoint: Flow<DisasterRestoreCheckpoint?>
         get() = kotlinx.coroutines.flow.flowOf(null)
     suspend fun rememberEndpoint(endpoint: TrustedEndpointProfile)
-    suspend fun forgetEndpoint()
+    suspend fun forgetEndpoint(retainMemberAttempts: Boolean = false)
     suspend fun saveFamilyMemberDirectory(members: List<FamilyMember>) = Unit
     suspend fun saveFamilyMemberDirectorySnapshot(
         generation: String,
@@ -159,6 +199,11 @@ interface SyncPreferences {
     suspend fun saveLastAppUpdateCheckedAt(atMillis: Long) = Unit
     suspend fun saveEndpointConfig(config: FamilyEndpointConfig, clearSessionIfServerChanged: Boolean = true)
     suspend fun saveSession(session: SyncSession)
+    suspend fun saveRefreshedSessionIfCurrent(expected: SyncSession, refreshed: SyncSession): Boolean
+    suspend fun clearDeviceCredentialsForReauthIfCurrent(expected: SyncSession): Boolean
+    /** Profile-only compare-and-set; implementations must never rewrite credentials. */
+    suspend fun updateFamilyName(expected: SyncSession, familyName: String): Boolean =
+        throw UnsupportedOperationException("Atomic family profile update is not implemented")
     /**
      * Commits rotated credentials for the same Device identity without entering the
      * cross-identity reauth gate. The durable refresh request id is retired last.
@@ -179,7 +224,13 @@ interface SyncPreferences {
         saveSession(session)
     }
     suspend fun pendingReplicaResetPrevious(): SyncSession? = null
+    suspend fun pendingReplicaResetCredentialsReady(): Boolean = true
     suspend fun completePendingReplicaReset() {}
+    /** Publish only the already-durable restore credentials and verified target; no token rewrite. */
+    suspend fun completePendingRestoreSession(endpoint: TrustedEndpointProfile) {
+        completePendingReplicaReset()
+        saveReconnectedSession(session.first(), endpoint)
+    }
     suspend fun updateCursor(cursor: Long, generation: String = "")
     suspend fun updatePullCheckpoint(
         cursor: Long,
@@ -199,17 +250,51 @@ interface SyncPreferences {
     suspend fun clearOwnerLoginRequestId()
     /** Durable refresh-rotation nonce; retired only after rotated credentials are committed. */
     suspend fun ensureRefreshRequestId(): String
+    suspend fun beginMemberQrClaim(operationId: String, owner: MemberReconnectOwner): Boolean = false
+    suspend fun endMemberQrClaim(operationId: String): Unit =
+        throw UnsupportedOperationException("Scoped QR claim cleanup is not implemented")
+    suspend fun activateMemberQrClaimIfCurrent(
+        operationId: String, owner: MemberReconnectOwner, session: SyncSession,
+        endpoint: TrustedEndpointProfile, pendingReplicaResetPrevious: SyncSession?,
+    ): Boolean = throw UnsupportedOperationException("Scoped QR claim activation is not implemented")
+    suspend fun memberReconnectOwner(): MemberReconnectOwner =
+        MemberReconnectOwner.of(session.first(), verifiedEndpoint.first())
+    suspend fun beginReconnectMemberAttempt(attempt: PendingMemberLogin, owner: MemberReconnectOwner): Boolean =
+        throw UnsupportedOperationException("Candidate member ownership is not implemented")
+    suspend fun isReconnectMemberAttemptCurrent(operationId: String, owner: MemberReconnectOwner): Boolean = false
+    suspend fun activateReconnectMemberIfCurrent(
+        operationId: String,
+        owner: MemberReconnectOwner,
+        session: SyncSession,
+        endpoint: TrustedEndpointProfile,
+    ): Boolean = throw UnsupportedOperationException("Candidate member activation is not implemented")
+    /** Non-secret local receipt, written before a non-replayable application is sent. */
+    suspend fun saveMemberLoginAttempt(attempt: PendingMemberLogin, reconnect: Boolean = false): Unit =
+        throw UnsupportedOperationException("Durable member attempt is not implemented")
+    suspend fun memberLoginAttempt(reconnect: Boolean = false): PendingMemberLogin? = null
+    suspend fun clearMemberLoginAttempt(reconnect: Boolean = false, expectedOperationId: String? = null): Unit =
+        throw UnsupportedOperationException("Durable member attempt cleanup is not implemented")
     suspend fun savePendingMemberLogin(
         receipt: MemberLoginReceipt,
         displayName: String,
         deviceName: String,
+        expectedOperationId: String? = null,
     ): Unit = throw UnsupportedOperationException("Pending member login is not implemented")
+    suspend fun pendingMemberSecretIfCurrent(requestId: String, owner: MemberReconnectOwner): String? =
+        throw UnsupportedOperationException("Scoped pending credential read is not implemented")
+    suspend fun isPendingMemberLoginCurrent(requestId: String, owner: MemberReconnectOwner): Boolean = false
+    suspend fun activatePendingMemberIfCurrent(
+        requestId: String, owner: MemberReconnectOwner, session: SyncSession,
+        pendingReplicaResetPrevious: SyncSession?,
+    ): Boolean = throw UnsupportedOperationException("Scoped member activation is not implemented")
     suspend fun pendingMemberSecret(): String = ""
-    suspend fun clearPendingMemberLogin() = Unit
+    suspend fun clearPendingMemberLogin(expectedOperationId: String? = null) = Unit
     suspend fun saveDisasterRestoreCheckpoint(
         checkpoint: DisasterRestoreCheckpoint,
         recoveryToken: String,
     ) = Unit
+    suspend fun pendingDisasterRestoreRequestIds(): DisasterRestoreRequestIds? =
+        throw UnsupportedOperationException("Restore request identity lookup is not implemented")
     suspend fun ensureDisasterRestoreRequestIds(): DisasterRestoreRequestIds =
         DisasterRestoreRequestIds(
             start = UUID.randomUUID().toString(),
@@ -263,18 +348,62 @@ private fun unimplementedPendingGenerationResync(): Nothing =
         "pending generation resync Flow and mutators must be implemented together",
     )
 
+/** Identity and token generation, deliberately excluding cursor and profile fields. */
+fun SyncSession.hasSameCredentialGeneration(other: SyncSession): Boolean =
+    familyId == other.familyId && membershipId == other.membershipId &&
+        deviceId == other.deviceId && role == other.role && baseUrl == other.baseUrl &&
+        accessToken == other.accessToken && refreshToken == other.refreshToken &&
+        reauthRequired == other.reauthRequired
+
 @Singleton
 class DataStoreSyncPreferences @Inject constructor(
     private val dataStore: DataStore<Preferences>,
     private val secureTokenStore: SecureRefreshTokenStore,
 ) : SyncPreferences {
+    // All cross-store identity writers share this owner. Never acquire it from DataStore.edit.
+    private val credentialMutex = Mutex()
+    // Process-local ownership only. QR verification/claim never persists temporary trust.
+    private var activeMemberQrClaim: String? = null
     private val processAccessToken = java.util.concurrent.atomic.AtomicReference("")
     private val processAccessExpiry = java.util.concurrent.atomic.AtomicLong(0)
     /** Null until the first encrypted read or a successful set/clear in this process. */
     private val processRefreshToken = java.util.concurrent.atomic.AtomicReference<String?>(null)
-    override val session: Flow<SyncSession> = dataStore.data.map { prefs ->
-        mapSession(prefs)
+    override val session: Flow<SyncSession> = StartupBoundaryObservation.observeCollection(
+        dataStore.data, "session:collect",
+    ).map {
+        credentialMutex.withLock {
+            // A flow emission may have waited behind an identity writer. Re-read under
+            // the same owner instead of pairing that old emission with newer token mirrors.
+            currentSessionUnderCredentialLock()
+        }
     }
+
+    override val familyReadSnapshot: Flow<FamilyReadSnapshot> = dataStore.data.map {
+        credentialMutex.withLock {
+            // Re-read after taking the owner: an upstream emission may predate an identity switch.
+            val prefs = dataStore.data.first()
+            val session = mapSession(prefs).toPresentation()
+            val epoch = prefs[Keys.READ_IDENTITY_EPOCH] ?: 0L
+            FamilyReadSnapshot(
+                session = session,
+                identityEpoch = epoch,
+                directoryIdentityEpoch = prefs[Keys.DIRECTORY_OWNER_EPOCH],
+                directoryGeneration = if (prefs[Keys.DIRECTORY_OWNER_EPOCH] == epoch) {
+                    prefs[Keys.FAMILY_MEMBER_DIRECTORY_GENERATION].orEmpty()
+                } else {
+                    ""
+                },
+                members = if (session.isJoined && prefs[Keys.DIRECTORY_OWNER_EPOCH] == epoch) {
+                    decodeFamilyMemberDirectory(prefs[Keys.FAMILY_MEMBER_DIRECTORY])
+                } else {
+                    emptyList()
+                },
+            )
+        }
+    }
+
+    private suspend fun currentSessionUnderCredentialLock(): SyncSession =
+        mapSession(dataStore.data.first())
     override val verifiedEndpoint: Flow<TrustedEndpointProfile?> = dataStore.data.map { prefs ->
         val origin = prefs[Keys.VERIFIED_ENDPOINT_ORIGIN].orEmpty()
         val trustMode = prefs[Keys.VERIFIED_ENDPOINT_TRUST_MODE]
@@ -298,6 +427,7 @@ class DataStoreSyncPreferences @Inject constructor(
         prefs[Keys.LAST_SERVER_HEALTHY_AT]
     }
     override val pendingMemberLogin: Flow<PendingMemberLogin?> = dataStore.data.map { prefs ->
+        decodeMemberLoginAttempt(prefs[Keys.MEMBER_LOGIN_ATTEMPT])?.let { return@map it }
         val requestId = prefs[Keys.PENDING_MEMBER_REQUEST_ID].orEmpty()
         if (requestId.isBlank() || secureStoreIo {
                 getPendingMemberSecret()
@@ -310,53 +440,74 @@ class DataStoreSyncPreferences @Inject constructor(
             displayName = prefs[Keys.PENDING_MEMBER_DISPLAY_NAME].orEmpty(),
             deviceName = prefs[Keys.PENDING_MEMBER_DEVICE_NAME].orEmpty(),
             expiresAtEpochSeconds = prefs[Keys.PENDING_MEMBER_EXPIRES_AT] ?: 0L,
+            operationId = prefs[Keys.PENDING_MEMBER_OPERATION_ID] ?: requestId,
+            endpointOrigin = prefs[Keys.PENDING_MEMBER_ORIGIN].orEmpty(),
         )
     }
     override val disasterRestoreCheckpoint: Flow<DisasterRestoreCheckpoint?> =
         dataStore.data.map(::mapDisasterRestoreCheckpoint)
 
     override suspend fun rememberEndpoint(endpoint: TrustedEndpointProfile) {
-        var clearCredentials = false
-        dataStore.edit { prefs ->
-            val previousOrigin = prefs[Keys.VERIFIED_ENDPOINT_ORIGIN].orEmpty()
-            val previousMode = prefs[Keys.VERIFIED_ENDPOINT_TRUST_MODE]
-            val previousPin = prefs[Keys.VERIFIED_ENDPOINT_SPKI_SHA256]
-            val trustUnchanged = previousOrigin == endpoint.origin &&
-                previousMode == endpoint.trustMode.name &&
-                previousPin == endpoint.spkiSha256
-            clearCredentials = previousOrigin.isNotBlank() &&
-                !trustUnchanged &&
-                storedFamilySessionMatchesOrigin(prefs, previousOrigin)
-            if (clearCredentials) markCredentialsTerminal(prefs)
-            prefs[Keys.VERIFIED_ENDPOINT_ORIGIN] = endpoint.origin
-            prefs[Keys.VERIFIED_ENDPOINT_TRUST_MODE] = endpoint.trustMode.name
-            val pin = endpoint.spkiSha256
-            if (pin == null) {
-                prefs.remove(Keys.VERIFIED_ENDPOINT_SPKI_SHA256)
-            } else {
-                prefs[Keys.VERIFIED_ENDPOINT_SPKI_SHA256] = pin
+        credentialMutex.withLock {
+            var clearCredentials = false
+            dataStore.edit { prefs ->
+                val previousOrigin = prefs[Keys.VERIFIED_ENDPOINT_ORIGIN].orEmpty()
+                val previousMode = prefs[Keys.VERIFIED_ENDPOINT_TRUST_MODE]
+                val previousPin = prefs[Keys.VERIFIED_ENDPOINT_SPKI_SHA256]
+                val trustUnchanged = previousOrigin == endpoint.origin &&
+                    previousMode == endpoint.trustMode.name &&
+                    previousPin == endpoint.spkiSha256
+                if (!trustUnchanged) {
+                    val uncertain = decodeMemberLoginAttempt(prefs[Keys.MEMBER_LOGIN_ATTEMPT])
+                        ?: decodeMemberLoginAttempt(prefs[Keys.MEMBER_RECONNECT_ATTEMPT])
+                    uncertain?.let { throw com.lezi.babylog.sync.MemberLoginOutcomeUnknownException(it) }
+                    check(prefs[Keys.PENDING_MEMBER_REQUEST_ID].isNullOrBlank()) {
+                        "已有加入申请，请先明确在这台设备放弃等待，再更改服务器信任"
+                    }
+                }
+                clearCredentials = previousOrigin.isNotBlank() &&
+                    !trustUnchanged &&
+                    storedFamilySessionMatchesOrigin(prefs, previousOrigin)
+                if (clearCredentials) markCredentialsTerminal(prefs)
+                activeMemberQrClaim = null
+                prefs[Keys.VERIFIED_ENDPOINT_ORIGIN] = endpoint.origin
+                prefs[Keys.VERIFIED_ENDPOINT_TRUST_MODE] = endpoint.trustMode.name
+                val pin = endpoint.spkiSha256
+                if (pin == null) {
+                    prefs.remove(Keys.VERIFIED_ENDPOINT_SPKI_SHA256)
+                } else {
+                    prefs[Keys.VERIFIED_ENDPOINT_SPKI_SHA256] = pin
+                }
             }
+            if (clearCredentials) finishPendingFamilyCredentialClear()
         }
-        if (clearCredentials) finishPendingFamilyCredentialClear()
     }
 
-    override suspend fun forgetEndpoint() {
-        var clearCredentials = false
-        dataStore.edit { prefs ->
-            val trustedOrigin = prefs[Keys.VERIFIED_ENDPOINT_ORIGIN].orEmpty()
-            clearCredentials = trustedOrigin.isNotBlank() &&
-                storedFamilySessionMatchesOrigin(prefs, trustedOrigin)
-            if (clearCredentials) markCredentialsTerminal(prefs)
-            prefs.remove(Keys.VERIFIED_ENDPOINT_ORIGIN)
-            prefs.remove(Keys.VERIFIED_ENDPOINT_TRUST_MODE)
-            prefs.remove(Keys.VERIFIED_ENDPOINT_SPKI_SHA256)
+    override suspend fun forgetEndpoint(retainMemberAttempts: Boolean) {
+        credentialMutex.withLock {
+            activeMemberQrClaim = null
+            var clearCredentials = false
+            dataStore.edit { prefs ->
+                if (!retainMemberAttempts) {
+                    clearPendingMemberValues(prefs)
+                    prefs.remove(Keys.MEMBER_RECONNECT_ATTEMPT)
+                }
+                val trustedOrigin = prefs[Keys.VERIFIED_ENDPOINT_ORIGIN].orEmpty()
+                clearCredentials = trustedOrigin.isNotBlank() &&
+                    storedFamilySessionMatchesOrigin(prefs, trustedOrigin)
+                if (clearCredentials) markCredentialsTerminal(prefs)
+                prefs.remove(Keys.VERIFIED_ENDPOINT_ORIGIN)
+                prefs.remove(Keys.VERIFIED_ENDPOINT_TRUST_MODE)
+                prefs.remove(Keys.VERIFIED_ENDPOINT_SPKI_SHA256)
+            }
+            if (clearCredentials) finishPendingFamilyCredentialClear()
         }
-        if (clearCredentials) finishPendingFamilyCredentialClear()
     }
 
     override suspend fun saveFamilyMemberDirectory(members: List<FamilyMember>) {
         val encoded = encodeFamilyMemberDirectory(members)
         dataStore.edit { prefs ->
+            prefs.remove(Keys.DIRECTORY_OWNER_EPOCH)
             prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY_GENERATION)
             if (encoded == "[]") {
                 prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY)
@@ -373,6 +524,7 @@ class DataStoreSyncPreferences @Inject constructor(
         require(generation.isNotBlank()) { "member directory generation must not be blank" }
         val encoded = encodeFamilyMemberDirectory(members)
         dataStore.edit { prefs ->
+            prefs.remove(Keys.DIRECTORY_OWNER_EPOCH)
             prefs[Keys.FAMILY_MEMBER_DIRECTORY_GENERATION] = generation
             if (encoded == "[]") {
                 prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY)
@@ -382,8 +534,30 @@ class DataStoreSyncPreferences @Inject constructor(
         }
     }
 
+    override suspend fun saveFamilyMemberDirectoryIfCurrent(
+        expectedIdentityEpoch: Long,
+        generation: String,
+        members: List<FamilyMember>,
+    ): Boolean = credentialMutex.withLock {
+        require(generation.isNotBlank()) { "member directory generation must not be blank" }
+        val current = currentSessionUnderCredentialLock()
+        if (!current.isJoined) return@withLock false
+        var saved = false
+        val encoded = encodeFamilyMemberDirectory(members)
+        dataStore.edit { prefs ->
+            if ((prefs[Keys.READ_IDENTITY_EPOCH] ?: 0L) == expectedIdentityEpoch) {
+                prefs[Keys.DIRECTORY_OWNER_EPOCH] = expectedIdentityEpoch
+                prefs[Keys.FAMILY_MEMBER_DIRECTORY_GENERATION] = generation
+                prefs[Keys.FAMILY_MEMBER_DIRECTORY] = encoded
+                saved = true
+            }
+        }
+        saved
+    }
+
     override suspend fun clearFamilyMemberDirectory() {
         dataStore.edit {
+            it.remove(Keys.DIRECTORY_OWNER_EPOCH)
             it.remove(Keys.FAMILY_MEMBER_DIRECTORY)
             it.remove(Keys.FAMILY_MEMBER_DIRECTORY_GENERATION)
         }
@@ -477,42 +651,121 @@ class DataStoreSyncPreferences @Inject constructor(
         config: FamilyEndpointConfig,
         clearSessionIfServerChanged: Boolean,
     ) {
-        val normalized = config.withNormalized()
-        val previous = session.first()
-        val newBase = normalized.baseUrl
-        val serverChanged = previous.baseUrl.isNotBlank() &&
-            previous.baseUrl != newBase &&
-            newBase.isNotBlank()
-        val shouldClearSession = clearSessionIfServerChanged && serverChanged
-        dataStore.edit { prefs ->
+        credentialMutex.withLock {
+            val normalized = config.withNormalized()
+            val previous = currentSessionUnderCredentialLock()
+            val newBase = normalized.baseUrl
+            decodeMemberLoginAttempt(dataStore.data.first()[Keys.MEMBER_LOGIN_ATTEMPT])?.let { attempt ->
+                if (newBase.isBlank() || attempt.endpointOrigin != normalizeHttpsOrigin(newBase)) {
+                    throw com.lezi.babylog.sync.MemberLoginOutcomeUnknownException(attempt)
+                }
+            }
+            val serverChanged = previous.baseUrl.isNotBlank() &&
+                previous.baseUrl != newBase &&
+                newBase.isNotBlank()
+            val shouldClearSession = clearSessionIfServerChanged && serverChanged
+            dataStore.edit { prefs ->
+                if (shouldClearSession) {
+                    clearFamilyValues(prefs)
+                    prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] = true
+                } else if (previous.baseUrl != newBase) {
+                    advanceReadIdentity(prefs)
+                }
+                if (normalized.host.isBlank()) {
+                    prefs.remove(Keys.SERVER_HOST)
+                    prefs.remove(Keys.SERVER_SCHEME)
+                } else {
+                    prefs[Keys.SERVER_HOST] = normalized.host
+                    prefs[Keys.SERVER_PORT] = normalized.port
+                    prefs[Keys.SERVER_SCHEME] = normalized.scheme
+                }
+            }
             if (shouldClearSession) {
-                clearFamilyValues(prefs)
-                prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] = true
+                secureStoreIo {
+                    clearPendingMemberSecret()
+                    clearDisasterRestoreToken()
+                }
             }
-            if (normalized.host.isBlank()) {
-                prefs.remove(Keys.SERVER_HOST)
-                prefs.remove(Keys.SERVER_SCHEME)
-            } else {
-                prefs[Keys.SERVER_HOST] = normalized.host
-                prefs[Keys.SERVER_PORT] = normalized.port
-                prefs[Keys.SERVER_SCHEME] = normalized.scheme
-            }
+            finishPendingFamilyCredentialClear()
         }
-        if (shouldClearSession) {
-            secureStoreIo {
-                clearPendingMemberSecret()
-                clearDisasterRestoreToken()
+    }
+
+    override suspend fun updateFamilyName(expected: SyncSession, familyName: String): Boolean {
+        credentialMutex.withLock {
+            var updated = false
+            dataStore.edit { prefs ->
+                if (prefs[Keys.FAMILY_ID].orEmpty() == expected.familyId &&
+                    prefs[Keys.MEMBERSHIP_ID].orEmpty() == expected.membershipId &&
+                    prefs[Keys.DEVICE_ID].orEmpty() == expected.deviceId &&
+                    prefs[Keys.ROLE].orEmpty() == expected.role.name &&
+                    storedFamilySessionMatchesOrigin(prefs, expected.baseUrl) &&
+                    prefs[Keys.REAUTH_REQUIRED] != true
+                ) {
+                    prefs[Keys.FAMILY_NAME] = familyName
+                    updated = true
+                }
             }
+            return updated
         }
-        finishPendingFamilyCredentialClear()
     }
 
     override suspend fun saveSession(session: SyncSession) {
-        persistSession(session, pendingReplicaResetPrevious = null, reconnectedEndpoint = null)
+        credentialMutex.withLock {
+            persistSession(session, pendingReplicaResetPrevious = null, reconnectedEndpoint = null)
+        }
     }
 
     override suspend fun saveRefreshedSession(session: SyncSession) {
-        val current = this.session.first()
+        credentialMutex.withLock { persistRefreshedSession(session) }
+    }
+
+    override suspend fun saveRefreshedSessionIfCurrent(
+        expected: SyncSession,
+        refreshed: SyncSession,
+    ): Boolean = credentialMutex.withLock {
+        val current = currentSessionUnderCredentialLock()
+        if (!current.hasSameCredentialGeneration(expected)) return@withLock false
+        // Rotating credentials does not replay profile data captured before a concurrent rename.
+        persistRefreshedSession(refreshed.copy(familyName = current.familyName))
+        true
+    }
+
+    override suspend fun clearDeviceCredentialsForReauth() {
+        credentialMutex.withLock { clearCredentialsForReauth() }
+    }
+
+    override suspend fun clearDeviceCredentialsForReauthIfCurrent(expected: SyncSession): Boolean =
+        credentialMutex.withLock {
+            if (!currentSessionUnderCredentialLock().hasSameCredentialGeneration(expected)) return@withLock false
+            clearCredentialsForReauth()
+            true
+        }
+
+    override suspend fun stageTerminalRemovalIfCurrent(
+        expected: SyncSession,
+        kind: TerminalRemovalKind,
+        receipt: DeviceRemovedCleanupReceipt?,
+    ): Boolean = credentialMutex.withLock {
+        if (!currentSessionUnderCredentialLock().hasSameCredentialGeneration(expected)) return@withLock false
+        dataStore.edit { prefs ->
+            val key = when (kind) {
+                TerminalRemovalKind.Device -> Keys.PENDING_DEVICE_REMOVAL_CLEAR
+                TerminalRemovalKind.Membership -> Keys.PENDING_MEMBERSHIP_DELETION_CLEAR
+                TerminalRemovalKind.Family -> Keys.PENDING_FAMILY_DELETION_CLEAR
+            }
+            prefs[key] = true
+            markCredentialsTerminal(prefs)
+            receipt?.let {
+                prefs[Keys.DEVICE_REMOVED_RECEIPT_AT] = it.removedAtEpochMillis
+                prefs[Keys.DEVICE_REMOVED_RECEIPT_COUNT] = it.clearedPendingCount
+                prefs[Keys.DEVICE_REMOVED_RECEIPT_REASON] = it.reason
+            }
+        }
+        true
+    }
+
+    private suspend fun persistRefreshedSession(session: SyncSession) {
+        val current = currentSessionUnderCredentialLock()
         require(
             current.familyId == session.familyId &&
                 current.membershipId == session.membershipId &&
@@ -553,22 +806,26 @@ class DataStoreSyncPreferences @Inject constructor(
         session: SyncSession,
         endpoint: TrustedEndpointProfile,
     ) {
-        persistSession(
-            session,
-            pendingReplicaResetPrevious = null,
-            reconnectedEndpoint = endpoint,
-        )
+        credentialMutex.withLock {
+            persistSession(
+                session,
+                pendingReplicaResetPrevious = null,
+                reconnectedEndpoint = endpoint,
+            )
+        }
     }
 
     override suspend fun saveSessionPendingReplicaReset(
         session: SyncSession,
         previous: SyncSession,
     ) {
-        persistSession(
-            session,
-            pendingReplicaResetPrevious = previous,
-            reconnectedEndpoint = null,
-        )
+        credentialMutex.withLock {
+            persistSession(
+                session,
+                pendingReplicaResetPrevious = previous,
+                reconnectedEndpoint = null,
+            )
+        }
     }
 
     private suspend fun persistSession(
@@ -576,8 +833,18 @@ class DataStoreSyncPreferences @Inject constructor(
         pendingReplicaResetPrevious: SyncSession?,
         reconnectedEndpoint: TrustedEndpointProfile?,
     ) {
+        activeMemberQrClaim = null
+        val previous = currentSessionUnderCredentialLock()
+        val identityChanged = reconnectedEndpoint != null || pendingReplicaResetPrevious != null ||
+            previous.familyId != session.familyId || previous.membershipId != session.membershipId ||
+            previous.deviceId != session.deviceId || previous.role != session.role ||
+            previous.baseUrl != session.baseUrl || previous.reauthRequired
         val config = session.endpointConfig.withNormalized()
         dataStore.edit { prefs ->
+            check(prefs[Keys.PENDING_DEVICE_REMOVAL_CLEAR] != true &&
+                prefs[Keys.PENDING_MEMBERSHIP_DELETION_CLEAR] != true &&
+                prefs[Keys.PENDING_FAMILY_DELETION_CLEAR] != true
+            ) { "请先完成旧家庭身份清理" }
             // DataStore identity changes before the separate Keystore write, but
             // this durable marker suppresses both old and new credentials until
             // every durability domain agrees. A crash therefore resumes reauth,
@@ -585,6 +852,7 @@ class DataStoreSyncPreferences @Inject constructor(
             prefs[Keys.REAUTH_REQUIRED] = true
             prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] = true
             val previousFamilyId = prefs[Keys.FAMILY_ID].orEmpty()
+            if (identityChanged) advanceReadIdentity(prefs)
             if (config.host.isNotBlank()) {
                 prefs[Keys.SERVER_HOST] = config.host
                 prefs[Keys.SERVER_PORT] = config.port
@@ -599,12 +867,14 @@ class DataStoreSyncPreferences @Inject constructor(
                 // Membership ids belong to the server identity, even when the restored
                 // family_id is intentionally preserved. Retire the old display projection in
                 // the same DataStore commit as endpoint/session activation.
+                prefs.remove(Keys.DIRECTORY_OWNER_EPOCH)
                 prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY)
                 prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY_GENERATION)
             }
             prefs[Keys.FAMILY_ID] = session.familyId
             if (previousFamilyId != session.familyId) {
                 prefs.remove(Keys.PENDING_CREATOR_ACKNOWLEDGEMENTS)
+                prefs.remove(Keys.DIRECTORY_OWNER_EPOCH)
                 prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY)
                 prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY_GENERATION)
                 prefs.remove(Keys.PENDING_GENERATION_RESYNC)
@@ -654,10 +924,16 @@ class DataStoreSyncPreferences @Inject constructor(
             prefs.remove(Keys.OWNER_LOGIN_REQUEST_ID)
             prefs.remove(Keys.REFRESH_REQUEST_ID)
             clearPendingMemberValues(prefs)
+            prefs.remove(Keys.MEMBER_RECONNECT_ATTEMPT)
             prefs.remove(Keys.PENDING_FAMILY_CREDENTIAL_CLEAR)
             prefs.remove(Keys.REAUTH_REQUIRED)
         }
         secureStoreIo { clearPendingMemberSecret() }
+    }
+
+    override suspend fun pendingReplicaResetCredentialsReady(): Boolean {
+        val prefs = dataStore.data.first()
+        return prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] != true && prefs[Keys.REAUTH_REQUIRED] != true
     }
 
     override suspend fun pendingReplicaResetPrevious(): SyncSession? {
@@ -678,7 +954,29 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     override suspend fun completePendingReplicaReset() {
-        dataStore.edit(::clearPendingReplicaReset)
+        credentialMutex.withLock {
+            dataStore.edit(::clearPendingReplicaReset)
+        }
+    }
+
+    override suspend fun completePendingRestoreSession(endpoint: TrustedEndpointProfile) {
+        credentialMutex.withLock {
+            dataStore.edit { prefs ->
+                check(prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] != true && prefs[Keys.REAUTH_REQUIRED] != true) {
+                    "恢复凭据尚未耐久保存"
+                }
+                clearPendingReplicaReset(prefs)
+                prefs[Keys.VERIFIED_ENDPOINT_ORIGIN] = endpoint.origin
+                prefs[Keys.VERIFIED_ENDPOINT_TRUST_MODE] = endpoint.trustMode.name
+                endpoint.spkiSha256?.let { prefs[Keys.VERIFIED_ENDPOINT_SPKI_SHA256] = it }
+                    ?: prefs.remove(Keys.VERIFIED_ENDPOINT_SPKI_SHA256)
+                prefs.remove(Keys.DIRECTORY_OWNER_EPOCH)
+                prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY)
+                prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY_GENERATION)
+                prefs.remove(Keys.PENDING_CREATOR_ACKNOWLEDGEMENTS)
+                prefs.remove(Keys.PENDING_GENERATION_RESYNC)
+            }
+        }
     }
 
     override suspend fun updateCursor(cursor: Long, generation: String) {
@@ -739,12 +1037,14 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     override suspend fun ensureDeviceId(): String {
-        session.first().deviceId.takeIf { it.isNotBlank() }?.let { return it }
-        val generated = UUID.randomUUID().toString()
-        dataStore.edit { prefs ->
-            if (prefs[Keys.DEVICE_ID].isNullOrBlank()) prefs[Keys.DEVICE_ID] = generated
+        credentialMutex.withLock {
+            currentSessionUnderCredentialLock().deviceId.takeIf { it.isNotBlank() }?.let { return it }
+            val generated = UUID.randomUUID().toString()
+            dataStore.edit { prefs ->
+                if (prefs[Keys.DEVICE_ID].isNullOrBlank()) prefs[Keys.DEVICE_ID] = generated
+            }
+            return currentSessionUnderCredentialLock().deviceId
         }
-        return session.first().deviceId
     }
 
     override suspend fun ensureCreateRequestId(): String {
@@ -790,27 +1090,179 @@ class DataStoreSyncPreferences @Inject constructor(
         return requireNotNull(dataStore.data.first()[Keys.REFRESH_REQUEST_ID])
     }
 
+    override suspend fun beginMemberQrClaim(operationId: String, owner: MemberReconnectOwner): Boolean =
+        credentialMutex.withLock {
+            if (currentSessionUnderCredentialLock().isJoined || reconnectOwnerUnderCredentialLock() != owner) return@withLock false
+            activeMemberQrClaim = operationId
+            true
+        }
+
+    override suspend fun endMemberQrClaim(operationId: String): Unit = credentialMutex.withLock {
+        if (activeMemberQrClaim == operationId) activeMemberQrClaim = null
+    }
+
+    override suspend fun activateMemberQrClaimIfCurrent(
+        operationId: String, owner: MemberReconnectOwner, session: SyncSession,
+        endpoint: TrustedEndpointProfile, pendingReplicaResetPrevious: SyncSession?,
+    ): Boolean = credentialMutex.withLock {
+        if (activeMemberQrClaim != operationId || reconnectOwnerUnderCredentialLock() != owner) return@withLock false
+        require(owner.familyId.isBlank() || owner.familyId == session.familyId) { "二维码家庭身份不一致" }
+        persistSession(session, pendingReplicaResetPrevious, reconnectedEndpoint = endpoint)
+        true
+    }
+
+    private suspend fun reconnectOwnerUnderCredentialLock(): MemberReconnectOwner =
+        MemberReconnectOwner.of(currentSessionUnderCredentialLock(), verifiedEndpoint.first())
+
+    override suspend fun memberReconnectOwner(): MemberReconnectOwner = credentialMutex.withLock {
+        reconnectOwnerUnderCredentialLock()
+    }
+
+    override suspend fun beginReconnectMemberAttempt(attempt: PendingMemberLogin, owner: MemberReconnectOwner): Boolean =
+        credentialMutex.withLock {
+            if (reconnectOwnerUnderCredentialLock() != owner) return@withLock false
+            writeMemberLoginAttempt(attempt, reconnect = true)
+            true
+        }
+
+    private suspend fun reconnectAttemptCurrent(operationId: String, owner: MemberReconnectOwner): Boolean =
+        reconnectOwnerUnderCredentialLock() == owner &&
+            decodeMemberLoginAttempt(dataStore.data.first()[Keys.MEMBER_RECONNECT_ATTEMPT])?.operationId == operationId
+
+    override suspend fun isReconnectMemberAttemptCurrent(operationId: String, owner: MemberReconnectOwner): Boolean =
+        credentialMutex.withLock { reconnectAttemptCurrent(operationId, owner) }
+
+    override suspend fun activateReconnectMemberIfCurrent(
+        operationId: String,
+        owner: MemberReconnectOwner,
+        session: SyncSession,
+        endpoint: TrustedEndpointProfile,
+    ): Boolean = credentialMutex.withLock {
+        if (!reconnectAttemptCurrent(operationId, owner)) return@withLock false
+        require(session.familyId == owner.familyId) { "候选家庭身份不一致" }
+        persistSession(session, pendingReplicaResetPrevious = null, reconnectedEndpoint = endpoint)
+        true
+    }
+
+    override suspend fun saveMemberLoginAttempt(attempt: PendingMemberLogin, reconnect: Boolean): Unit = credentialMutex.withLock {
+        writeMemberLoginAttempt(attempt, reconnect)
+    }
+
+    private suspend fun writeMemberLoginAttempt(attempt: PendingMemberLogin, reconnect: Boolean) {
+        require(attempt.remoteOutcomeUnknown && attempt.operationId.isNotBlank())
+        require(attempt.requestId.isBlank())
+        val origin = normalizeHttpsOrigin(attempt.endpointOrigin)
+        dataStore.edit { prefs ->
+            val key = if (reconnect) Keys.MEMBER_RECONNECT_ATTEMPT else Keys.MEMBER_LOGIN_ATTEMPT
+            val previous = decodeMemberLoginAttempt(prefs[key])
+            require(previous == null || previous.operationId == attempt.operationId) {
+                "已有结果待确认的加入申请，请先处理原申请"
+            }
+            prefs[key] = buildJsonObject {
+                put("version", 1)
+                put("operation_id", attempt.operationId)
+                put("origin", origin)
+                put("display_name", attempt.displayName)
+                put("device_name", attempt.deviceName)
+            }.toString()
+        }
+    }
+
+    override suspend fun memberLoginAttempt(reconnect: Boolean): PendingMemberLogin? =
+        decodeMemberLoginAttempt(dataStore.data.first()[
+            if (reconnect) Keys.MEMBER_RECONNECT_ATTEMPT else Keys.MEMBER_LOGIN_ATTEMPT
+        ])
+
+    override suspend fun clearMemberLoginAttempt(reconnect: Boolean, expectedOperationId: String?): Unit = credentialMutex.withLock {
+        dataStore.edit { prefs ->
+            val key = if (reconnect) Keys.MEMBER_RECONNECT_ATTEMPT else Keys.MEMBER_LOGIN_ATTEMPT
+            if (expectedOperationId == null || decodeMemberLoginAttempt(prefs[key])?.operationId == expectedOperationId) {
+                prefs.remove(key)
+            }
+        }
+    }
+
+    private fun decodeMemberLoginAttempt(encoded: String?): PendingMemberLogin? {
+        if (encoded == null) return null
+        val value = Json.parseToJsonElement(encoded).jsonObject
+        require(value["version"]?.jsonPrimitive?.long == 1L) { "加入申请恢复记录版本不受支持" }
+        return PendingMemberLogin(
+            requestId = "",
+            displayName = requireMemberDisplayName(value.getValue("display_name").jsonPrimitive.content),
+            deviceName = requireDeviceName(value.getValue("device_name").jsonPrimitive.content),
+            expiresAtEpochSeconds = 0L,
+            operationId = value.getValue("operation_id").jsonPrimitive.content.also { require(it.isNotBlank()) },
+            endpointOrigin = normalizeHttpsOrigin(value.getValue("origin").jsonPrimitive.content),
+            remoteOutcomeUnknown = true,
+        )
+    }
+
     override suspend fun savePendingMemberLogin(
         receipt: MemberLoginReceipt,
         displayName: String,
         deviceName: String,
-    ) {
+        expectedOperationId: String?,
+    ): Unit = credentialMutex.withLock {
         require(receipt.requestId.isNotBlank()) { "pending request id is required" }
         require(receipt.pendingSecret.isNotBlank()) { "pending member secret is required" }
+        val originalAttempt = decodeMemberLoginAttempt(dataStore.data.first()[Keys.MEMBER_LOGIN_ATTEMPT])
+        if (expectedOperationId != null) {
+            check(decodeMemberLoginAttempt(dataStore.data.first()[Keys.MEMBER_LOGIN_ATTEMPT])?.operationId == expectedOperationId) {
+                "这台设备已放弃原加入申请，迟到的回执未写入凭据"
+            }
+        }
         secureStoreIo { setPendingMemberSecret(receipt.pendingSecret) }
         dataStore.edit { prefs ->
+            if (expectedOperationId != null) {
+                check(decodeMemberLoginAttempt(prefs[Keys.MEMBER_LOGIN_ATTEMPT])?.operationId == expectedOperationId) {
+                    "这台设备已放弃原加入申请，迟到的回执未恢复等待"
+                }
+            }
+            prefs.remove(Keys.MEMBER_LOGIN_ATTEMPT)
             prefs[Keys.PENDING_MEMBER_REQUEST_ID] = receipt.requestId
+            prefs[Keys.PENDING_MEMBER_OPERATION_ID] = originalAttempt?.operationId ?: receipt.requestId
+            originalAttempt?.endpointOrigin?.let { prefs[Keys.PENDING_MEMBER_ORIGIN] = it }
+                ?: prefs.remove(Keys.PENDING_MEMBER_ORIGIN)
             prefs[Keys.PENDING_MEMBER_DISPLAY_NAME] = displayName
             prefs[Keys.PENDING_MEMBER_DEVICE_NAME] = deviceName
             prefs[Keys.PENDING_MEMBER_EXPIRES_AT] = receipt.expiresAtEpochSeconds
         }
     }
 
+    private suspend fun pendingMemberCurrent(requestId: String, owner: MemberReconnectOwner): Boolean {
+        val prefs = dataStore.data.first()
+        return requestId.isNotBlank() && prefs[Keys.PENDING_MEMBER_REQUEST_ID] == requestId &&
+            prefs[Keys.MEMBER_LOGIN_ATTEMPT] == null && reconnectOwnerUnderCredentialLock() == owner
+    }
+
+    override suspend fun pendingMemberSecretIfCurrent(requestId: String, owner: MemberReconnectOwner): String? =
+        credentialMutex.withLock {
+            if (!pendingMemberCurrent(requestId, owner)) return@withLock null
+            secureStoreIo { getPendingMemberSecret() }
+        }
+
+    override suspend fun isPendingMemberLoginCurrent(requestId: String, owner: MemberReconnectOwner): Boolean =
+        credentialMutex.withLock { pendingMemberCurrent(requestId, owner) }
+
+    override suspend fun activatePendingMemberIfCurrent(
+        requestId: String, owner: MemberReconnectOwner, session: SyncSession,
+        pendingReplicaResetPrevious: SyncSession?,
+    ): Boolean = credentialMutex.withLock {
+        if (!pendingMemberCurrent(requestId, owner)) return@withLock false
+        require(owner.familyId.isBlank() || owner.familyId == session.familyId) { "待确认家庭身份不一致" }
+        persistSession(session, pendingReplicaResetPrevious, reconnectedEndpoint = null)
+        true
+    }
+
     override suspend fun pendingMemberSecret(): String = secureStoreIo {
         getPendingMemberSecret()
     }
 
-    override suspend fun clearPendingMemberLogin() {
+    override suspend fun clearPendingMemberLogin(expectedOperationId: String?): Unit = credentialMutex.withLock {
+        val prefs = dataStore.data.first()
+        val operation = decodeMemberLoginAttempt(prefs[Keys.MEMBER_LOGIN_ATTEMPT])?.operationId
+            ?: prefs[Keys.PENDING_MEMBER_OPERATION_ID] ?: prefs[Keys.PENDING_MEMBER_REQUEST_ID]
+        if (expectedOperationId != null && operation != expectedOperationId) return@withLock
         dataStore.edit(::clearPendingMemberValues)
         try {
             secureStoreIo { clearPendingMemberSecret() }
@@ -845,6 +1297,18 @@ class DataStoreSyncPreferences @Inject constructor(
                 checkpoint.entityVersions,
             )
         }
+    }
+
+    override suspend fun pendingDisasterRestoreRequestIds(): DisasterRestoreRequestIds? {
+        val prefs = dataStore.data.first()
+        val start = prefs[Keys.RESTORE_START_REQUEST_ID]
+        val manifest = prefs[Keys.RESTORE_MANIFEST_REQUEST_ID]
+        val commit = prefs[Keys.RESTORE_COMMIT_REQUEST_ID]
+        if (start == null && manifest == null && commit == null) return null
+        require(!start.isNullOrBlank() && !manifest.isNullOrBlank() && !commit.isNullOrBlank()) {
+            "恢复请求身份不完整，原恢复文件已保留"
+        }
+        return DisasterRestoreRequestIds(start, manifest, commit)
     }
 
     override suspend fun ensureDisasterRestoreRequestIds(): DisasterRestoreRequestIds {
@@ -885,23 +1349,25 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     override suspend fun clearAllLocalSyncConfig() {
-        dataStore.edit { prefs ->
-            clearFamilyValues(prefs)
-            prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] = true
-            prefs.remove(Keys.SERVER_HOST)
-            prefs.remove(Keys.SERVER_PORT)
-            prefs.remove(Keys.SERVER_SCHEME)
-            prefs.remove(Keys.VERIFIED_ENDPOINT_ORIGIN)
-            prefs.remove(Keys.VERIFIED_ENDPOINT_TRUST_MODE)
-            prefs.remove(Keys.VERIFIED_ENDPOINT_SPKI_SHA256)
-            prefs.remove(Keys.LAST_SERVER_HEALTHY_AT)
+        credentialMutex.withLock {
+            dataStore.edit { prefs ->
+                clearFamilyValues(prefs)
+                prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] = true
+                prefs.remove(Keys.SERVER_HOST)
+                prefs.remove(Keys.SERVER_PORT)
+                prefs.remove(Keys.SERVER_SCHEME)
+                prefs.remove(Keys.VERIFIED_ENDPOINT_ORIGIN)
+                prefs.remove(Keys.VERIFIED_ENDPOINT_TRUST_MODE)
+                prefs.remove(Keys.VERIFIED_ENDPOINT_SPKI_SHA256)
+                prefs.remove(Keys.LAST_SERVER_HEALTHY_AT)
+            }
+            finishPendingFamilyCredentialClear()
+            secureStoreIo { clearPendingMemberSecret() }
+            clearDisasterRestoreCheckpoint()
         }
-        finishPendingFamilyCredentialClear()
-        secureStoreIo { clearPendingMemberSecret() }
-        clearDisasterRestoreCheckpoint()
     }
 
-    override suspend fun clearDeviceCredentialsForReauth() {
+    private suspend fun clearCredentialsForReauth() {
         dataStore.edit { prefs ->
             markCredentialsTerminal(prefs)
         }
@@ -909,13 +1375,17 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     override suspend fun recoverPendingCredentialClear() {
-        finishPendingFamilyCredentialClear()
+        credentialMutex.withLock {
+            finishPendingFamilyCredentialClear()
+        }
     }
 
     override suspend fun markPendingDeviceRemovalClear() {
-        dataStore.edit {
-            it[Keys.PENDING_DEVICE_REMOVAL_CLEAR] = true
-            markCredentialsTerminal(it)
+        credentialMutex.withLock {
+            dataStore.edit {
+                it[Keys.PENDING_DEVICE_REMOVAL_CLEAR] = true
+                markCredentialsTerminal(it)
+            }
         }
     }
 
@@ -946,9 +1416,11 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     override suspend fun markPendingMembershipDeletionClear() {
-        dataStore.edit {
-            it[Keys.PENDING_MEMBERSHIP_DELETION_CLEAR] = true
-            markCredentialsTerminal(it)
+        credentialMutex.withLock {
+            dataStore.edit {
+                it[Keys.PENDING_MEMBERSHIP_DELETION_CLEAR] = true
+                markCredentialsTerminal(it)
+            }
         }
     }
 
@@ -960,9 +1432,11 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     override suspend fun markPendingFamilyDeletionClear() {
-        dataStore.edit {
-            it[Keys.PENDING_FAMILY_DELETION_CLEAR] = true
-            markCredentialsTerminal(it)
+        credentialMutex.withLock {
+            dataStore.edit {
+                it[Keys.PENDING_FAMILY_DELETION_CLEAR] = true
+                markCredentialsTerminal(it)
+            }
         }
     }
 
@@ -1015,6 +1489,8 @@ class DataStoreSyncPreferences @Inject constructor(
     private fun markCredentialsTerminal(
         prefs: androidx.datastore.preferences.core.MutablePreferences,
     ) {
+        activeMemberQrClaim = null
+        advanceReadIdentity(prefs)
         // Commit the terminal marker and credential gate together before domain
         // clearing starts. A racing sync therefore observes an unjoined reauth
         // projection and cannot publish with credentials from the retired identity.
@@ -1067,7 +1543,16 @@ class DataStoreSyncPreferences @Inject constructor(
         prefs.remove(Keys.PENDING_REPLICA_MEMBERSHIP_ID)
     }
 
+    private fun advanceReadIdentity(prefs: androidx.datastore.preferences.core.MutablePreferences) {
+        prefs[Keys.READ_IDENTITY_EPOCH] = Math.addExact(prefs[Keys.READ_IDENTITY_EPOCH] ?: 0L, 1L)
+        prefs.remove(Keys.DIRECTORY_OWNER_EPOCH)
+        prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY)
+        prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY_GENERATION)
+    }
+
     private fun clearFamilyValues(prefs: androidx.datastore.preferences.core.MutablePreferences) {
+        activeMemberQrClaim = null
+        advanceReadIdentity(prefs)
         prefs.remove(Keys.FAMILY_ID)
         prefs.remove(Keys.ROLE)
         prefs.remove(Keys.PULL_CURSOR)
@@ -1077,6 +1562,7 @@ class DataStoreSyncPreferences @Inject constructor(
         prefs.remove(Keys.OWNER_LOGIN_REQUEST_ID)
         prefs.remove(Keys.REFRESH_REQUEST_ID)
         clearPendingMemberValues(prefs)
+        prefs.remove(Keys.MEMBER_RECONNECT_ATTEMPT)
         prefs.remove(Keys.FAMILY_NAME)
         prefs.remove(Keys.MEMBERSHIP_ID)
         prefs.remove(Keys.PENDING_CREATOR_ACKNOWLEDGEMENTS)
@@ -1126,6 +1612,7 @@ class DataStoreSyncPreferences @Inject constructor(
                 put("client_uuid", version.clientUuid)
                 put("updated_at", version.updatedAt)
                 put("restored", version.restored)
+                put("local_evidence", version.localEvidence?.let(::JsonPrimitive) ?: JsonNull)
             })
         }
     }.toString()
@@ -1140,6 +1627,7 @@ class DataStoreSyncPreferences @Inject constructor(
                 clientUuid = value.getValue("client_uuid").jsonPrimitive.content,
                 updatedAt = value.getValue("updated_at").jsonPrimitive.long,
                 restored = value.getValue("restored").jsonPrimitive.boolean,
+                localEvidence = value["local_evidence"]?.jsonPrimitive?.contentOrNull,
             )
         }
     }.getOrDefault(emptyList())
@@ -1163,7 +1651,10 @@ class DataStoreSyncPreferences @Inject constructor(
     private fun clearPendingMemberValues(
         prefs: androidx.datastore.preferences.core.MutablePreferences,
     ) {
+        prefs.remove(Keys.MEMBER_LOGIN_ATTEMPT)
         prefs.remove(Keys.PENDING_MEMBER_REQUEST_ID)
+        prefs.remove(Keys.PENDING_MEMBER_OPERATION_ID)
+        prefs.remove(Keys.PENDING_MEMBER_ORIGIN)
         prefs.remove(Keys.PENDING_MEMBER_DISPLAY_NAME)
         prefs.remove(Keys.PENDING_MEMBER_DEVICE_NAME)
         prefs.remove(Keys.PENDING_MEMBER_EXPIRES_AT)
@@ -1296,6 +1787,10 @@ class DataStoreSyncPreferences @Inject constructor(
         val CREATE_REQUEST_ID = stringPreferencesKey("sync_create_request_id")
         val OWNER_LOGIN_REQUEST_ID = stringPreferencesKey("sync_owner_login_request_id")
         val REFRESH_REQUEST_ID = stringPreferencesKey("sync_refresh_request_id")
+        val MEMBER_LOGIN_ATTEMPT = stringPreferencesKey("sync_member_login_attempt_v1")
+        val MEMBER_RECONNECT_ATTEMPT = stringPreferencesKey("sync_member_reconnect_attempt_v1")
+        val PENDING_MEMBER_OPERATION_ID = stringPreferencesKey("sync_pending_member_operation_id")
+        val PENDING_MEMBER_ORIGIN = stringPreferencesKey("sync_pending_member_origin")
         val PENDING_MEMBER_REQUEST_ID = stringPreferencesKey("sync_pending_member_request_id")
         val PENDING_MEMBER_DISPLAY_NAME = stringPreferencesKey("sync_pending_member_display_name")
         val PENDING_MEMBER_DEVICE_NAME = stringPreferencesKey("sync_pending_member_device_name")
@@ -1337,6 +1832,10 @@ class DataStoreSyncPreferences @Inject constructor(
             stringPreferencesKey("sync_verified_endpoint_trust_mode")
         val VERIFIED_ENDPOINT_SPKI_SHA256 =
             stringPreferencesKey("sync_verified_endpoint_spki_sha256")
+        // Additive contract-7 metadata. Existing replicas default to epoch zero; an untagged
+        // directory is withheld until the next successful fetch, without discarding local facts.
+        val READ_IDENTITY_EPOCH = longPreferencesKey("sync_read_identity_epoch_v1")
+        val DIRECTORY_OWNER_EPOCH = longPreferencesKey("sync_member_directory_owner_epoch_v1")
         val FAMILY_MEMBER_DIRECTORY = stringPreferencesKey("sync_family_member_directory_v1")
         val FAMILY_MEMBER_DIRECTORY_GENERATION =
             stringPreferencesKey("sync_family_member_directory_generation_v1")

@@ -77,9 +77,12 @@ class ReplicaSyncEngineSkipGetByContentDigestTest {
                 entities = listOf(
                     remoteReplicaRecord(recordUuid, babyClientUuid = babyUuid).copy(
                         updatedAt = 310,
-                        media = listOf(causalLogMedia(mediaUuid)),
+                        media = listOf(causalLogMedia(mediaUuid).copy(mime = "image/png", width = 640, height = 480)),
                     ),
-                    remoteReplicaMedia(mediaUuid, recordUuid).copy(updatedAt = 310),
+                    remoteReplicaMedia(mediaUuid, recordUuid).copy(
+                        updatedAt = 310,
+                        payloadJson = """{"kind":"log","record_client_uuid":"$recordUuid","care_plan_client_uuid":null,"baby_client_uuid":null,"mime":"image/png","width":640,"height":480,"byte_size":4}""",
+                    ).withAuthenticatedMediaBytes(KNOWN_BYTES_1234),
                 ),
                 cursor = 2,
                 generation = session.pullGeneration,
@@ -93,6 +96,11 @@ class ReplicaSyncEngineSkipGetByContentDigestTest {
             assertThat(stored.localUri).isEqualTo(file.absolutePath)
             assertThat(stored.sha256).isEqualTo(KNOWN_BYTES_1234_SHA256)
             assertThat(stored.updatedAt).isEqualTo(310)
+            assertThat(stored.mime).isEqualTo("image/png")
+            assertThat(stored.width).isEqualTo(640)
+            assertThat(stored.height).isEqualTo(480)
+            assertThat(stored.recordId).isEqualTo(recordId)
+            assertThat(file.readBytes()).isEqualTo(KNOWN_BYTES_1234)
         } finally {
             file.delete()
         }
@@ -216,7 +224,7 @@ class ReplicaSyncEngineSkipGetByContentDigestTest {
                     remoteReplicaRecord(recordUuid, babyClientUuid = babyUuid).copy(
                         media = listOf(causalLogMedia(recordMediaUuid)),
                     ),
-                    remoteReplicaMedia(recordMediaUuid, recordUuid),
+                    remoteReplicaMedia(recordMediaUuid, recordUuid).withAuthenticatedMediaBytes(KNOWN_BYTES_1234),
                 ),
                 cursor = 5,
                 generation = session.pullGeneration,
@@ -299,7 +307,8 @@ class ReplicaSyncEngineSkipGetByContentDigestTest {
 
         assertThat(rig.backend.mediaGets).containsExactly(mediaUuid)
         val stored = requireNotNull(rig.media.getByClientUuid(mediaUuid))
-        assertThat(stored.localUri).isEqualTo("downloaded/$mediaUuid")
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(stored.localUri)).readBytes())
+            .isEqualTo(KNOWN_BYTES_1234)
         assertThat(stored.sha256).isEqualTo(KNOWN_BYTES_1234_SHA256)
     }
 
@@ -400,10 +409,12 @@ class ReplicaSyncEngineSkipGetByContentDigestTest {
         assertThat(visibleDuringGets).containsExactly(false to false, false to false)
         assertThat(rig.records.getByClientUuid(recordUuid)).isNotNull()
         assertThat(rig.carePlans.getByClientUuid(planUuid)).isNotNull()
-        assertThat(rig.media.getByClientUuid(recordMediaUuid)?.localUri)
-            .isEqualTo("downloaded/$recordMediaUuid")
-        assertThat(rig.media.getByClientUuid(planMediaUuid)?.localUri)
-            .isEqualTo("downloaded/$planMediaUuid")
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(
+            requireNotNull(rig.media.getByClientUuid(recordMediaUuid)).localUri,
+        )).readBytes()).isEqualTo(KNOWN_BYTES_1234)
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(
+            requireNotNull(rig.media.getByClientUuid(planMediaUuid)).localUri,
+        )).readBytes()).isEqualTo(KNOWN_BYTES_8675)
     }
 
     @Test
@@ -652,7 +663,7 @@ class ReplicaSyncEngineSkipGetByContentDigestTest {
                         updatedAt = 310,
                         media = listOf(causalLogMedia(incomingUuid)),
                     ),
-                    remoteReplicaMedia(incomingUuid, recordUuid).copy(updatedAt = 310),
+                    remoteReplicaMedia(incomingUuid, recordUuid).withAuthenticatedMediaBytes(KNOWN_BYTES_1234).copy(updatedAt = 310),
                 ),
                 cursor = 16,
                 generation = session.pullGeneration,
@@ -795,16 +806,19 @@ class ReplicaSyncEngineSkipGetByContentDigestTest {
             .containsExactly(firstMediaUuid, thirdMediaUuid, fourthMediaUuid)
             .inOrder()
         assertThat(rig.records.getByClientUuid(recordUuid)).isNotNull()
-        assertThat(rig.media.getByClientUuid(firstMediaUuid)?.localUri)
-            .isEqualTo("downloaded/$firstMediaUuid")
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(
+            requireNotNull(rig.media.getByClientUuid(firstMediaUuid)).localUri,
+        )).readBytes()).isEqualTo(KNOWN_BYTES_1234)
         // Same-identity sibling shares the unit's staged file, matching the
         // former serial loop's staged dedupe.
         assertThat(rig.media.getByClientUuid(duplicateMediaUuid)?.localUri)
-            .isEqualTo("downloaded/$firstMediaUuid")
-        assertThat(rig.media.getByClientUuid(thirdMediaUuid)?.localUri)
-            .isEqualTo("downloaded/$thirdMediaUuid")
-        assertThat(rig.media.getByClientUuid(fourthMediaUuid)?.localUri)
-            .isEqualTo("downloaded/$fourthMediaUuid")
+            .isEqualTo(rig.media.getByClientUuid(firstMediaUuid)?.localUri)
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(
+            requireNotNull(rig.media.getByClientUuid(thirdMediaUuid)).localUri,
+        )).readBytes()).isEqualTo(KNOWN_BYTES_8675)
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(
+            requireNotNull(rig.media.getByClientUuid(fourthMediaUuid)).localUri,
+        )).readBytes()).isEqualTo(fourthBytes)
     }
 
     private companion object {

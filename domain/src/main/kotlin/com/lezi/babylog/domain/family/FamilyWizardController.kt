@@ -14,7 +14,7 @@ import com.lezi.babylog.sync.backend.MemberLoginStatus
 import com.lezi.babylog.sync.PendingMemberLogin
 import com.lezi.babylog.sync.session.FamilyEndpointDraft
 import com.lezi.babylog.sync.SyncPort
-import com.lezi.babylog.sync.session.SyncSession
+import com.lezi.babylog.sync.session.SyncSessionPresentation
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.session.SetupFamilyState
 import com.lezi.babylog.sync.session.SetupProbeResult
@@ -101,35 +101,35 @@ data class FamilyWizardSnapshot(
 }
 
 sealed interface FamilyWizardOutcome {
-    val session: SyncSession
+    val session: SyncSessionPresentation
 
     sealed interface CreateSession : FamilyWizardOutcome {
         val dataRecovery: InitialFamilyDataRecovery
     }
 
     data class Created(
-        override val session: SyncSession,
+        override val session: SyncSessionPresentation,
         override val dataRecovery: InitialFamilyDataRecovery = InitialFamilyDataRecovery.Complete,
     ) : CreateSession
 
     data class Reclaimed(
-        override val session: SyncSession,
+        override val session: SyncSessionPresentation,
         override val dataRecovery: InitialFamilyDataRecovery,
     ) : CreateSession
 
     data class OwnerLoggedIn(
-        override val session: SyncSession,
+        override val session: SyncSessionPresentation,
         override val dataRecovery: InitialFamilyDataRecovery,
     ) : CreateSession
 
     data class MemberApproved(
-        override val session: SyncSession,
+        override val session: SyncSessionPresentation,
         override val dataRecovery: InitialFamilyDataRecovery,
     ) : CreateSession
 
     /** One-shot member login via admin QR; session is already durable when published. */
     data class MemberLoginQrClaimed(
-        override val session: SyncSession,
+        override val session: SyncSessionPresentation,
         override val dataRecovery: InitialFamilyDataRecovery,
     ) : CreateSession
 
@@ -468,19 +468,6 @@ class FamilyWizardController(
     private var activeMemberLoginQrJob: Job? = null
     private var lastWaitingMemberApproval: FamilyWizardState.WaitingForMemberApproval? = null
     /**
-     * True only while a claim remembered the QR endpoint but has not completed a session yet.
-     * Survives claim failure → Ready so cancel/dismiss can still forget residual trust.
-     */
-    private var memberLoginQrRememberedEndpoint = false
-
-    /**
-     * Set when a non-suspend path (begin/keepOffline) drops a half-trusted QR endpoint
-     * without being able to await [FamilyWizardGateway.forgetEndpoint]. Flushed on the next
-     * suspend wizard entry that can call the gateway.
-     */
-    private var pendingMemberLoginQrForget = false
-
-    /**
      * Re-runs the step that produced the current failure.
      * Secrets stay with the caller; this does not store them on wizard state.
      */
@@ -538,7 +525,6 @@ class FamilyWizardController(
             activeEndpointJob = endpointJob
         }
         try {
-            flushPendingMemberLoginQrForget()
             val requestVersion = endpointRequestVersion.incrementAndGet()
             val draft = FamilyWizardSnapshot.empty(entry).copy(endpointDraft = endpointDraft)
             mutableState.value = FamilyWizardState.ProbingEndpoint(draft)
@@ -625,11 +611,6 @@ class FamilyWizardController(
             activeMemberLoginQrJob.also { activeMemberLoginQrJob = null }
         }
         job?.cancel()
-        if (memberLoginQrRememberedEndpoint) {
-            // begin/keepOffline are non-suspend; mark forget for the next suspend flush.
-            pendingMemberLoginQrForget = true
-            memberLoginQrRememberedEndpoint = false
-        }
         if (resetState) {
             val current = mutableState.value
             val entry = when (current) {
@@ -642,18 +623,6 @@ class FamilyWizardController(
             if (entry != null) {
                 mutableState.value = FamilyWizardState.Editing(FamilyWizardSnapshot.empty(entry))
             }
-        }
-    }
-
-    private suspend fun flushPendingMemberLoginQrForget() {
-        if (!pendingMemberLoginQrForget) return
-        pendingMemberLoginQrForget = false
-        try {
-            gateway.forgetEndpoint()
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Throwable) {
-            // Best-effort cleanup of residual half-trust.
         }
     }
 
@@ -671,7 +640,6 @@ class FamilyWizardController(
             activeMemberLoginQrJob = qrJob
         }
         try {
-            flushPendingMemberLoginQrForget()
             val requestVersion = memberLoginQrRequestVersion.incrementAndGet()
             val snapshot = memberLoginQrSnapshot(entry, payload)
             mutableState.value = FamilyWizardState.VerifyingMemberLoginQr(snapshot, payload)
@@ -691,24 +659,11 @@ class FamilyWizardController(
 
     /**
      * Cancels in-flight verify/claim for a member-login QR and returns to editing.
-     * Does not leave a continuing claim job. If claim had remembered trust without a
-     * completed session (Ready after failed claim, or mid-Claiming), forgets that
-     * half-trusted endpoint so cancel never leaves residual LAN trust.
+     * Does not leave a continuing claim job. Only successful session activation
+     * writes trust, so failed/cancelled QR work has no temporary trust to undo.
      */
     suspend fun cancelMemberLoginQr() {
-        val shouldForgetRemembered =
-            memberLoginQrRememberedEndpoint || pendingMemberLoginQrForget
         cancelMemberLoginQrWork(resetState = true)
-        pendingMemberLoginQrForget = false
-        if (shouldForgetRemembered) {
-            try {
-                gateway.forgetEndpoint()
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Throwable) {
-                // Best-effort; state is already cleared of the claim job.
-            }
-        }
     }
 
     suspend fun claimMemberLoginQr(
@@ -728,11 +683,7 @@ class FamilyWizardController(
         synchronized(endpointJobLock) {
             activeMemberLoginQrJob = qrJob
         }
-        // Keep memberLoginQrRememberedEndpoint across retries until success or cancel:
-        // a prior failed claim may still hold trust; clearing the flag here would lose
-        // the cancel/begin cleanup signal while residual trust remains.
         try {
-            flushPendingMemberLoginQrForget()
             val requestVersion = memberLoginQrRequestVersion.incrementAndGet()
             val normalizedDeviceName = runCatching {
                 com.lezi.babylog.sync.session.requireDeviceName(deviceName)
@@ -747,37 +698,15 @@ class FamilyWizardController(
                 return
             }
             mutableState.value = FamilyWizardState.ClaimingMemberLoginQr(snapshot, payload)
-            try {
-                gateway.rememberEndpoint(payload.endpoint).getOrThrow()
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Throwable) {
-                if (memberLoginQrRequestVersion.get() != requestVersion) return
-                mutableState.value = FamilyWizardState.MemberLoginQrReady(
-                    snapshot = snapshot,
-                    payload = payload,
-                    feedback = "",
-                    failureKind = FailureKind.InvalidInput,
-                )
-                return
-            }
-            memberLoginQrRememberedEndpoint = true
             currentCoroutineContext().ensureActive()
-            if (memberLoginQrRequestVersion.get() != requestVersion) {
-                try {
-                    gateway.forgetEndpoint()
-                } catch (_: Throwable) {
-                }
-                memberLoginQrRememberedEndpoint = false
-                return
-            }
+            if (memberLoginQrRequestVersion.get() != requestVersion) return
             val result = try {
                 gateway.claimMemberLoginQr(payload, normalizedDeviceName).getOrThrow()
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
                 if (memberLoginQrRequestVersion.get() != requestVersion) return
-                // Keep remembered-without-session so cancel/dismiss can forget residual trust.
+                // Failed QR claims leave existing trust and pending applications untouched.
                 mutableState.value = FamilyWizardState.MemberLoginQrReady(
                     snapshot = snapshot,
                     payload = payload,
@@ -786,22 +715,12 @@ class FamilyWizardController(
                 )
                 return
             }
-            // Session owns the endpoint; cancel must not forget successful login trust.
-            memberLoginQrRememberedEndpoint = false
-            pendingMemberLoginQrForget = false
             if (memberLoginQrRequestVersion.get() != requestVersion) return
             publishCompleted(
                 snapshot,
-                FamilyWizardOutcome.MemberLoginQrClaimed(result.session, result.dataRecovery),
+                FamilyWizardOutcome.MemberLoginQrClaimed(result.sessionPresentation, result.dataRecovery),
             )
         } catch (cancelled: CancellationException) {
-            if (memberLoginQrRememberedEndpoint) {
-                try {
-                    gateway.forgetEndpoint()
-                } catch (_: Throwable) {
-                }
-                memberLoginQrRememberedEndpoint = false
-            }
             throw cancelled
         } finally {
             synchronized(endpointJobLock) {
@@ -981,9 +900,9 @@ class FamilyWizardController(
         publishCompleted(
             identity,
             if (result.reclaimed) {
-                FamilyWizardOutcome.Reclaimed(result.session, result.dataRecovery)
+                FamilyWizardOutcome.Reclaimed(result.sessionPresentation, result.dataRecovery)
             } else {
-                FamilyWizardOutcome.Created(result.session, result.dataRecovery)
+                FamilyWizardOutcome.Created(result.sessionPresentation, result.dataRecovery)
             },
         )
     }
@@ -1048,15 +967,19 @@ class FamilyWizardController(
         try {
             mutableState.value = FamilyWizardState.Submitting(current.snapshot)
             val result = gateway.checkMemberLogin().getOrThrow()
-            if (!memberApprovalStillOwned()) return
+            if (!memberApprovalStillOwned(current.request.operationId)) return
             applyMemberLoginCheck(current.snapshot, result)
         } catch (cancelled: CancellationException) {
-            if (memberApprovalStillOwned()) {
+            if (memberApprovalStillOwned(current.request.operationId)) {
                 mutableState.value = current.copy(cancelling = false)
             }
             throw cancelled
         } catch (error: Throwable) {
-            if (!memberApprovalStillOwned()) return
+            if (!memberApprovalStillOwned(current.request.operationId)) return
+            if (error is com.lezi.babylog.sync.MemberLoginAttemptRetiredException) {
+                mutableState.value = FamilyWizardState.Editing(current.snapshot)
+                return
+            }
             // Check failure is inline wait feedback only — not an overlay source.
             mutableState.value = FamilyWizardState.WaitingForMemberApproval(
                 current.snapshot,
@@ -1074,6 +997,7 @@ class FamilyWizardController(
     fun observeMemberLoginCheck(result: MemberLoginCheckResult) {
         val current = mutableState.value as? FamilyWizardState.WaitingForMemberApproval ?: return
         if (current.cancelling) return
+        if (result.operationId != null && result.operationId != current.request.operationId) return
         applyMemberLoginCheck(current.snapshot, result)
     }
 
@@ -1108,10 +1032,10 @@ class FamilyWizardController(
         }
     }
 
-    private fun memberApprovalStillOwned(): Boolean {
+    private fun memberApprovalStillOwned(operationId: String): Boolean {
         return when (val latest = mutableState.value) {
-            is FamilyWizardState.Submitting -> true
-            is FamilyWizardState.WaitingForMemberApproval -> !latest.cancelling
+            is FamilyWizardState.Submitting -> lastWaitingMemberApproval?.request?.operationId == operationId
+            is FamilyWizardState.WaitingForMemberApproval -> !latest.cancelling && latest.request.operationId == operationId
             else -> false
         }
     }
@@ -1138,7 +1062,7 @@ class FamilyWizardController(
             return
         }
         if (current is FamilyWizardState.WaitingForMemberApproval &&
-            current.request.requestId == request.requestId
+            current.request == request
         ) {
             return
         }
@@ -1176,7 +1100,7 @@ class FamilyWizardController(
             }
             is MemberLoginCheckResult.Joined -> publishCompleted(
                 snapshot,
-                FamilyWizardOutcome.MemberApproved(result.session, result.dataRecovery),
+                FamilyWizardOutcome.MemberApproved(result.sessionPresentation, result.dataRecovery),
             )
             is MemberLoginCheckResult.Terminal -> {
                 mutableState.value = FamilyWizardState.RetryableFailure(
@@ -1249,7 +1173,7 @@ class FamilyWizardController(
         }
         publishCompleted(
             identity,
-            FamilyWizardOutcome.OwnerLoggedIn(result.session, result.dataRecovery),
+            FamilyWizardOutcome.OwnerLoggedIn(result.sessionPresentation, result.dataRecovery),
         )
     }
 

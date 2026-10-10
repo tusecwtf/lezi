@@ -128,10 +128,9 @@ class RealSyncPortHeartbeatLoopTest {
         advanceHeartbeatTime(rig, 8_000)
         assertThat(rig.backend.heartbeatCalls).isEqualTo(2)
 
-        // 退后台 (LeziApp.onStop only flips ForegroundState): the loop tears
-        // itself down at its next wake — zero probes far beyond every cadence.
+        // Cancellation is immediate; do not advance to the old scheduled beat.
         rig.foreground.setForeground(false)
-        advanceHeartbeatTime(rig, 10 * 60_000)
+        runCurrent()
         pumpUntil { !rig.port.heartbeatLoopActive }
         assertThat(rig.backend.heartbeatCalls).isEqualTo(2)
 
@@ -147,6 +146,26 @@ class RealSyncPortHeartbeatLoopTest {
         assertThat(rig.backend.heartbeatCalls).isEqualTo(2)
         advanceHeartbeatTime(rig, 1_000)
         assertThat(rig.backend.heartbeatCalls).isEqualTo(3)
+    }
+
+    @Test
+    fun backgroundCancelsBlockedPullWithoutKillingTheSignalHost() = runTest {
+        val rig = heartbeatRig()
+        val entered = CompletableDeferred<Unit>()
+        val cancelled = CompletableDeferred<Unit>()
+        rig.backend.beforePullReturn = {
+            entered.complete(Unit)
+            try { kotlinx.coroutines.awaitCancellation() } finally { cancelled.complete(Unit) }
+        }
+        rig.port.requestSync(SyncTrigger.Foreground)
+        pumpUntil { entered.isCompleted }
+        rig.foreground.setForeground(false)
+        pumpUntil { cancelled.isCompleted }
+        val pullsBeforeReturn = rig.backend.pullCount
+        rig.foreground.setForeground(true)
+        rig.port.requestSync(SyncTrigger.Foreground)
+        pumpUntil { rig.backend.pullCount > pullsBeforeReturn }
+        settleIdle(rig)
     }
 
     @Test
@@ -350,18 +369,87 @@ class RealSyncPortHeartbeatLoopTest {
         assertThat(rig.port.heartbeatNextBeatAtMillis.value)
             .isEqualTo(rig.clock.now + 300_000)
 
-        // requestSync(LocalWrite) → engine onLocalWriteCompleted: the EXPOSED
-        // deadline resets to the 60s baseline (jitter pinned to 0 here).
+        // Write ten seconds into an already parked five-minute deadline.
+        advanceHeartbeatTime(rig, 10_000)
         rig.port.requestSync(SyncTrigger.LocalWrite)
         assertThat(rig.port.heartbeatNextBeatAtMillis.value)
             .isEqualTo(rig.clock.now + 60_000)
 
-        // The reset is honored at the loop's next wake: settle the echo round,
-        // then the overdue deadline fires exactly one beat.
         settleIdle(rig)
-        advanceHeartbeatTime(rig, 300_000)
+        advanceHeartbeatTime(rig, 59_999)
+        assertThat(rig.backend.heartbeatCalls).isEqualTo(5)
+        advanceHeartbeatTime(rig, 1)
         pumpUntil { rig.backend.heartbeatCalls == 6 }
         settleIdle(rig)
+    }
+
+    @Test
+    fun repeatedWritesMoveTheActualWaitingDeadlineLaterWithoutExtraBeats() = runTest {
+        val rig = heartbeatRig()
+        rig.backend.nextHeartbeat = quietHeartbeat(joinedSession("family-a"))
+        advanceHeartbeatTime(rig, 8_000)
+        pumpUntil { rig.backend.heartbeatCalls == 2 }
+        val originalDeadline = requireNotNull(rig.port.heartbeatNextBeatAtMillis.value)
+        repeat(4) {
+            advanceHeartbeatTime(rig, 20_000)
+            rig.port.requestSync(SyncTrigger.LocalWrite)
+            settleIdle(rig)
+            assertThat(rig.port.heartbeatNextBeatAtMillis.value).isEqualTo(rig.clock.now + 60_000)
+            assertThat(rig.backend.heartbeatCalls).isEqualTo(2)
+        }
+        assertThat(rig.clock.now).isGreaterThan(originalDeadline)
+        advanceHeartbeatTime(rig, 59_999)
+        assertThat(rig.backend.heartbeatCalls).isEqualTo(2)
+        advanceHeartbeatTime(rig, 1)
+        pumpUntil { rig.backend.heartbeatCalls == 3 }
+        settleIdle(rig)
+        advanceHeartbeatTime(rig, 1)
+        assertThat(rig.backend.heartbeatCalls).isEqualTo(3)
+    }
+
+    @Test
+    fun clearingAWaitingDeadlineCancelsItsOldTimerWithoutAReplacementProbe() = runTest {
+        val rig = heartbeatRig()
+        rig.backend.nextHeartbeat = quietHeartbeat(joinedSession("family-a"))
+        advanceHeartbeatTime(rig, 8_000)
+        pumpUntil { rig.backend.heartbeatCalls == 2 }
+        advanceHeartbeatTime(rig, 10_000)
+        // The public refresh path observes a server without the endpoint and
+        // clears the schedule while the resident loop still awaits its old beat.
+        rig.backend.heartbeatFailure = SyncHttpException(404, """{"detail":"Not Found"}""")
+        rig.port.probeServerAvailability(AvailabilityProbeReason.PullToRefresh)
+        pumpUntil { !rig.port.heartbeatLoopActive }
+        assertThat(rig.port.heartbeatNextBeatAtMillis.value).isNull()
+        val count = rig.backend.heartbeatCalls
+        advanceHeartbeatTime(rig, 600_000)
+        assertThat(rig.backend.heartbeatCalls).isEqualTo(count)
+    }
+
+    @Test
+    fun writeResetWhileSyncingReplacesTheOverdueBeatRatherThanQueueingIt() = runTest {
+        val rig = heartbeatRig()
+        rig.backend.nextHeartbeat = quietHeartbeat(joinedSession("family-a"))
+        advanceHeartbeatTime(rig, 8_000)
+        pumpUntil { rig.backend.heartbeatCalls == 2 }
+        val parked = CompletableDeferred<Unit>()
+        rig.backend.handshakeGate = parked
+        rig.port.requestSync(SyncTrigger.Foreground)
+        pumpUntil { rig.port.status().first() == SyncStatus.Syncing }
+        advanceHeartbeatTime(rig, 70_000)
+        assertThat(rig.backend.heartbeatCalls).isEqualTo(2)
+        rig.port.requestSync(SyncTrigger.LocalWrite)
+        val replacement = rig.clock.now + 60_000
+        assertThat(rig.port.heartbeatNextBeatAtMillis.value).isEqualTo(replacement)
+        rig.backend.handshakeGate = null
+        parked.complete(Unit)
+        settleIdle(rig)
+        assertThat(rig.backend.heartbeatCalls).isEqualTo(2)
+        advanceHeartbeatTime(rig, 59_999)
+        assertThat(rig.backend.heartbeatCalls).isEqualTo(2)
+        advanceHeartbeatTime(rig, 1)
+        pumpUntil { rig.backend.heartbeatCalls == 3 }
+        settleIdle(rig)
+        assertThat(rig.backend.heartbeatCalls).isEqualTo(3)
     }
 
     @Test

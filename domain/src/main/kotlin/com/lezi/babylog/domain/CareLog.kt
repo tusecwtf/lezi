@@ -1,4 +1,6 @@
 package com.lezi.babylog.domain
+
+import com.lezi.babylog.domain.carelog.*
 import com.lezi.babylog.core.common.newClientUuid
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.BabyEntity
@@ -35,6 +37,7 @@ import com.lezi.babylog.core.model.NextFeedPlanReconciliation
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordPayloadCodec
 import com.lezi.babylog.core.model.RecordPayloadDocument
+import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.CustomPayload
 import com.lezi.babylog.core.model.parseBabySex
@@ -43,6 +46,8 @@ import java.time.LocalDate
 import java.time.ZoneId
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -107,6 +112,20 @@ data class UpdateBabyInput(
 /** Thrown when another active baby already uses the nickname. */
 class DuplicateBabyNicknameException(val nickname: String) :
     IllegalArgumentException("宝宝昵称「$nickname」已存在")
+
+/** The baby exists; only device-local selection or the sync wake-up remains pending. */
+class BabyCreationCommittedException(
+    val babyId: Long,
+    cause: Throwable,
+) : IllegalStateException("宝宝已创建，切换或同步提示暂未完成", cause)
+
+/** Preserve cancellation semantics without hiding an already committed profile. */
+class BabyCreationCommittedCancellationException(
+    val babyId: Long,
+    cause: kotlinx.coroutines.CancellationException,
+) : kotlinx.coroutines.CancellationException("宝宝已创建，后续操作已取消") {
+    init { initCause(cause) }
+}
 
 class BabyProfilePermissionException :
     IllegalStateException("宝宝档案由家庭管理员管理")
@@ -188,6 +207,10 @@ class CareLog internal constructor(
     private val sourceRelationDao: SourceRelationDao,
     private val recordWakeProjectionDao: RecordWakeProjectionDao,
     private val systemCalendarWriteMaxElapsedMillis: Long,
+    /** Filesystem boundary; production keeps the shared SHA-256 implementation. */
+    private val digestPhotoFile: (String) -> String? = {
+        com.lezi.babylog.core.common.MediaContentDigest.ofReadableFile(it)
+    },
 ) {
     @Inject
     constructor(
@@ -242,9 +265,10 @@ class CareLog internal constructor(
         recordWakeProjectionDao,
         SYSTEM_CALENDAR_WRITE_MAX_ELAPSED_MILLIS,
     )
-    private val photoAttachmentReconciler = PhotoAttachmentReconciler(
+    private val photoAttachmentReconciler = PhotoAttachmentReconciler.withDigest(
         mediaAssetDao = mediaAssetDao,
         pathGate = mediaPathGate,
+        digestFile = digestPhotoFile,
     )
     /**
      * Serializes record create, update, delete, and confirm operations that may
@@ -316,6 +340,7 @@ class CareLog internal constructor(
                 ?: error("请先添加宝宝")
         },
         requestLocalSync = ::requestLocalSync,
+        nowMillis = clock::nowMillis,
     )
 
     private lateinit var carePlans: CarePlanCoordinator
@@ -359,9 +384,6 @@ class CareLog internal constructor(
                 actualTimestamp = actualTimestamp,
             )
         },
-        // Deferred like completeOpenCarePlanWithRecord: CarePlanCoordinator owns
-        // active plan-photo path policy (ordering/trim); do not re-read via DAO here.
-        listCarePlanPhotoPaths = { carePlans.listCarePlanPhotoPaths(it) },
         requestLocalSync = ::requestLocalSync,
         wakeObservations = this.wakeObservationCoordinator,
     )
@@ -398,6 +420,7 @@ class CareLog internal constructor(
             calendarReminderMutationGuard = calendarReminderMutationGuard,
             syncPort = syncPort,
             recordMutations = recordMutations,
+            wakeObservations = wakeObservationCoordinator,
             nextFeedPlanMutationMutex = nextFeedPlanMutationMutex,
             sleepMutationMutex = sleepMutationMutex,
             hasOpenSleep = ::hasVisibleOpenSleep,
@@ -424,8 +447,11 @@ class CareLog internal constructor(
         babyProfiles.ensureFamilyScaffold()
     }
 
-    suspend fun addBaby(input: CreateBabyInput): Long = localDataMutationEpoch.withMutation {
-        babyProfiles.addBaby(input)
+    suspend fun addBaby(
+        input: CreateBabyInput,
+        clientUuid: String = newClientUuid(),
+    ): Long = localDataMutationEpoch.withMutation {
+        babyProfiles.addBaby(input, clientUuid)
     }
 
     suspend fun updateBabyProfile(babyId: Long, input: UpdateBabyInput) =
@@ -554,6 +580,117 @@ class CareLog internal constructor(
         now: Long = System.currentTimeMillis(),
     ): DailySummary = queries.daySummary(babyId, day, zone, now)
 
+    // Typed feature-facing commands. Legacy overloads below remain storage/import adapters;
+    // both paths share the same transactional coordinators and perform no additional reads.
+    suspend fun createRecord(intent: CreateCareRecord, nowMillis: Long = System.currentTimeMillis()): Long {
+        require(intent.content.payload.type != RecordType.SLEEP) {
+            "睡眠请使用睡下或闭合补记命令"
+        }
+        return addRecord(
+            babyId = intent.baby.value, type = intent.content.payload.type,
+            timestamp = intent.content.timestamp, endTimestamp = intent.content.endTimestamp,
+            note = intent.content.note, payloadJson = intent.content.payload.encodeCarePayload(),
+            photoLocalPaths = intent.attachments.forNew(), nowMillis = nowMillis,
+            clientUuid = intent.writeId.value,
+        )
+    }
+
+    suspend fun editRecord(intent: EditCareRecord, nowMillis: Long = System.currentTimeMillis()) = localDataMutationEpoch.withMutation {
+        recordMutations.updateRecord(
+            id = intent.target.value, timestamp = intent.content.timestamp,
+            endTimestamp = intent.content.endTimestamp, note = intent.content.note,
+            payloadJson = intent.content.payload.encodeCarePayload(),
+            photoLocalPaths = intent.attachments.forEdit(), nowMillis = nowMillis,
+            expectedPayloadType = intent.content.payload.type,
+        )
+    }
+
+    suspend fun startSleep(intent: StartCareSleep, nowMillis: Long = System.currentTimeMillis()): Long =
+        confirmSleep(
+            babyId = intent.baby.value, expectedOpenSleepId = null, timestamp = intent.at,
+            endTimestamp = null, note = intent.note, payloadJson = intent.payload.encodeCarePayload(),
+            photoLocalPaths = intent.attachments.forNew(), nowMillis = nowMillis,
+            clientUuid = intent.writeId.value,
+        )
+
+    suspend fun backfillSleep(intent: BackfillCareSleep, nowMillis: Long = System.currentTimeMillis()): Long =
+        confirmSleep(
+            babyId = intent.baby.value, expectedOpenSleepId = null, timestamp = intent.start,
+            endTimestamp = intent.end, note = intent.note, payloadJson = intent.payload.encodeCarePayload(),
+            photoLocalPaths = intent.attachments.forNew(), nowMillis = nowMillis,
+            clientUuid = intent.writeId.value,
+        )
+
+    suspend fun editOpenSleep(
+        intent: EditOpenCareSleep,
+        nowMillis: Long = System.currentTimeMillis(),
+    ): Long = localDataMutationEpoch.withMutation {
+        recordMutations.confirmSleep(
+            babyId = intent.baby.value, expectedOpenSleepId = intent.target.value,
+            timestamp = intent.start, endTimestamp = null,
+            note = intent.note, payloadJson = intent.payload.encodeCarePayload(),
+            photoLocalPaths = intent.attachments.forEdit(), nowMillis = nowMillis,
+        )
+    }
+
+    suspend fun closeSleep(intent: CloseCareSleep, nowMillis: Long = System.currentTimeMillis()): Long =
+        confirmSleep(
+            babyId = intent.baby.value, expectedOpenSleepId = intent.target.value,
+            timestamp = intent.start, endTimestamp = intent.wakeAt, note = intent.wakeNote,
+            payloadJson = com.lezi.babylog.core.model.SleepPayload().encodeCarePayload(),
+            photoLocalPaths = intent.attachments.forNew(), nowMillis = nowMillis,
+            clientUuid = intent.writeId.value,
+        )
+
+    suspend fun correctWake(intent: CorrectCareWake, nowMillis: Long = System.currentTimeMillis()) =
+        updateWakeObservation(
+            clientUuid = intent.target.value, wakeTimestamp = intent.at, note = intent.note,
+            photoLocalPaths = intent.attachments.forEdit(), nowMillis = nowMillis,
+        )
+
+    suspend fun createPlan(intent: CreateCarePlan, nowMillis: Long = System.currentTimeMillis()): Long =
+        createCarePlan(
+            babyId = intent.baby.value, type = intent.content.payload.type,
+            scheduledAt = intent.content.timestamp, note = intent.content.note,
+            payloadJson = intent.content.payload.encodeCarePayload(), customItemId = intent.customItemId,
+            photoLocalPaths = intent.attachments.forNew(), nowMillis = nowMillis,
+            projectToSystemCalendar = intent.projectToSystemCalendar, clientUuid = intent.writeId.value,
+        )
+
+    suspend fun editPlan(intent: EditCarePlan, nowMillis: Long = System.currentTimeMillis()) = localDataMutationEpoch.withMutation {
+        carePlans.updateCarePlan(
+            carePlanId = intent.target.value, scheduledAt = intent.content.timestamp,
+            note = intent.content.note, payloadJson = intent.content.payload.encodeCarePayload(),
+            photoLocalPaths = intent.attachments.forEdit(), nowMillis = nowMillis,
+            projectToSystemCalendar = intent.projectToSystemCalendar,
+            expectedPayloadType = intent.content.payload.type,
+        )
+    }
+
+    suspend fun fulfillPlan(intent: FulfillCarePlan, nowMillis: Long = System.currentTimeMillis()): Long = localDataMutationEpoch.withMutation {
+        carePlans.fulfillCarePlan(
+            carePlanId = intent.target.value, actualTimestamp = intent.content.timestamp,
+            endTimestamp = intent.content.endTimestamp, note = intent.content.note,
+            payloadJson = intent.content.payload.encodeCarePayload(),
+            photoLocalPaths = intent.attachments.forNew(), nowMillis = nowMillis,
+            clientUuid = intent.writeId.value,
+            expectedPayloadType = intent.content.payload.type,
+        )
+    }
+
+    suspend fun convertRecordToPlan(
+        intent: ConvertCareRecordToPlan,
+        nowMillis: Long = System.currentTimeMillis(),
+    ): Long = localDataMutationEpoch.withMutation {
+        recordMutations.convertRecordToCarePlan(
+            recordId = intent.target.value, scheduledAt = intent.content.timestamp,
+            note = intent.content.note, payloadJson = intent.content.payload.encodeCarePayload(),
+            photoLocalPaths = intent.attachments.forNew(), nowMillis = nowMillis,
+            projectToSystemCalendar = intent.projectToSystemCalendar, clientUuid = intent.writeId.value,
+            expectedPayloadType = intent.content.payload.type,
+        )
+    }
+
     suspend fun addRecord(
         babyId: Long,
         type: RecordType,
@@ -659,6 +796,66 @@ class CareLog internal constructor(
     suspend fun canDeleteRecord(record: Record): Boolean =
         recordMutations.canDeleteRecord(record)
 
+
+    /** One committed care graph for export; no raw-root range or follow-up wake reads. */
+    internal suspend fun exportCareFacts(
+        babyId: Long,
+        startInclusive: Long,
+        endExclusive: Long,
+    ): List<com.lezi.babylog.domain.export.ExportCareFact> = transactionRunner.run {
+        val context = currentCoroutineContext()
+        var visited = 0
+        fun checkWork() {
+            if ((visited++ and 127) == 0) context.ensureActive()
+        }
+        val rows = queries.projectedRecords(babyId, startInclusive, endExclusive)
+        val photos = linkedMapOf<Long?, MutableList<MediaAssetEntity>>()
+        var offset = 0
+        while (offset < rows.size) {
+            checkWork()
+            val ids = rows.subList(offset, minOf(rows.size, offset + RECORD_PHOTO_QUERY_CHUNK)).map {
+                checkWork()
+                it.root.id
+            }
+            for (photo in mediaAssetDao.listActiveForRecordsIn(ids)) {
+                checkWork()
+                photos.getOrPut(photo.recordId) { mutableListOf() }.add(photo)
+            }
+            offset += ids.size
+        }
+        rows.map { projected ->
+            checkWork()
+            val interval = projected.sleepInterval
+            val model = if (interval != null) {
+                projected.root.toModel().copy(endTimestamp = interval.endTimestamp)
+            } else {
+                projected.root.toModel()
+            }
+            val visibleWakeUuids = interval?.visibleObservations.orEmpty().mapTo(hashSetOf()) {
+                checkWork()
+                it.clientUuid
+            }
+            val visibleWakes = projected.wakeObservations.filter {
+                checkWork()
+                it.clientUuid in visibleWakeUuids
+            }
+            val wakeIds = visibleWakes.mapTo(hashSetOf()) { checkWork(); it.id }
+            val paths = linkedSetOf<String>()
+            for (photo in photos[model.id].orEmpty()) {
+                checkWork()
+                if (photo.localUri.isNotBlank()) paths.add(photo.localUri)
+            }
+            for (photo in projected.wakeMedia) {
+                checkWork()
+                if (photo.wakeObservationId in wakeIds && photo.localUri.isNotBlank()) paths.add(photo.localUri)
+            }
+            com.lezi.babylog.domain.export.ExportCareFact(
+                record = model,
+                wakeNotes = visibleWakes.mapNotNull { checkWork(); it.note?.takeIf(String::isNotBlank) },
+                photoPaths = paths.toList(),
+            )
+        }
+    }
 
     /** Active record photo paths. MediaAsset is the sole current photo source. */
     suspend fun listRecordPhotoPaths(recordId: Long): List<String> {
@@ -1309,10 +1506,17 @@ class CareLog internal constructor(
     suspend fun recentCareSummary(
         babyId: Long,
         zone: ZoneId = ZoneId.systemDefault(),
+    ): WidgetSummaryDto = recentCareSummaryAt(babyId, zone, RecordTime.currentTimeMillis())
+
+    internal suspend fun recentCareSummaryAt(
+        babyId: Long,
+        zone: ZoneId,
+        now: Long,
     ): WidgetSummaryDto = queries.recentCareSummary(
         babyId = babyId,
         zone = zone,
         hiddenSourceClientUuids = sourceRelationCoordinator.sourceRoleClientUuids(),
+        now = now,
     )
 
     fun observeMeasurements(babyId: Long, type: RecordType): Flow<List<Record>> =
@@ -1508,6 +1712,21 @@ internal fun requireCurrentPayloadJson(
 ): String {
     requireCurrentPayloadDocument(type, payloadJson, schemaVersion)
     return payloadJson
+}
+
+/** Shared scalar rules run after plan target/type/custom stamping and before persistence. */
+internal fun requireValidCarePlanPayload(
+    type: RecordType,
+    payloadJson: String,
+    schemaVersion: Int,
+    note: String?,
+) {
+    val payload = requireCurrentPayloadDocument(type, payloadJson, schemaVersion).payload
+    val errors = RecordPayloadCodec.validate(
+        payload,
+        allowIntentOnlyFeed = com.lezi.babylog.core.model.carePlanAllowsIntentOnlyFeed(type, note),
+    )
+    require(errors.isEmpty()) { errors.joinToString() }
 }
 
 /**

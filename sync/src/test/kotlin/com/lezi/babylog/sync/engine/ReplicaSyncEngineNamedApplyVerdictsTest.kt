@@ -548,7 +548,9 @@ class ReplicaSyncEngineNamedApplyVerdictsTest {
             )
         }
 
-        pullOnce(rig, remoteReplicaMedia(MEDIA_UUID, recordClientUuid = RECORD_UUID))
+        rig.backend.mediaBytes = byteArrayOf(1, 2, 3, 4)
+        pullOnce(rig, remoteReplicaMedia(MEDIA_UUID, recordClientUuid = RECORD_UUID)
+            .withAuthenticatedMediaBytes(rig.backend.mediaBytes))
 
         // The in-cycle local edit wins: the remote media row is not applied.
         val row = requireNotNull(rig.media.getByClientUuid(MEDIA_UUID))
@@ -559,7 +561,7 @@ class ReplicaSyncEngineNamedApplyVerdictsTest {
             gate = DeferredGate.MediaEditGuard,
             missingEntityType = "media",
             missingClientUuid = MEDIA_UUID,
-            localSnapshot = "media.inCycleLocalEdit=true",
+            localSnapshot = "media.changedDuringVerifiedDownload=true",
         )
     }
 

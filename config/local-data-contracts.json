@@ -1,5 +1,5 @@
 {
-  "current_contract": 6,
+  "current_contract": 7,
   "permanent_baseline_contract": 1,
   "minimum_migratable_contract": 1,
   "contracts": [
@@ -50,38 +50,67 @@
       "settings_revision": 1,
       "credentials_revision": 1,
       "media_revision": 1
+    },
+    {
+      "contract_version": 7,
+      "introduced_in_version_code": 35,
+      "room_schema": 29,
+      "settings_revision": 2,
+      "credentials_revision": 1,
+      "media_revision": 2
     }
   ],
   "migrations": [
     {
       "from_contract": 1,
       "to_contract": 2,
-      "affected_domains": ["room", "settings"],
+      "affected_domains": [
+        "room",
+        "settings"
+      ],
       "implementation": "CustomItemClientUuidIndexUpgradeStep"
     },
     {
       "from_contract": 2,
       "to_contract": 3,
-      "affected_domains": ["room"],
+      "affected_domains": [
+        "room"
+      ],
       "implementation": "OutboxRetirementUpgradeStep"
     },
     {
       "from_contract": 3,
       "to_contract": 4,
-      "affected_domains": ["room"],
+      "affected_domains": [
+        "room"
+      ],
       "implementation": "CausalRoomUpgradeStep"
     },
     {
       "from_contract": 4,
       "to_contract": 5,
-      "affected_domains": ["room"],
+      "affected_domains": [
+        "room"
+      ],
       "implementation": "FinalCausalRoomUpgradeStep"
     },
     {
       "from_contract": 5,
       "to_contract": 6,
-      "affected_domains": ["room"],
+      "affected_domains": [
+        "room"
+      ],
       "implementation": "MediaSha256ColumnUpgradeStep"
+    },
+    {
+      "from_contract": 6,
+      "to_contract": 7,
+      "affected_domains": [
+        "room",
+        "settings",
+        "media"
+      ],
+      "implementation": "RestoreAuthorityContractUpgradeStep"
     }
   ]
 }

@@ -140,7 +140,7 @@ fn assert_cache_matches_full_recompute(store: &Store, family_id: &str) {
 /// Creates a distinct family — `test_support::family` replays on a fixed
 /// create_request_id, so tests needing two families must use their own ids.
 fn new_family(store: &Store, create_request_id: &str) -> String {
-    store
+    let created = store
         .create_family(
             CreateFamilyInput {
                 now: 1,
@@ -153,8 +153,17 @@ fn new_family(store: &Store, create_request_id: &str) -> String {
             },
             |_, _, _| ("owner-access".to_owned(), "owner-refresh".to_owned()),
         )
-        .unwrap()
-        .family_id
+        .unwrap();
+    test_owners().lock().unwrap().insert(
+        created.family_id.clone(),
+        Principal {
+            family_id: created.family_id.clone(),
+            role: "owner".to_owned(),
+            membership_id: created.membership_id,
+            device_id: created.device_id,
+        },
+    );
+    created.family_id
 }
 
 /// Commits the family's live baby; record commits require it (invalid_domain
@@ -549,7 +558,9 @@ fn rename_family_invalidates_through_the_funnel() {
     let family_id = family(&store);
     install_entry_at_head(&store, &family_id);
 
-    store.rename_family(&family_id, "新名字").unwrap();
+    store
+        .rename_family(&owner_principal(&family_id), "新名字")
+        .unwrap();
     assert_eq!(store.test_cached_census_head_rev(&family_id), None);
     assert_cache_matches_full_recompute(&store, &family_id);
 }
@@ -635,6 +646,7 @@ fn declare_source_relation_invalidates_via_relation_member_bump() {
         membership_id: "m-census-member".to_owned(),
         device_id: "d-census-member".to_owned(),
     };
+    register_test_principal(&store, &member);
     let baby_id = Uuid::new_v4();
     commit_unit(
         &store,
@@ -708,6 +720,7 @@ fn resolve_source_relation_group_invalidates_via_relation_member_bump() {
         membership_id: "m-census-member".to_owned(),
         device_id: "d-census-member".to_owned(),
     };
+    register_test_principal(&store, &member);
     let baby_id = Uuid::new_v4();
     commit_unit(
         &store,
@@ -819,14 +832,14 @@ fn hard_delete_membership_absolute_rev_write_invalidates_unconditionally() {
         1_700_000_000,
     );
     let membership_id = store
-        .add_device_less_member(&family_id, "成员", "成员")
+        .add_device_less_member(&owner, "成员", "成员")
         .unwrap();
     install_entry_at_head(&store, &family_id);
 
     // Deleting the membership anonymizes surviving entity payloads with
     // absolute rev assignments.
     store
-        .hard_delete_membership(&family_id, &membership_id, 1_700_000_100)
+        .hard_delete_membership(&owner, &membership_id, 1_700_000_100)
         .unwrap();
     assert_eq!(store.test_cached_census_head_rev(&family_id), None);
     assert_cache_matches_full_recompute(&store, &family_id);
@@ -867,6 +880,13 @@ fn disaster_restore_leaves_a_correctly_populated_cache() {
                     "avatar_media_uuid":null,"birth_weight_grams":3200
                 })),
             }],
+            RestoreAuthorityInput {
+                batch_id: "11111111-1111-4111-8111-111111111111",
+                manifest_request_id: "cache-restore-manifest",
+                manifest_hash: &"a".repeat(64),
+                source_relations: &[],
+                media_sha256: &BTreeMap::new(),
+            },
         )
         .unwrap();
     assert_cache_matches_full_recompute(&store, "restore-family");

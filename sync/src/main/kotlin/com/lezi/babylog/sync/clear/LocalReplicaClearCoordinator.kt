@@ -18,6 +18,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import com.lezi.babylog.sync.LocalClearWorkflow
 import com.lezi.babylog.sync.media.SyncMediaFileStore
+import com.lezi.babylog.sync.media.ScopedMediaSpoolClear
 import com.lezi.babylog.sync.session.SyncPreferences
 import com.lezi.babylog.sync.session.SyncSession
 
@@ -25,8 +26,9 @@ import com.lezi.babylog.sync.session.SyncSession
  * Owns the crash-recoverable hand-off from a domain Room clear to replica cleanup.
  *
  * The marker and domain deletion commit in one Room transaction. External file
- * and DataStore work then runs non-cancellably, and a final Room transaction
- * atomically retires captured media rows with the marker.
+ * and DataStore work then runs non-cancellably. Captured media rows commit before
+ * restore-file reclamation takes its path gates; the marker retires only after
+ * that outside-Room reclamation succeeds.
  */
 internal class LocalReplicaClearCoordinator(
     private val barrier: Mutex,
@@ -34,8 +36,15 @@ internal class LocalReplicaClearCoordinator(
     private val babyDao: BabyDao,
     private val mediaDao: MediaAssetDao,
     private val mediaFiles: SyncMediaFileStore,
+    private val mediaSpoolClear: ScopedMediaSpoolClear,
     private val transactionRunner: DatabaseTransactionRunner,
     private val pendingStore: PendingReplicaCleanupStore,
+    // Production supplies the lifecycle hooks; defaults support isolated legacy clear tests.
+    private val terminalSpoolOwner: () -> com.lezi.babylog.sync.disasterrecovery.RestoreTerminalSpoolRetirementOwner? = { null },
+    private val reclaimRestoreFiles: suspend () -> Unit = {},
+    private val restoreOwnedPaths: suspend () -> Set<String> = { emptySet() },
+    private val clearSourceEvidence: suspend (LocalDataClearScope, SyncSession, suspend () -> Unit) -> Unit =
+        { _, _, clear -> clear() },
 ) {
     suspend fun clear(
         scope: LocalDataClearScope,
@@ -43,21 +52,35 @@ internal class LocalReplicaClearCoordinator(
         recoverDomain: suspend () -> LocalDataClearScope?,
     ): Result<Unit> = runCatching {
         barrier.withLock {
-            // Recovery completes an older committed request. It never satisfies
-            // this new explicit clear: the user may have created local data after
-            // the older request failed its side-effect finalization.
-            recoverDomain()
-            recoverPendingLocked()
-            workflow.withLocalExclusion {
-                val session = preferences.session.first()
-                val pending = transactionRunner.run {
-                    snapshot(scope, session).also { staged ->
-                        pendingStore.stage(staged)
-                        workflow.clearRoom()
+            clearUnderBarrier(scope, workflow, recoverDomain)
+        }
+    }
+
+    /** Only the sync owner may call this while retaining its terminal identity barrier. */
+    internal suspend fun clearUnderBarrier(
+        scope: LocalDataClearScope,
+        workflow: LocalClearWorkflow,
+        recoverDomain: suspend () -> LocalDataClearScope?,
+    ) {
+        // Recovery completes an older committed request. It never satisfies
+        // this new explicit clear: the user may have created local data after
+        // the older request failed its side-effect finalization.
+        recoverDomain()
+        recoverPendingLocked()
+        workflow.withLocalExclusion {
+            val session = preferences.session.first()
+            val pending = transactionRunner.run {
+                val terminalCapture = terminalSpoolOwner()?.prepareCommittedClear(scope)
+                val selected = snapshot(scope, session)
+                selected.copy(mediaClientUuids = selected.mediaClientUuids + terminalCapture?.mediaClientUuids.orEmpty()).also { staged ->
+                    pendingStore.stage(staged)
+                    clearSourceEvidence(scope, session) {
+                        mediaSpoolClear.preserveRetainedEvidence(scope, workflow::clearRoom)
                     }
+                    if (terminalCapture != null) terminalSpoolOwner()?.bindCommittedClear(staged, terminalCapture)
                 }
-                finishCommitted(pending, workflow::finishCommitted)
             }
+            finishCommitted(pending, workflow::finishCommitted)
         }
     }
 
@@ -167,6 +190,10 @@ internal class LocalReplicaClearCoordinator(
                 LocalDataClearScope.AllLocalData -> ""
             },
         )
+        // Dedicated restore files stay under their lifecycle owner's path/holder
+        // checks, including any paths adopted by current MediaAsset rows. Resolve
+        // the authoritative inventory before Room; never infer ownership by name.
+        val restorePaths = restoreOwnedPaths()
         transactionRunner.run {
             // Every committed media ownership change uses this Room write lease
             // (remote materialization is additionally behind [barrier]). Keep the
@@ -182,20 +209,38 @@ internal class LocalReplicaClearCoordinator(
             }
             pending.localMediaPaths
                 .filterNot(protectedPaths::contains)
+                .filterNot(restorePaths::contains)
+                // Private spool bytes, including historical aliases, belong to the
+                // durable spool owner. Generic fact cleanup must not partially unlink
+                // a sealed group before its deleting intent commits.
+                .filterNot { path ->
+                    (mediaDao as? com.lezi.babylog.core.database.causal.PrivateSpoolPublicationGuarded)
+                        ?.privateSpoolPathPolicy?.isPrivatePath(path) == true
+                }
                 .forEach { mediaFiles.delete(it) }
             // A Composer import can exist before it has a MediaAsset owner. Sweep
             // product-owned roots after the final ownership recheck so an explicit
             // local clear fulfils its privacy promise for those orphan drafts too.
-            // Domain writers are excluded by LocalClearWorkflow's clear epoch; this
-            // filesystem pass deliberately does not acquire MediaLocalPathGate while
-            // [barrier] (syncMutex) is held, avoiding a reverse lock edge.
+            // Domain writers are excluded by LocalClearWorkflow's clear epoch. This
+            // legacy pass keeps its Room lease; dedicated restore paths are excluded
+            // and use their lifecycle owner's gated reclamation outside Room below.
             mediaFiles.sweepUnreferenced(
                 scope = pending.scope,
-                retainedLocalUris = protectedPaths,
+                retainedLocalUris = protectedPaths + restorePaths,
             )
             pending.mediaClientUuids.chunked(MEDIA_DELETE_CHUNK_SIZE).forEach { chunk ->
                 mediaDao.deleteByClientUuids(chunk)
             }
+        }
+        // The owner takes path gates before short Room CAS leases. The original
+        // durable marker survives failure or process death across this boundary,
+        // so restart repeats the same committed cleanup without recreating rows.
+        terminalSpoolOwner()?.reclaimAfterCommittedClear()
+        reclaimRestoreFiles()
+        mediaSpoolClear.sweepAfterCommittedClear()
+        transactionRunner.run {
+            check(pendingStore.load() == pending) { "本机清理状态已变化" }
+            mediaSpoolClear.retireCommittedClearBinding()
             pendingStore.delete()
         }
     }

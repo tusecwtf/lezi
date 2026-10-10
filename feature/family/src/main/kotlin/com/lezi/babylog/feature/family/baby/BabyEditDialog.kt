@@ -28,6 +28,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -113,7 +114,7 @@ internal fun BabyEditDialog(
     var localError by remember { mutableStateOf<String?>(null) }
     var localPrefError by remember { mutableStateOf<String?>(null) }
     var themeArgb by remember(baby.id) {
-        mutableStateOf(normalizeBabyThemeArgb(baby.themeColorArgb))
+        mutableIntStateOf(normalizeBabyThemeArgb(baby.themeColorArgb))
     }
     var pickedAvatarUri by remember(baby.id) { mutableStateOf<Uri?>(null) }
     var ownedAvatarCapture by remember(baby.id) { mutableStateOf<OwnedCameraCapture?>(null) }

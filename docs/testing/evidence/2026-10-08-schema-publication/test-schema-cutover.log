@@ -1,0 +1,3 @@
+schema cutover complete
+state=/tmp/lezi-schema-cutover-test.obcOlv/state
+schema-cutover state-machine smoke passed

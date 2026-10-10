@@ -1,24 +1,34 @@
 package com.lezi.babylog.core.common.failure
 
+// 192.168.77.10 is a synthetic RFC1918 LAN test endpoint, never a deployment default.
+
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.common.looksTechnicalDetail
 import org.junit.Test
 
 class FailureCatalogTest {
     @Test
+    fun serverUpgradeKeepsLocalUseAndDoesNotOfferAnAppPackageUpdate() {
+        val copy = explanation(FailureKind.ServerUpdateRequired)
+        assertThat(copy.title).isEqualTo("需要升级家庭服务器")
+        assertThat(copy.localDataStatus).contains("已保留")
+        assertActions(FailureKind.ServerUpdateRequired, FailureAction.StayOffline, FailureAction.GotIt)
+    }
+
+    @Test
     fun injectedKindsKeepThreeCategoriesAndDistinguishableTitles() {
         val explanations = FailureKind.entries.map { kind ->
             failureExplanation(kind)
         }
 
-        assertThat(explanations.map { it.kind }.toSet()).hasSize(24)
+        assertThat(explanations.map { it.kind }.toSet()).hasSize(25)
         assertThat(explanations.map { it.category }.toSet()).containsExactly(
             FailureCategory.Network,
             FailureCategory.LocalData,
             FailureCategory.Other,
         )
-        assertThat(explanations.map { it.title }.toSet()).hasSize(24)
-        assertThat(explanations.map { it.dialogTitle }.toSet()).hasSize(24)
+        assertThat(explanations.map { it.title }.toSet()).hasSize(25)
+        assertThat(explanations.map { it.dialogTitle }.toSet()).hasSize(25)
 
         val addressNotFound = explanation(FailureKind.AddressNotFound)
         val unreachable = explanation(FailureKind.Unreachable)

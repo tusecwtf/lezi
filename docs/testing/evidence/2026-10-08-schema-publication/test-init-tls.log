@@ -1,0 +1,9 @@
+error: TLS identity is absent; ordinary CD refuses to generate a replacement
+  set LEZI_ALLOW_TLS_BOOTSTRAP=1 only for a verified fresh data root
+==> created persistent self-signed TLS identity
+==> TLS SPKI SHA-256: AB:75:58:77:DA:67:19:85:77:3C:4B:66:B8:58:F2:D1:BA:59:82:68:60:0A:D4:B0:02:5F:18:B0:77:D2:45:53
+error: TLS SPKI mismatch: expected 0000000000000000000000000000000000000000000000000000000000000000, actual AB755877DA671985773C4B66B858F2D1BA598268600AD4B0025F18B077D24553
+==> reusing persistent TLS identity
+==> TLS SPKI SHA-256: AB:75:58:77:DA:67:19:85:77:3C:4B:66:B8:58:F2:D1:BA:59:82:68:60:0A:D4:B0:02:5F:18:B0:77:D2:45:53
+error: partial TLS identity found; refusing automatic replacement
+TLS identity persistence smoke passed

@@ -1,5 +1,8 @@
 //! Causal commit / pull summary / resolution — Store façade seams.
 
+mod identity_redaction_tests;
+mod media_metadata_tests;
+
 use super::super::causal::{MAX_CAUSAL_UNITS, VERSION_PROVENANCE_PRINCIPAL};
 use super::super::causal_admission::MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT;
 use super::super::causal_media_staging::{claim_manifest, CausalMediaReceiptClaimError};
@@ -388,6 +391,9 @@ impl CausalFx {
             membership_id: "m-causal-member".to_owned(),
             device_id: "d-causal-member".to_owned(),
         };
+        let connection = store.connect().unwrap();
+        connection.execute("INSERT INTO memberships(membership_id,family_id,role,display_name,display_name_key) VALUES (?1,?2,'member','合成成员','合成成员')",params![member.membership_id,family_id]).unwrap();
+        connection.execute("INSERT INTO devices(device_id,membership_id,device_name,device_name_key,status,created_at,last_used_at) VALUES (?1,?2,'synthetic-member','synthetic-member','active',1,1)",params![member.device_id,member.membership_id]).unwrap();
         Self {
             store,
             _dir: dir,
@@ -482,7 +488,14 @@ fn custom_item_root(name: &str, icon_slot: i64, updated_at: i64) -> Map<String, 
 }
 
 fn deterministic_snapshot_payload(page: &ConflictDetailPage) -> Value {
-    let mut value = serde_json::to_value(page).unwrap();
+    let initial = serde_json::to_value(page).unwrap();
+    let owner = initial["stable"]["actor_id"].as_str().unwrap();
+    let device = initial["stable"]["device_id"].as_str().unwrap();
+    let raw = serde_json::to_string(&initial)
+        .unwrap()
+        .replace(owner, "synthetic-owner")
+        .replace(device, "synthetic-owner-device");
+    let mut value: Value = serde_json::from_str(&raw).unwrap();
     let root = value.as_object_mut().unwrap();
     for key in [
         "conflict_id",
@@ -592,6 +605,7 @@ fn three_branch_snapshot(order: [usize; 3]) -> ConflictDetailPage {
             device_id: device_id.to_owned(),
             ..fx.owner.clone()
         };
+        register_test_principal(&fx.store, &principal);
         let result = fx
             .commit(&principal, branch, 1_700_000_010 + index as i64)
             .unwrap();
@@ -629,6 +643,7 @@ fn causal_commit_principal_budget_exempts_exact_replay_and_resets_at_boundary() 
         device_id: "another-owner-device".to_owned(),
         ..fx.owner.clone()
     };
+    register_test_principal(&fx.store, &rotated_device);
     let saturated = fx
         .commit(
             &rotated_device,
@@ -3969,6 +3984,7 @@ fn causal_member_acl_rejects_baby_and_foreign_record_edit() {
         membership_id: "m-member".to_owned(),
         device_id: "d-member".to_owned(),
     };
+    register_test_principal(&fx.store, &member);
     let baby_version = fx
         .store
         .pull(&fx.family_id, 0)
@@ -4036,6 +4052,14 @@ fn choice_only_resolution_keeps_baby_owner_only_after_author_downgrade() {
         role: "member".to_owned(),
         ..fx.owner.clone()
     };
+    fx.store
+        .connect()
+        .unwrap()
+        .execute(
+            "UPDATE memberships SET role='member' WHERE membership_id=?1",
+            params![fx.owner.membership_id],
+        )
+        .unwrap();
     let result = fx
         .store
         .resolve_conflict(
@@ -4238,8 +4262,8 @@ fn causal_commit_caps_open_branches_without_hiding_durable_branches() {
     let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
     let full_branch_statements = finish_statement_count(&fx.family_id);
     assert_eq!(detail.branches.len(), 16);
-    assert_eq!(one_branch_statements, 5);
-    assert_eq!(full_branch_statements, 4);
+    assert_eq!(one_branch_statements, 6);
+    assert_eq!(full_branch_statements, 5);
 
     let restarted = Store::open(fx._dir.path().join("lezi.db")).unwrap();
     assert_eq!(
@@ -5143,7 +5167,7 @@ fn causal_care_plan_client_brought_creator_stamp_is_ignored_and_re_stamped() {
     let legacy_version = legacy.results[0].stable_version_id.clone().unwrap();
     assert_eq!(
         stored_care_plan_payload(&fx, &legacy_version).get("created_by_membership_id"),
-        Some(&Value::String("m-owner".to_owned())),
+        Some(&Value::String(fx.owner.membership_id.clone())),
         "client-forged creator stamp must be re-stamped to the principal"
     );
 
@@ -5167,7 +5191,7 @@ fn causal_care_plan_client_brought_creator_stamp_is_ignored_and_re_stamped() {
     let current_version = current.results[0].stable_version_id.clone().unwrap();
     assert_eq!(
         stored_care_plan_payload(&fx, &current_version).get("created_by_membership_id"),
-        Some(&Value::String("m-owner".to_owned())),
+        Some(&Value::String(fx.owner.membership_id.clone())),
         "stamp-less mutation must still land a server-stamped stable root"
     );
 }
@@ -7483,4 +7507,450 @@ fn legacy_bundle_rejects_mutable_root_without_or_with_causal_head() {
         StoreError::LegacyBundleCausalRootUnsupported(ref entity_type)
             if entity_type == "record"
     ));
+}
+
+/// Historical rows are inserted directly so fixture construction is excluded
+/// from measured commits. Each media item has a distinct owner/head; tombstones
+/// are excluded from that owner's current manifest. No family/NAS data is used.
+fn seed_us038_media_history(fx: &CausalFx, count: usize) {
+    let mut connection = fx.store.connect().unwrap();
+    let tx = connection.transaction().unwrap();
+    let mut rev: i64 = tx
+        .query_row(
+            "SELECT rev FROM family_meta WHERE family_id = ?1",
+            params![fx.family_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    {
+        let mut entity = tx
+            .prepare("INSERT INTO entities VALUES (?1,?2,?3,40,?4,?5,?6)")
+            .unwrap();
+        let mut version = tx.prepare(
+            "INSERT INTO entity_versions VALUES (?1,?2,'record',?3,40,NULL,?4,?5,?6,'accepted',1700000000)",
+        ).unwrap();
+        let mut head = tx
+            .prepare("INSERT INTO entity_stable_heads VALUES (?1,'record',?2,?3)")
+            .unwrap();
+        let mut media = tx
+            .prepare("INSERT INTO entity_version_media VALUES (?1,?2,?3,?4,?5)")
+            .unwrap();
+        let mut publication = tx
+            .prepare("INSERT INTO media_publications VALUES (?1,?2,'ordinary',NULL)")
+            .unwrap();
+        for i in 0..count {
+            let root_id =
+                Uuid::from_u128(0x10000000000040008000000000000000 + i as u128).to_string();
+            let media_id =
+                Uuid::from_u128(0x20000000000040008000000000000000 + i as u128).to_string();
+            let version_id =
+                Uuid::from_u128(0x30000000000040008000000000000000 + i as u128).to_string();
+            let mutation_id =
+                Uuid::from_u128(0x40000000000040008000000000000000 + i as u128).to_string();
+            let deleted = (i % 3 == 0).then_some(41_i64);
+            let item = CausalMediaItem {
+                media_uuid: media_id.clone(),
+                role: "log".into(),
+                sha256: hex::encode(Sha256::digest([0_u8])),
+                byte_size: 1,
+                mime: "image/jpeg".into(),
+                width: Some(1),
+                height: Some(1),
+            };
+            let mut root = record_root(fx.baby_id, "history", 10, 40);
+            root.insert(
+                "created_by_membership_id".into(),
+                json!(fx.owner.membership_id),
+            );
+            let manifest = if deleted.is_some() {
+                vec![]
+            } else {
+                vec![item.clone()]
+            };
+            let hash = mutation_content_hash("_", "_", None, false, &root, &manifest);
+            let root_json = serde_json::to_string(&root).unwrap();
+            root.remove("updated_at");
+            rev += 1;
+            entity
+                .execute(params![
+                    fx.family_id,
+                    "record",
+                    root_id,
+                    None::<i64>,
+                    serde_json::to_string(&root).unwrap(),
+                    rev
+                ])
+                .unwrap();
+            version
+                .execute(params![
+                    fx.family_id,
+                    version_id,
+                    root_id,
+                    root_json,
+                    hash,
+                    mutation_id
+                ])
+                .unwrap();
+            head.execute(params![fx.family_id, root_id, version_id])
+                .unwrap();
+            let payload = json!({"kind":"log", "record_client_uuid":root_id,
+                "baby_client_uuid":null,"care_plan_client_uuid":null,"mime":"image/jpeg",
+                "width":1,"height":1,"byte_size":1});
+            rev += 1;
+            entity
+                .execute(params![
+                    fx.family_id,
+                    "media",
+                    media_id,
+                    deleted,
+                    payload.to_string(),
+                    rev
+                ])
+                .unwrap();
+            if deleted.is_none() {
+                let media_payload = item.to_value();
+                let media_hash = mutation_content_hash(
+                    "media",
+                    &media_id,
+                    None,
+                    false,
+                    media_payload.as_object().unwrap(),
+                    &[],
+                );
+                media
+                    .execute(params![
+                        fx.family_id,
+                        version_id,
+                        media_id,
+                        media_payload.to_string(),
+                        media_hash
+                    ])
+                    .unwrap();
+                publication
+                    .execute(params![fx.family_id, media_id])
+                    .unwrap();
+            }
+        }
+    }
+    tx.execute(
+        "UPDATE family_meta SET rev = ?1 WHERE family_id = ?2",
+        params![rev, fx.family_id],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+}
+
+fn us038_small_edit_work(history: usize) -> u64 {
+    let fx = CausalFx::new();
+    let root = Uuid::new_v4();
+    let created = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(root, None, "before"),
+            1_700_000_000,
+        )
+        .unwrap();
+    let base = created.results[0].stable_version_id.as_deref().unwrap();
+    seed_us038_media_history(&fx, history);
+    let (result, steps) = with_sql_work_probe(|| {
+        fx.commit(
+            &fx.owner,
+            fx.record_mutation(root, Some(base), "after"),
+            1_700_000_001,
+        )
+    });
+    assert_eq!(result.unwrap().results[0].status, "accepted");
+    steps
+}
+
+#[test]
+fn causal_small_edit_sql_work_does_not_scan_unrelated_media() {
+    let small = us038_small_edit_work(100);
+    let large = us038_small_edit_work(10_000);
+    eprintln!("US038 full commit SQLite VM instructions: 100={small}, 10000={large}");
+    assert!(
+        large <= small + 100,
+        "unrelated media history grew SQL work: {small} -> {large}"
+    );
+}
+
+#[test]
+#[ignore = "100k synthetic history timing/work evidence; run explicitly"]
+fn causal_us038_hundred_thousand_media_work_evidence() {
+    let small = us038_small_edit_work(100);
+    let large = us038_small_edit_work(100_000);
+    eprintln!("US038 full commit SQLite VM instructions: 100={small}, 100000={large}");
+    assert!(
+        large <= small + 100,
+        "unrelated media history grew SQL work: {small} -> {large}"
+    );
+}
+
+#[test]
+fn causal_media_scope_rejects_cross_root_reuse_even_after_tombstone() {
+    let fx = CausalFx::new();
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    let mut item = CausalMediaItem {
+        media_uuid: Uuid::new_v4().to_string(),
+        role: "log".into(),
+        sha256: "a".repeat(64),
+        byte_size: 12,
+        mime: "image/jpeg".into(),
+        width: Some(2),
+        height: Some(3),
+    };
+    fx.stage_media_bytes(&mut item);
+    let mut create = fx.record_mutation(first, None, "first");
+    create.media = vec![item.clone()];
+    let created = fx.commit(&fx.owner, create, 1_700_000_000).unwrap();
+    let base = created.results[0].stable_version_id.as_deref().unwrap();
+    let mut reuse = fx.record_mutation(second, None, "second");
+    reuse.media = vec![item];
+    assert_commit_rejected(
+        fx.commit(&fx.owner, reuse.clone(), 1_700_000_001),
+        "invalid_domain",
+    );
+    fx.commit(
+        &fx.owner,
+        fx.record_mutation(first, Some(base), "removed"),
+        1_700_000_002,
+    )
+    .unwrap();
+    reuse.mutation_id = Uuid::new_v4().to_string();
+    assert_commit_rejected(fx.commit(&fx.owner, reuse, 1_700_000_003), "invalid_domain");
+}
+
+#[test]
+fn causal_scoped_media_reads_preserve_legacy_headless_fallback() {
+    let fx = CausalFx::new();
+    let root = Uuid::new_v4();
+    let mut item = CausalMediaItem {
+        media_uuid: Uuid::new_v4().to_string(),
+        role: "log".into(),
+        sha256: "a".repeat(64),
+        byte_size: 12,
+        mime: "image/jpeg".into(),
+        width: Some(2),
+        height: Some(3),
+    };
+    fx.stage_media_bytes(&mut item);
+    let mut create = fx.record_mutation(root, None, "legacy");
+    create.media = vec![item.clone()];
+    fx.commit(&fx.owner, create, 1_700_000_000).unwrap();
+    let mut connection = fx.store.connect().unwrap();
+    let tx = connection.transaction().unwrap();
+    tx.execute("DELETE FROM entity_stable_heads WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?2", params![fx.family_id, root.to_string()]).unwrap();
+    tx.execute(
+        "DELETE FROM mutation_receipts WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?2",
+        params![fx.family_id, root.to_string()],
+    ).unwrap();
+    tx.execute(
+        "DELETE FROM entity_versions WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?2",
+        params![fx.family_id, root.to_string()],
+    ).unwrap();
+    let ids = super::super::media_associations::live_ids_for_root(
+        &tx,
+        &fx.family_id,
+        "record",
+        &root.to_string(),
+    )
+    .unwrap();
+    assert_eq!(ids, BTreeSet::from([item.media_uuid]));
+    tx.commit().unwrap();
+    fx.store
+        .validate_authority_graph(1024, |family, media, size| {
+            Ok(fs::read(fx._dir.path().join("media").join(family).join(media))?.len() == size)
+        })
+        .unwrap();
+    let before = resolution_durable_state(&fx.store, &fx.family_id, "", root);
+    // Compatibility reads keep this legitimate historical graph. A current
+    // causal edit cannot fabricate its missing base or enter the linear helper.
+    assert!(matches!(
+        fx.commit(
+            &fx.owner,
+            fx.record_mutation(root, None, "must stay historical"),
+            1_700_000_001
+        ),
+        Err(StoreError::InvalidStoredPayload)
+    ));
+    assert_eq!(
+        resolution_durable_state(&fx.store, &fx.family_id, "", root),
+        before
+    );
+}
+
+/// Release-only local timing evidence. Uses the production heartbeat Store core
+/// behind the same per-family mutual-exclusion discipline, not HTTP/TLS, a NAS,
+/// a physical Android device, or a measurement of cold startup validation.
+#[test]
+#[ignore = "release timing evidence; LEZI_US038_HISTORY selects isolated size"]
+fn causal_us038_small_edit_timing_evidence() {
+    use std::time::Instant;
+    fn rss_kib() -> u64 {
+        fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("VmRSS:"))
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+    fn percentiles(mut values: Vec<f64>) -> (f64, f64) {
+        values.sort_by(f64::total_cmp);
+        (
+            values[values.len() / 2],
+            values[(values.len() * 95 / 100).min(values.len() - 1)],
+        )
+    }
+    let history: usize = std::env::var("LEZI_US038_HISTORY")
+        .unwrap_or_else(|_| "100".into())
+        .parse()
+        .unwrap();
+    assert!([100, 10_000, 100_000].contains(&history));
+    let fx = CausalFx::new();
+    let root = Uuid::new_v4();
+    let created = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(root, None, "before"),
+            1_700_000_000,
+        )
+        .unwrap();
+    let mut base = created.results[0].stable_version_id.clone().unwrap();
+    seed_us038_media_history(&fx, history);
+    let family_lock = Arc::new(std::sync::Mutex::new(()));
+    let mut edits = Vec::new();
+    let mut heartbeats = Vec::new();
+    let initial_rss = rss_kib();
+    let mut observed_rss = initial_rss;
+    for i in 0..35 {
+        let guard = family_lock.lock().unwrap();
+        let lock = family_lock.clone();
+        let store = fx.store.clone();
+        let family_id = fx.family_id.clone();
+        let barrier = Arc::new(Barrier::new(2));
+        let probe_barrier = barrier.clone();
+        let heartbeat = thread::spawn(move || {
+            probe_barrier.wait();
+            let start = Instant::now();
+            let _guard = lock.lock().unwrap();
+            store.head_and_directory_generation(&family_id).unwrap();
+            start.elapsed().as_secs_f64() * 1000.0
+        });
+        barrier.wait();
+        let start = Instant::now();
+        let result = fx
+            .commit(
+                &fx.owner,
+                fx.record_mutation(root, Some(&base), &format!("edit-{i}")),
+                1_700_000_001 + i,
+            )
+            .unwrap();
+        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+        base = result.results[0].stable_version_id.clone().unwrap();
+        drop(guard);
+        let heartbeat_ms = heartbeat.join().unwrap();
+        observed_rss = observed_rss.max(rss_kib());
+        if i >= 5 {
+            edits.push(elapsed);
+            heartbeats.push(heartbeat_ms);
+        }
+    }
+    let (edit_p50, edit_p95) = percentiles(edits);
+    let (heartbeat_p50, heartbeat_p95) = percentiles(heartbeats);
+    eprintln!(
+        "US038_TIMING {}",
+        json!({
+            "history_media":history,"samples":30,"edit_p50_ms":edit_p50,"edit_p95_ms":edit_p95,
+            "heartbeat_core_p50_ms":heartbeat_p50,"heartbeat_core_p95_ms":heartbeat_p95,
+            "process_rss_before_kib":initial_rss,"process_rss_post_operation_max_kib":observed_rss,
+            "debug_assertions":cfg!(debug_assertions),
+            "scope":"Store commit plus production heartbeat core and family mutex; metadata-only unrelated history; cold startup and HTTP excluded"
+        })
+    );
+}
+
+#[test]
+fn causal_scoped_media_validates_every_manifest_projection() {
+    for corrupt_owner in [false, true] {
+        let fx = CausalFx::new();
+        let root = Uuid::new_v4();
+        let mut item = CausalMediaItem {
+            media_uuid: Uuid::new_v4().to_string(),
+            role: "log".into(),
+            sha256: "a".repeat(64),
+            byte_size: 12,
+            mime: "image/jpeg".into(),
+            width: Some(2),
+            height: Some(3),
+        };
+        fx.stage_media_bytes(&mut item);
+        let mut create = fx.record_mutation(root, None, "photo");
+        create.media = vec![item.clone()];
+        let created = fx.commit(&fx.owner, create, 1_700_000_000).unwrap();
+        let base = created.results[0].stable_version_id.as_deref().unwrap();
+        let connection = fx.store.connect().unwrap();
+        if corrupt_owner {
+            connection.execute(
+                "UPDATE entities SET payload_json = json_set(payload_json, '$.record_client_uuid', ?1)
+                 WHERE family_id = ?2 AND entity_type = 'media' AND client_uuid = ?3",
+                params![Uuid::new_v4().to_string(), fx.family_id, item.media_uuid],
+            ).unwrap();
+        } else {
+            connection.execute(
+                "UPDATE entities SET deleted_at = 1 WHERE family_id = ?1 AND entity_type = 'media' AND client_uuid = ?2",
+                params![fx.family_id, item.media_uuid],
+            ).unwrap();
+        }
+        let before = resolution_durable_state(&fx.store, &fx.family_id, "", root);
+        let result = fx.commit(
+            &fx.owner,
+            fx.record_mutation(root, Some(base), "attempt"),
+            1_700_000_001,
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            resolution_durable_state(&fx.store, &fx.family_id, "", root),
+            before
+        );
+    }
+}
+
+#[test]
+fn causal_photo_edit_sql_work_does_not_scan_unrelated_media() {
+    let measure = |history| {
+        let fx = CausalFx::new();
+        let root = Uuid::new_v4();
+        let mut item = CausalMediaItem {
+            media_uuid: Uuid::new_v4().to_string(),
+            role: "log".into(),
+            sha256: "a".repeat(64),
+            byte_size: 12,
+            mime: "image/jpeg".into(),
+            width: Some(2),
+            height: Some(3),
+        };
+        fx.stage_media_bytes(&mut item);
+        let mut create = fx.record_mutation(root, None, "before");
+        create.media = vec![item.clone()];
+        let created = fx.commit(&fx.owner, create, 1_700_000_000).unwrap();
+        let base = created.results[0].stable_version_id.as_deref().unwrap();
+        seed_us038_media_history(&fx, history);
+        let mut edit = fx.record_mutation(root, Some(base), "after");
+        edit.media = vec![item];
+        let (result, steps) = with_sql_work_probe(|| fx.commit(&fx.owner, edit, 1_700_000_001));
+        assert_eq!(result.unwrap().results[0].status, "accepted");
+        steps
+    };
+    let small = measure(100);
+    let large = measure(10_000);
+    eprintln!("US038 photo commit SQLite VM instructions: 100={small}, 10000={large}");
+    assert!(
+        large <= small + 100,
+        "unrelated media history grew SQL work: {small} -> {large}"
+    );
 }

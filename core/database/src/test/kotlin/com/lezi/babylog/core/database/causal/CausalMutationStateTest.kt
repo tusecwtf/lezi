@@ -9,6 +9,27 @@ import org.junit.Test
  */
 class CausalMutationStateTest {
     @Test
+    fun sameEpochDifferentBoundFactsKeepDirtyWhenAcceptedBaseAdvances() {
+        val current = CausalRootMutationState("base-old", "mutation-old", 100, true, null, null)
+        val settled = requireNotNull(settleCommitFirstAcceptedOrMerged(current, "mutation-old", 100,
+            "base-accepted", matchesBoundContent = false))
+        assertThat(settled.epoch).isEqualTo(CommitFirstSettlementEpoch.SupersededEpoch)
+        assertThat(settled.state).isEqualTo(current.copy(baseVersion = "base-accepted", mutationId = null))
+    }
+
+    @Test
+    fun sameEpochDifferentBoundFactsKeepDirtyAndRetainTerminalBranchLinkage() {
+        val current = CausalRootMutationState("base-old", "mutation-old", 100, true, null, null)
+        val settled = requireNotNull(settleCommitFirstBranched(current, "mutation-old", 100,
+            "conflict", "branch", "base-stable", matchesBoundContent = false))
+        assertThat(settled.epoch).isEqualTo(CommitFirstSettlementEpoch.SupersededEpoch)
+        assertThat(settled.state).isEqualTo(current.copy(baseVersion = "base-stable", mutationId = null,
+            openConflictId = "conflict", localBranchVersionId = "branch"))
+        assertThat(settleCommitFirstAcceptedOrMerged(current.copy(mutationId = "different-owned-mutation"),
+            "mutation-old", 100, "base-accepted", matchesBoundContent = false)).isNull()
+    }
+
+    @Test
     fun freezeDirtyEpochReusesMutationIdWhenContentEpochUnchanged() {
         val existing = CausalRootMutationState(
             baseVersion = "v-base-1",

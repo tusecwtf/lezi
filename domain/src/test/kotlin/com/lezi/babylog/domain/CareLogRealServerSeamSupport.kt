@@ -1,5 +1,7 @@
 package com.lezi.babylog.domain
 
+import kotlinx.coroutines.flow.map
+import com.lezi.babylog.sync.session.toPresentation
 import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.database.MediaLocalPathGate
 import com.lezi.babylog.core.database.PendingPublishDao
@@ -41,10 +43,13 @@ import com.lezi.babylog.sync.session.DisasterRestoreRequestIds
 import com.lezi.babylog.sync.session.FamilyEndpointConfig
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.ForegroundState
+import com.lezi.babylog.sync.session.MemberReconnectOwner
 import com.lezi.babylog.sync.session.PolicyClock
 import com.lezi.babylog.sync.session.SetupProbe
 import com.lezi.babylog.sync.session.SetupProbeResult
 import com.lezi.babylog.sync.session.SetupFamilyState
+import com.lezi.babylog.sync.session.TerminalRemovalKind
+import com.lezi.babylog.sync.session.hasSameCredentialGeneration
 import com.lezi.babylog.sync.session.SyncPreferences
 import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
@@ -58,7 +63,6 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeout
-import org.junit.Assume.assumeTrue
 
 /**
  * Independent CareLog + RealSyncPort clients joined to one isolated real lezi-sync.
@@ -73,6 +77,7 @@ internal class CareLogRealServerSeamFixture private constructor(
     val server: IsolatedLeziSyncServer,
     val owner: SeamClient,
     val member: SeamClient,
+    private val mediaEnabled: Boolean = false,
     private val extraOwners: MutableList<SeamClient> = mutableListOf(),
     private val extraMembers: MutableList<SeamClient> = mutableListOf(),
 ) : AutoCloseable {
@@ -114,6 +119,7 @@ internal class CareLogRealServerSeamFixture private constructor(
             label = label,
             endpoint = endpoint,
             deviceId = deviceId,
+            mediaEnabled = mediaEnabled,
         )
         try {
             client.port.rememberEndpoint(endpoint).getOrThrow()
@@ -162,6 +168,7 @@ internal class CareLogRealServerSeamFixture private constructor(
             label = label,
             endpoint = endpoint,
             deviceId = deviceId,
+            mediaEnabled = mediaEnabled,
         )
         try {
             client.port.rememberEndpoint(endpoint).getOrThrow()
@@ -201,7 +208,7 @@ internal class CareLogRealServerSeamFixture private constructor(
                 }
                 error("unreachable")
             }
-            check(joined.session.isJoined)
+            check(joined.sessionPresentation.isJoined)
             client.awaitIdle()
             client.seedLocalFamilyAnchor()
             client.port.sync(SyncTrigger.Foreground).getOrThrow()
@@ -223,7 +230,7 @@ internal class CareLogRealServerSeamFixture private constructor(
 
 
     companion object {
-        suspend fun open(): CareLogRealServerSeamFixture {
+        suspend fun open(setupProbe: SetupProbe? = null, mediaEnabled: Boolean = false): CareLogRealServerSeamFixture {
             assumeToolsPresent()
             val server = IsolatedLeziSyncServer.start()
             return try {
@@ -235,18 +242,22 @@ internal class CareLogRealServerSeamFixture private constructor(
                     label = "owner",
                     endpoint = endpoint,
                     deviceId = "h31-owner-device",
+                    setupProbeOverride = setupProbe,
+                    mediaEnabled = mediaEnabled,
                 )
                 val member = SeamClient.create(
                     label = "member",
                     endpoint = endpoint,
                     deviceId = "h31-member-device",
+                    setupProbeOverride = setupProbe,
+                    mediaEnabled = mediaEnabled,
                 )
                 joinTwoClients(
                     server = server,
                     owner = owner,
                     member = member,
                 )
-                CareLogRealServerSeamFixture(server, owner, member)
+                CareLogRealServerSeamFixture(server, owner, member, mediaEnabled)
             } catch (error: Throwable) {
                 server.close()
                 throw error
@@ -254,20 +265,10 @@ internal class CareLogRealServerSeamFixture private constructor(
         }
 
         private fun assumeToolsPresent() {
-            assumeTrue(
-                "openssl required for isolated TLS fixture",
-                ProcessBuilder("openssl", "version").start().waitFor() == 0,
-            )
-            assumeTrue(
-                "curl required for isolated TLS readiness probe",
-                ProcessBuilder("curl", "--version").start().waitFor() == 0,
-            )
-            val override = System.getenv("LEZI_SYNC_BIN")?.trim().orEmpty()
-            if (override.isNotEmpty()) {
-                assumeTrue(
-                    "LEZI_SYNC_BIN is not executable: $override",
-                    File(override).canExecute(),
-                )
+            for (tool in listOf("openssl", "curl", "sqlite3")) {
+                check(ProcessBuilder(tool, if (tool == "openssl") "version" else "--version").start().waitFor() == 0) {
+                    "$tool required for isolated integration proof"
+                }
             }
         }
 
@@ -349,7 +350,7 @@ internal class CareLogRealServerSeamFixture private constructor(
                     }
                     error("unreachable")
                 }
-                check(joined.session.isJoined)
+                check(joined.sessionPresentation.isJoined)
             } catch (error: Throwable) {
                 throw IllegalStateException(
                     "join failed during member flow; ownerJoined=${owner.currentSession().isJoined} " +
@@ -380,6 +381,7 @@ internal class SeamClient private constructor(
     val foreground: MutableForegroundState,
     val clock: MutablePolicyClock,
     private val appUpdateCacheDir: File,
+    val mediaFiles: SeamMediaFileStore?,
 ) {
     fun currentSession(): SyncSession = preferences.current()
 
@@ -406,7 +408,8 @@ internal class SeamClient private constructor(
                         idleStreak = 0
                         val drained = port.sync(SyncTrigger.Foreground)
                         if (drained.isFailure) {
-                            error("$label sync error: ${drained.exceptionOrNull()}")
+                            throw IllegalStateException("$label sync error: ${drained.exceptionOrNull()}",
+                                drained.exceptionOrNull())
                         }
                     }
                     else -> idleStreak = 0
@@ -420,13 +423,17 @@ internal class SeamClient private constructor(
         // notifyLocalChanges is async via the process actor; drive the same LocalWrite plan
         // explicitly so the acceptance fixture is deterministic under JVM unit tests.
         val result = port.sync(SyncTrigger.LocalWrite)
-        check(result.isSuccess) { "$label LocalWrite failed: ${result.exceptionOrNull()}" }
+        result.exceptionOrNull()?.let { failure ->
+            throw IllegalStateException("$label LocalWrite failed: $failure", failure)
+        }
         awaitIdle()
     }
 
     suspend fun pullForeground() {
         val result = port.sync(SyncTrigger.Foreground)
-        check(result.isSuccess) { "$label Foreground pull failed: ${result.exceptionOrNull()}" }
+        result.exceptionOrNull()?.let { failure ->
+            throw IllegalStateException("$label Foreground pull failed: $failure", failure)
+        }
         awaitIdle()
     }
 
@@ -453,6 +460,7 @@ internal class SeamClient private constructor(
 
     fun close() {
         appUpdateCacheDir.deleteRecursively()
+        mediaFiles?.root?.deleteRecursively()
     }
 
     companion object {
@@ -460,6 +468,8 @@ internal class SeamClient private constructor(
             label: String,
             endpoint: TrustedEndpointProfile,
             deviceId: String,
+            setupProbeOverride: SetupProbe? = null,
+            mediaEnabled: Boolean = false,
         ): SeamClient {
             val preferences = InMemorySyncPreferences(
                 initial = SyncSession(deviceId = deviceId),
@@ -469,10 +479,10 @@ internal class SeamClient private constructor(
             runBlockingRemember(preferences, endpoint)
 
             val clientVersion = ClientAppVersion(
-                versionCode = 21,
-                versionName = "0.4.0",
+                versionCode = 35,
+                versionName = "0.5.5",
                 packageName = "com.lezi.babylog",
-                localDataContractVersion = 5,
+                localDataContractVersion = 7,
             )
             // Production parity: RealSyncPort always sits behind RetryingSyncBackend
             // (see SyncModule). H34 acceptance requires the same request/retry owner.
@@ -480,14 +490,18 @@ internal class SeamClient private constructor(
                 preferences = preferences,
                 clientAppVersion = clientVersion,
             ).withForegroundRetryPolicy()
-            val setupProbe = SetupProbe { draft, trusted ->
+            val setupProbe = setupProbeOverride ?: SetupProbe { draft, trusted ->
                 val resolved = trusted
                     ?: runCatching { TrustedEndpointProfile.systemPki(draft) }.getOrNull()
                     ?: return@SetupProbe SetupProbeResult.Failed.InvalidAddress
                 if (resolved.origin == endpoint.origin) {
                     SetupProbeResult.Ready(
                         endpoint = endpoint,
-                        familyState = SetupFamilyState.Empty,
+                        familyState = if (preferences.current().familyId.isBlank()) {
+                            SetupFamilyState.Empty
+                        } else {
+                            SetupFamilyState.Configured
+                        },
                     )
                 } else {
                     SetupProbeResult.Failed.Unreachable
@@ -496,16 +510,33 @@ internal class SeamClient private constructor(
 
             val foreground = MutableForegroundState(foreground = true)
             val clock = MutablePolicyClock(now = System.currentTimeMillis())
-            val mediaFiles = EmptySyncMediaFileStore()
-            val mediaSpool = EmptyImmutableMediaSpool()
+            val fileStore = if (mediaEnabled) SeamMediaFileStore(FilesTempDir("lezi-media-$label")) else null
+            val mediaFiles: SyncMediaFileStore = fileStore ?: EmptySyncMediaFileStore()
+            val mediaSpool = if (fileStore != null) {
+                val delegate = RealServerMediaSpoolFactory.create(fileStore, File(fileStore.root, "spool"))
+                object : ImmutableMediaSpool by delegate {
+                    override suspend fun discardGroup(mutationId: String) {
+                        fileStore.onSpoolDiscard?.invoke(mutationId, false)
+                        delegate.discardGroup(mutationId)
+                        fileStore.onSpoolDiscard?.invoke(mutationId, true)
+                    }
+                }
+            } else EmptyImmutableMediaSpool()
             val pathGate = MediaLocalPathGate()
             val pendingPublish = object : PendingPublishDao {
                 override fun observeCount(): Flow<Int> = MutableStateFlow(0)
             }
             val pendingReplicaCleanup = object : PendingReplicaCleanupStore {
-                override suspend fun load(): PendingReplicaCleanup? = null
-                override suspend fun stage(pending: PendingReplicaCleanup) = Unit
-                override suspend fun delete() = Unit
+                // This seam uses in-memory DAOs, but must honor the durable store's
+                // stage/read/delete contract across the production clear workflow.
+                private val staged = java.util.concurrent.atomic.AtomicReference<PendingReplicaCleanup?>(null)
+                override suspend fun load(): PendingReplicaCleanup? = staged.get()
+                override suspend fun stage(pending: PendingReplicaCleanup) {
+                    val captured = pending.copy(mediaClientUuids = pending.mediaClientUuids.toSet(),
+                        localMediaPaths = pending.localMediaPaths.toSet())
+                    check(staged.compareAndSet(null, captured)) { "pending replica cleanup already staged" }
+                }
+                override suspend fun delete() { staged.set(null) }
             }
             val appUpdateCacheDir = FilesTempDir("lezi-h31-app-update-$label")
 
@@ -513,11 +544,16 @@ internal class SeamClient private constructor(
             lateinit var port: RealSyncPort
             val liveFakes = Fakes(
                 syncPort = object : com.lezi.babylog.sync.SyncPort by com.lezi.babylog.sync.NoOpSyncPort() {
+                    override fun sessionPresentation() = session().map { it.toPresentation() }
                     override fun session() = preferences.session
                     override fun status() = port.status()
                     override fun notifyLocalChanges() = port.notifyLocalChanges()
                     override fun requestSync(trigger: SyncTrigger) = port.requestSync(trigger)
                     override suspend fun sync(trigger: SyncTrigger) = port.sync(trigger)
+                    override suspend fun clearLocalData(
+                        scope: LocalDataClearScope,
+                        workflow: com.lezi.babylog.sync.LocalClearWorkflow,
+                    ) = port.clearLocalData(scope, workflow)
                 },
             )
             val liveMediaCleanup = ReferenceAwareMediaFileCleanup(
@@ -551,8 +587,12 @@ internal class SeamClient private constructor(
                 mediaFileCleanup = liveMediaCleanup,
                 transactionRunner = liveFakes.transactions,
                 pendingReplicaCleanupStore = pendingReplicaCleanup,
-                localClearRecoveryGate = NoOpLocalClearRecoveryGate(),
-                removedDeviceLocalClearGate = NoOpRemovedDeviceLocalClearGate(),
+                localClearRecoveryGate = CarePlanFamilyProjectionModule.localClearRecoveryGate(
+                    dagger.Lazy { liveFakes.localDataClearCoordinator() },
+                ),
+                removedDeviceLocalClearGate = CarePlanFamilyProjectionModule.removedDeviceLocalClearGate(
+                    dagger.Lazy { liveFakes.localDataClearCoordinator() },
+                ),
                 carePlanAppliedListener = NoOpCarePlanFamilyAppliedListener(),
                 fulfillmentCandidateDao = liveFakes.fulfillmentCandidates,
                 fulfillmentAuthoritySettlement = liveFulfillment,
@@ -602,6 +642,7 @@ internal class SeamClient private constructor(
                 foreground = foreground,
                 clock = clock,
                 appUpdateCacheDir = appUpdateCacheDir,
+                mediaFiles = fileStore,
             )
         }
 
@@ -636,13 +677,10 @@ internal fun formulaPayloadJson(
 
 
 internal class MutableForegroundState(
-    private var foreground: Boolean = true,
-) : ForegroundState {
-    override fun isForeground(): Boolean = foreground
-    override fun setForeground(value: Boolean) {
-        foreground = value
-    }
-}
+    foreground: Boolean = true,
+) : ForegroundState by (com.lezi.babylog.sync.session.ProcessForegroundState().apply {
+    setForeground(foreground)
+})
 
 internal class MutablePolicyClock(var now: Long) : PolicyClock {
     override fun nowMillis(): Long = now
@@ -659,6 +697,8 @@ internal class InMemorySyncPreferences(
     private val pendingMemberState = MutableStateFlow<PendingMemberLogin?>(null)
     private val disasterRestoreState = MutableStateFlow<DisasterRestoreCheckpoint?>(null)
     private var memberPendingSecret = ""
+    private var reconnectMemberAttempt: PendingMemberLogin? = null
+    private var activeMemberQrClaim: String? = null
     private var disasterRestoreRecoveryToken = ""
     private var disasterRestoreRequestIds: DisasterRestoreRequestIds? = null
     private var createRequestId: String? = null
@@ -690,8 +730,18 @@ internal class InMemorySyncPreferences(
         endpointState.value = endpoint
     }
 
-    override suspend fun forgetEndpoint() {
+    override suspend fun forgetEndpoint(retainMemberAttempts: Boolean) {
+        activeMemberQrClaim = null
+        if (!retainMemberAttempts) {
+            pendingMemberState.value = null
+            memberPendingSecret = ""
+            reconnectMemberAttempt = null
+        }
+        val previous = endpointState.value
         endpointState.value = null
+        if (previous != null && previous.origin == state.value.baseUrl) {
+            clearDeviceCredentialsForReauth()
+        }
     }
 
     override suspend fun saveFamilyMemberDirectory(members: List<FamilyMember>) {
@@ -755,12 +805,53 @@ internal class InMemorySyncPreferences(
         state.value = next
     }
 
+    override suspend fun stageTerminalRemovalIfCurrent(
+        expected: SyncSession,
+        kind: TerminalRemovalKind,
+        receipt: com.lezi.babylog.sync.DeviceRemovedCleanupReceipt?,
+    ): Boolean {
+        val current = state.value
+        if (!current.hasSameCredentialGeneration(expected)) return false
+        if (!state.compareAndSet(current, current.copy(reauthRequired = true))) return false
+        when (kind) {
+            TerminalRemovalKind.Device -> markPendingDeviceRemovalClear()
+            TerminalRemovalKind.Membership -> markPendingMembershipDeletionClear()
+            TerminalRemovalKind.Family -> markPendingFamilyDeletionClear()
+        }
+        if (receipt != null) saveDeviceRemovedReceipt(receipt)
+        return true
+    }
+
+    override suspend fun saveRefreshedSessionIfCurrent(expected: SyncSession, refreshed: SyncSession): Boolean {
+        val current = state.value
+        if (!current.hasSameCredentialGeneration(expected)) return false
+        val saved = state.compareAndSet(current, current.copy(
+            accessToken = refreshed.accessToken,
+            refreshToken = refreshed.refreshToken,
+            accessExpiresAtEpochSeconds = refreshed.accessExpiresAtEpochSeconds,
+            reauthRequired = false,
+        ))
+        if (saved) refreshRequestId = null
+        return saved
+    }
+
+    override suspend fun clearDeviceCredentialsForReauthIfCurrent(expected: SyncSession): Boolean {
+        val current = state.value
+        if (!current.hasSameCredentialGeneration(expected)) return false
+        return state.compareAndSet(current, current.copy(
+            accessToken = "", refreshToken = "", accessExpiresAtEpochSeconds = 0,
+            reauthRequired = true,
+        ))
+    }
+
     override suspend fun saveSession(session: SyncSession) {
         createRequestId = null
         ownerLoginRequestId = null
         refreshRequestId = null
         pendingMemberState.value = null
         memberPendingSecret = ""
+        reconnectMemberAttempt = null
+        activeMemberQrClaim = null
         pendingReplicaResetPrevious = null
         pendingReplicaResetSession = null
         val previous = state.value
@@ -795,6 +886,8 @@ internal class InMemorySyncPreferences(
         refreshRequestId = null
         pendingMemberState.value = null
         memberPendingSecret = ""
+        reconnectMemberAttempt = null
+        activeMemberQrClaim = null
         pendingReplicaResetPrevious = previous
         pendingReplicaResetSession = session
         state.value = session.copy(
@@ -864,23 +957,125 @@ internal class InMemorySyncPreferences(
     override suspend fun ensureRefreshRequestId(): String =
         refreshRequestId ?: UUID.randomUUID().toString().also { refreshRequestId = it }
 
+    override suspend fun beginMemberQrClaim(operationId: String, owner: MemberReconnectOwner): Boolean {
+        if (state.value.isJoined || memberReconnectOwner() != owner) return false
+        activeMemberQrClaim = operationId
+        return true
+    }
+
+    override suspend fun endMemberQrClaim(operationId: String) {
+        if (activeMemberQrClaim == operationId) activeMemberQrClaim = null
+    }
+
+    override suspend fun activateMemberQrClaimIfCurrent(
+        operationId: String,
+        owner: MemberReconnectOwner,
+        session: SyncSession,
+        endpoint: TrustedEndpointProfile,
+        pendingReplicaResetPrevious: SyncSession?,
+    ): Boolean {
+        if (activeMemberQrClaim != operationId || memberReconnectOwner() != owner) return false
+        require(owner.familyId.isBlank() || owner.familyId == session.familyId)
+        if (pendingReplicaResetPrevious == null) saveSession(session)
+        else saveSessionPendingReplicaReset(session, pendingReplicaResetPrevious)
+        endpointState.value = endpoint
+        return true
+    }
+
+    override suspend fun beginReconnectMemberAttempt(
+        attempt: PendingMemberLogin,
+        owner: MemberReconnectOwner,
+    ): Boolean {
+        if (memberReconnectOwner() != owner) return false
+        saveMemberLoginAttempt(attempt, reconnect = true)
+        return true
+    }
+
+    override suspend fun isReconnectMemberAttemptCurrent(
+        operationId: String,
+        owner: MemberReconnectOwner,
+    ): Boolean = memberReconnectOwner() == owner && reconnectMemberAttempt?.operationId == operationId
+
+    override suspend fun activateReconnectMemberIfCurrent(
+        operationId: String,
+        owner: MemberReconnectOwner,
+        session: SyncSession,
+        endpoint: TrustedEndpointProfile,
+    ): Boolean {
+        if (!isReconnectMemberAttemptCurrent(operationId, owner)) return false
+        require(session.familyId == owner.familyId)
+        saveReconnectedSession(session, endpoint)
+        return true
+    }
+
+    override suspend fun saveMemberLoginAttempt(attempt: PendingMemberLogin, reconnect: Boolean) {
+        require(attempt.remoteOutcomeUnknown && attempt.operationId.isNotBlank() && attempt.requestId.isBlank())
+        val previous = memberLoginAttempt(reconnect)
+        require(previous == null || previous.operationId == attempt.operationId) {
+            "已有结果待确认的加入申请，请先处理原申请"
+        }
+        if (reconnect) reconnectMemberAttempt = attempt else pendingMemberState.value = attempt
+    }
+
+    override suspend fun memberLoginAttempt(reconnect: Boolean): PendingMemberLogin? =
+        if (reconnect) reconnectMemberAttempt else pendingMemberState.value?.takeIf { it.remoteOutcomeUnknown }
+
+    override suspend fun clearMemberLoginAttempt(reconnect: Boolean, expectedOperationId: String?) {
+        if (expectedOperationId != null && memberLoginAttempt(reconnect)?.operationId != expectedOperationId) return
+        if (reconnect) reconnectMemberAttempt = null
+        else if (pendingMemberState.value?.remoteOutcomeUnknown == true) pendingMemberState.value = null
+    }
+
     override suspend fun savePendingMemberLogin(
         receipt: MemberLoginReceipt,
         displayName: String,
         deviceName: String,
+        expectedOperationId: String?,
     ) {
+        require(receipt.requestId.isNotBlank() && receipt.pendingSecret.isNotBlank())
+        val originalAttempt = memberLoginAttempt()
+        check(expectedOperationId == null || originalAttempt?.operationId == expectedOperationId) {
+            "原加入申请已放弃，迟到的回执未写入凭据"
+        }
         memberPendingSecret = receipt.pendingSecret
         pendingMemberState.value = PendingMemberLogin(
             requestId = receipt.requestId,
             displayName = displayName,
             deviceName = deviceName,
             expiresAtEpochSeconds = receipt.expiresAtEpochSeconds,
+            operationId = originalAttempt?.operationId ?: receipt.requestId,
+            endpointOrigin = originalAttempt?.endpointOrigin.orEmpty(),
         )
+    }
+
+    override suspend fun isPendingMemberLoginCurrent(
+        requestId: String,
+        owner: MemberReconnectOwner,
+    ): Boolean = requestId.isNotBlank() && pendingMemberState.value?.requestId == requestId &&
+        pendingMemberState.value?.remoteOutcomeUnknown == false && memberReconnectOwner() == owner
+
+    override suspend fun pendingMemberSecretIfCurrent(
+        requestId: String,
+        owner: MemberReconnectOwner,
+    ): String? = if (isPendingMemberLoginCurrent(requestId, owner)) memberPendingSecret else null
+
+    override suspend fun activatePendingMemberIfCurrent(
+        requestId: String,
+        owner: MemberReconnectOwner,
+        session: SyncSession,
+        pendingReplicaResetPrevious: SyncSession?,
+    ): Boolean {
+        if (!isPendingMemberLoginCurrent(requestId, owner)) return false
+        require(owner.familyId.isBlank() || owner.familyId == session.familyId)
+        if (pendingReplicaResetPrevious == null) saveSession(session)
+        else saveSessionPendingReplicaReset(session, pendingReplicaResetPrevious)
+        return true
     }
 
     override suspend fun pendingMemberSecret(): String = memberPendingSecret
 
-    override suspend fun clearPendingMemberLogin() {
+    override suspend fun clearPendingMemberLogin(expectedOperationId: String?) {
+        if (expectedOperationId != null && pendingMemberState.value?.operationId != expectedOperationId) return
         pendingMemberState.value = null
         memberPendingSecret = ""
     }
@@ -897,6 +1092,8 @@ internal class InMemorySyncPreferences(
             commit = checkpoint.commitRequestId,
         )
     }
+
+    override suspend fun pendingDisasterRestoreRequestIds(): DisasterRestoreRequestIds? = disasterRestoreRequestIds
 
     override suspend fun ensureDisasterRestoreRequestIds(): DisasterRestoreRequestIds =
         disasterRestoreRequestIds ?: DisasterRestoreRequestIds(
@@ -923,6 +1120,8 @@ internal class InMemorySyncPreferences(
         memberDirectoryState.value = emptyList()
         pendingMemberState.value = null
         memberPendingSecret = ""
+        reconnectMemberAttempt = null
+        activeMemberQrClaim = null
         disasterRestoreState.value = null
         disasterRestoreRecoveryToken = ""
         disasterRestoreRequestIds = null

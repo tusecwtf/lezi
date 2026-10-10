@@ -37,6 +37,7 @@ internal fun coordinator(
     onSessionObserved: (SyncSession) -> Unit = {},
     requestSync: (SyncTrigger) -> Unit = {},
     launchBestEffort: ((suspend () -> Unit) -> Unit) = {},
+    beforeOperation: suspend () -> Unit = {},
 ): FamilySessionCoordinator = FamilySessionCoordinator(
     backend = backend,
     preferences = preferences,
@@ -47,6 +48,7 @@ internal fun coordinator(
     onSessionObserved = onSessionObserved,
     requestSync = requestSync,
     launchBestEffort = launchBestEffort,
+    beforeOperation = beforeOperation,
 )
 
 internal class RecordingFamilySessionReplica(

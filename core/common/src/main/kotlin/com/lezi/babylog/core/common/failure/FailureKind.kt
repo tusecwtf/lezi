@@ -46,6 +46,7 @@ enum class FailureKind {
     HouseholdFactRejected,
     SessionExpired,
     AppUpdateRequired,
+    ServerUpdateRequired,
     InvalidInput,
     TooFast,
     HouseholdStateChanged,

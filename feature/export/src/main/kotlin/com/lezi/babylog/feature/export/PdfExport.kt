@@ -27,27 +27,63 @@ internal object PdfExport {
         exportDir: File,
         date: LocalDate = LocalDate.now(),
         fileToken: String = UUID.randomUUID().toString(),
+        checkpoint: () -> Unit = {},
     ): File {
+        checkpoint()
         check(exportDir.isDirectory || exportDir.mkdirs()) { "无法创建导出目录" }
         val file = File(exportDir, "lezi-$date-$fileToken.pdf")
-        val document = PdfDocument()
         try {
-            renderText(document, title, body)
-            photoPaths
-                .asSequence()
-                .filter { isAllowedExportPhotoPath(context, it) }
-                .forEach { path -> renderPhoto(document, path) }
-            FileOutputStream(file).use(document::writeTo)
-        } catch (error: Throwable) {
+            FileOutputStream(file).use { output ->
+                writeTo(context, title, body, photoPaths, output, checkpoint)
+            }
+            checkpoint()
+            return file
+        } catch (failure: Throwable) {
             file.delete()
-            throw error
+            throw failure
+        }
+    }
+
+    /** Called in the private renderer process; native calls can be aborted by process death. */
+    fun writeTo(
+        context: Context,
+        title: String,
+        body: String,
+        photoPaths: List<String>,
+        output: java.io.OutputStream,
+        checkpoint: () -> Unit = {},
+    ) {
+        checkpoint()
+        val document = PdfDocument()
+        recordExportMilestone(ExportMilestone.PDF_DOCUMENT_CREATED)
+        try {
+            recordExportMilestone(ExportMilestone.PDF_TEXT_STARTED)
+            renderText(document, title, body, checkpoint)
+            recordExportMilestone(ExportMilestone.PDF_TEXT_FINISHED)
+            photoPaths.forEach { path ->
+                checkpoint()
+                if (isAllowedExportPhotoPath(context, path)) renderPhoto(document, path, checkpoint)
+            }
+            checkpoint()
+            recordExportMilestone(ExportMilestone.PDF_WRITE_STARTED)
+            document.writeTo(object : java.io.OutputStream() {
+                override fun write(value: Int) {
+                    checkpoint()
+                    output.write(value)
+                }
+                override fun write(bytes: ByteArray, offset: Int, length: Int) {
+                    checkpoint()
+                    output.write(bytes, offset, length)
+                }
+            })
+            recordExportMilestone(ExportMilestone.PDF_WRITE_FINISHED)
+            checkpoint()
         } finally {
             document.close()
         }
-        return file
     }
 
-    private fun renderText(document: PdfDocument, title: String, body: String) {
+    private fun renderText(document: PdfDocument, title: String, body: String, checkpoint: () -> Unit) {
         val paint = Paint().apply {
             textSize = 11f
             isAntiAlias = true
@@ -59,47 +95,61 @@ internal object PdfExport {
         }
         var pageNumber = 1
         var page = document.startPage(pageInfo(pageNumber))
+        var pageOpen = true
         var canvas = page.canvas
         var y = 48f
-        canvas.drawText(title, PAGE_MARGIN, y, titlePaint)
-        y += 28f
-
         fun nextPage() {
             document.finishPage(page)
+            pageOpen = false
+            checkpoint()
             pageNumber += 1
             page = document.startPage(pageInfo(pageNumber))
+            pageOpen = true
             canvas = page.canvas
             y = 48f
         }
 
-        body.lineSequence().forEach { line ->
-            if (y > PAGE_HEIGHT - 48f) nextPage()
-            if (line.isEmpty()) {
-                y += 16f
-            } else {
-                var offset = 0
-                while (offset < line.length) {
-                    val count = paint.breakText(
-                        line,
-                        offset,
-                        line.length,
-                        true,
-                        PAGE_WIDTH - PAGE_MARGIN * 2,
-                        null,
-                    ).coerceAtLeast(1)
-                    canvas.drawText(line, offset, offset + count, PAGE_MARGIN, y, paint)
-                    offset += count
+        try {
+            canvas.drawText(title, PAGE_MARGIN, y, titlePaint)
+            y += 28f
+            body.lineSequence().forEach { line ->
+                checkpoint()
+                if (y > PAGE_HEIGHT - 48f) nextPage()
+                if (line.isEmpty()) {
                     y += 16f
-                    if (y > PAGE_HEIGHT - 48f && offset < line.length) nextPage()
+                } else {
+                    var offset = 0
+                    while (offset < line.length) {
+                        checkpoint()
+                        val count = paint.breakText(
+                            line,
+                            offset,
+                            line.length,
+                            true,
+                            PAGE_WIDTH - PAGE_MARGIN * 2,
+                            null,
+                        ).coerceAtLeast(1)
+                        canvas.drawText(line, offset, offset + count, PAGE_MARGIN, y, paint)
+                        offset += count
+                        y += 16f
+                        if (y > PAGE_HEIGHT - 48f && offset < line.length) nextPage()
+                    }
                 }
             }
+        } finally {
+            if (pageOpen) document.finishPage(page)
         }
-        document.finishPage(page)
     }
 
-    private fun renderPhoto(document: PdfDocument, path: String) {
-        val bitmap = decodeSampled(path, PHOTO_DECODE_WIDTH, PHOTO_DECODE_HEIGHT) ?: return
+    private fun renderPhoto(document: PdfDocument, path: String, checkpoint: () -> Unit) {
+        checkpoint()
+        recordExportMilestone(ExportMilestone.PHOTO_DECODE_STARTED)
+        val bitmap = decodeSampled(path, PHOTO_DECODE_WIDTH, PHOTO_DECODE_HEIGHT, checkpoint)
+        recordExportMilestone(ExportMilestone.PHOTO_DECODE_FINISHED)
+        if (bitmap == null) return
         try {
+            checkpoint()
+            recordExportMilestone(ExportMilestone.PDF_PHOTO_STARTED)
             val pageNumber = document.pages.size + 1
             val page = document.startPage(pageInfo(pageNumber))
             try {
@@ -127,6 +177,7 @@ internal object PdfExport {
             } finally {
                 document.finishPage(page)
             }
+            recordExportMilestone(ExportMilestone.PDF_PHOTO_FINISHED)
         } finally {
             bitmap.recycle()
         }
@@ -135,9 +186,10 @@ internal object PdfExport {
     private fun pageInfo(pageNumber: Int): PdfDocument.PageInfo =
         PdfDocument.PageInfo.Builder(PAGE_WIDTH, PAGE_HEIGHT, pageNumber).create()
 
-    private fun decodeSampled(path: String, targetWidth: Int, targetHeight: Int): Bitmap? {
+    private fun decodeSampled(path: String, targetWidth: Int, targetHeight: Int, checkpoint: () -> Unit): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(path, bounds)
+        checkpoint()
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
         return BitmapFactory.decodeFile(
             path,

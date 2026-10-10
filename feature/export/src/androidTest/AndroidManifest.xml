@@ -1,0 +1,20 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/export_test_paths" />
+        </provider>
+        <service android:name="com.lezi.babylog.feature.export.EofExportRenderService" android:exported="false" android:process=":eof_export_renderer" />
+        <service android:name="com.lezi.babylog.feature.export.ClosedReaderExportRenderService" android:exported="false" android:process=":closed_reader_export_renderer" />
+        <service android:name="com.lezi.babylog.feature.export.CrashingExportRenderService" android:exported="false" android:process=":crashing_export_renderer" />
+        <service android:name="com.lezi.babylog.feature.export.UnreadExportRenderService" android:exported="false" android:process=":unread_export_renderer" />
+        <service android:name="com.lezi.babylog.feature.export.MisconfiguredExportRenderService" android:exported="false" />
+        <service
+            android:name="com.lezi.babylog.feature.export.BlockedExportRenderService"
+            android:exported="false"
+            android:process=":blocked_export_renderer" />
+    </application>
+</manifest>

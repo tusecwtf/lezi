@@ -43,7 +43,7 @@ class LocalReplicaClearRecordsOnlyTest {
 
         assertThat(result.isSuccess).isTrue()
         assertThat(roomCalls).isEqualTo(1)
-        assertThat(rig.transactions.runCount).isEqualTo(2)
+        assertThat(rig.transactions.runCount).isEqualTo(3)
     }
     @Test
     fun recordsOnlyClearsRecordAndPlanReplicaButPreservesAvatarAndGeneration() = runTest {

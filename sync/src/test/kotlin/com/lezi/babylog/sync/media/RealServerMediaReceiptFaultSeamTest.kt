@@ -116,8 +116,9 @@ class RealServerMediaReceiptFaultSeamTest {
             assertThat(journal.phase).isEqualTo(CausalMediaSettlementPhase.CommitUnknown)
             assertThat(journal.receipts.map { it.mediaUuid }).containsExactly(MEDIA_COMMIT)
             assertThat(fixture.mediaFiles.prepareUploadCounts[seeded.localUri]).isEqualTo(1)
-            assertThat(fixture.immutableMediaSpool.openCounts[mutationId]).isEqualTo(1)
+            assertThat(fixture.immutableMediaSpool.openCounts[mutationId]).isEqualTo(2)
 
+            // One canonical local copy and one original PUT; commit replay opens neither.
             fixture.newEngine().synchronize(fixture.session, SyncTrigger.LocalWrite)
 
             assertThat(fixture.prepareForwards()).isEqualTo(1)
@@ -126,7 +127,7 @@ class RealServerMediaReceiptFaultSeamTest {
             assertThat(fixture.recordVersionCount()).isEqualTo(1)
             assertThat(fixture.recordReceiptCount()).isAtLeast(1)
             assertThat(fixture.mediaFiles.prepareUploadCounts[seeded.localUri]).isEqualTo(1)
-            assertThat(fixture.immutableMediaSpool.openCounts[mutationId]).isEqualTo(1)
+            assertThat(fixture.immutableMediaSpool.openCounts[mutationId]).isEqualTo(2)
             assertThat(fixture.immutableMediaSpool.discardedMutationIds).containsExactly(mutationId)
             assertThat(fixture.conflictDetails.getFrozenMediaSpoolManifest(mutationId)).isNull()
             assertThat(fixture.records.getByClientUuid(seeded.recordUuid)?.syncDirty).isFalse()
@@ -183,17 +184,6 @@ class RealServerMediaReceiptFaultSeamTest {
                         "'$payload', 1);",
                 )
             }, "media_uuid_conflict", terminal = true),
-            // Staging is family-keyed. A foreign family_id is a lookup miss,
-            // not H38's synthetic media_family_mismatch hook.
-            Case("wrong-family", "e5", { fixture, mediaUuid ->
-                fixture.sqlite(
-                    "INSERT OR IGNORE INTO families(id, created_at, name) " +
-                        "VALUES ('00000000-0000-4000-8000-00000000eeee', 1, 'other');" +
-                        "UPDATE causal_media_staging SET family_id = " +
-                        "'00000000-0000-4000-8000-00000000eeee' " +
-                        "WHERE media_uuid = '$mediaUuid';",
-                )
-            }, "missing_media_bytes", terminal = false),
         )
         cases.forEach { case ->
             RealServerMediaReceiptFaultFixture.open().use { fixture ->
@@ -249,6 +239,62 @@ class RealServerMediaReceiptFaultSeamTest {
                     ).isNull()
                 }
             }
+        }
+    }
+
+    @Test
+    fun c3b_missingOwnFamilyReceiptRestagesOriginalBytesWithoutClaimingForeignReceipt() = runTest {
+        RealServerMediaReceiptFaultFixture.open().use { fixture ->
+            val mediaUuid = h44MediaUuid("e5")
+            val seeded = fixture.seedRecordMedia(
+                recordUuid = h44MediaUuid("ce5"), mediaUuid = mediaUuid,
+                localUri = "content://h44-missing-own-family", bytes = byteArrayOf(0x44, 0x03, 0x55, 0x42),
+            )
+            val injected = java.util.concurrent.atomic.AtomicInteger()
+            // The HTTP actor remains the original authenticated member. Move only that
+            // family's first receipt; the foreign family's row must never authorize it.
+            fixture.proxy.afterPrepareForward = {
+                if (injected.compareAndSet(0, 1)) {
+                    fixture.sqlite(
+                        "INSERT OR IGNORE INTO families(id, created_at, name) " +
+                            "VALUES ('00000000-0000-4000-8000-00000000eeee', 1, 'other');" +
+                            "UPDATE causal_media_staging SET family_id = " +
+                            "'00000000-0000-4000-8000-00000000eeee' " +
+                            "WHERE family_id = '${fixture.session.familyId}' AND media_uuid = '$mediaUuid';",
+                    )
+                    fixture.mediaFiles.prepareUploadFailures += seeded.localUri
+                }
+            }
+
+            fixture.engine.synchronize(fixture.session, SyncTrigger.LocalWrite)
+
+            assertThat(injected.get()).isEqualTo(1)
+            assertThat(fixture.prepareForwards()).isEqualTo(2)
+            assertThat(fixture.commitForwards()).isEqualTo(2)
+            assertThat(fixture.recordVersionCount()).isEqualTo(1)
+            // One actor receipt plus the server's distinct version-provenance row
+            // share this table. Only the actor row is an idempotent commit receipt.
+            assertThat(fixture.sqlite(
+                "SELECT COUNT(*) FROM mutation_receipts mr JOIN entity_versions ev " +
+                    "ON ev.family_id = mr.family_id AND ev.version_id = mr.stable_version_id " +
+                    "AND ev.mutation_id = mr.mutation_id " +
+                    "WHERE mr.family_id = '${fixture.session.familyId}' " +
+                    "AND mr.membership_id = '${fixture.session.membershipId}' " +
+                    "AND mr.entity_type = 'record' AND mr.client_uuid = '${seeded.recordUuid}' " +
+                    "AND mr.status = 'accepted';",
+            ).toInt()).isEqualTo(1)
+            assertThat(fixture.sqlite(
+                "SELECT COUNT(*) FROM mutation_receipts WHERE family_id = '${fixture.session.familyId}' " +
+                    "AND membership_id = '__version_provenance_v2__' AND entity_type = 'record' " +
+                    "AND client_uuid = '${seeded.recordUuid}';",
+            ).toInt()).isEqualTo(1)
+            assertThat(fixture.mediaFiles.prepareUploadCounts[seeded.localUri]).isEqualTo(1)
+            assertThat(fixture.sqlite(
+                "SELECT sha256 FROM causal_media_staging WHERE family_id = '${fixture.session.familyId}' " +
+                    "AND media_uuid = '$mediaUuid' AND membership_id = '${fixture.session.membershipId}' AND status = 'consumed';",
+            )).isEqualTo(digest(seeded.frozenBytes))
+            assertThat(fixture.records.getByClientUuid(seeded.recordUuid)?.syncDirty).isFalse()
+            assertThat(fixture.conflictDetails.listFrozenMediaSpoolManifests()).isEmpty()
         }
     }
 

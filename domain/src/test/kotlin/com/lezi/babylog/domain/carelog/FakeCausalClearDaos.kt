@@ -26,6 +26,19 @@ import kotlinx.coroutines.flow.flowOf
 internal class FakeWakeObservationDao : WakeObservationDao {
     private val items = mutableListOf<WakeObservationEntity>()
     private var nextId = 1L
+    private var transactionSnapshot: List<WakeObservationEntity>? = null
+    var upsertFailure: Throwable? = null
+
+    fun beginTx() { transactionSnapshot = items.toList() }
+    fun commitTx() { transactionSnapshot = null }
+    fun rollbackTx() {
+        transactionSnapshot?.let { snapshot ->
+            items.clear()
+            items.addAll(snapshot)
+        }
+        transactionSnapshot = null
+    }
+
     /** Invoked after local wake mutations so open-sleep flows can recompute. */
     var onMutation: (() -> Unit)? = null
 
@@ -63,6 +76,7 @@ internal class FakeWakeObservationDao : WakeObservationDao {
         items.filter { it.openConflictId != null }
 
     override suspend fun upsert(entity: WakeObservationEntity): Long {
+        upsertFailure?.let { throw it }
         val existingIdx = items.indexOfFirst { it.clientUuid == entity.clientUuid }
         val id = if (existingIdx >= 0) {
             val kept = items[existingIdx].id.takeIf { it > 0L } ?: nextId++
@@ -215,6 +229,12 @@ internal class FakeConflictSnapshotCacheDao : ConflictSnapshotCacheDao {
         }
     }
 
+    override suspend fun listRestoreTerminalSpoolSeals(): List<CausalTransportJournalEntity> =
+        transport.filter { it.journalKey.startsWith("restore-terminal-spool-cleanup-v1:") }.sortedBy { it.journalKey }
+
+    override suspend fun listRestoreFileOwners(): List<CausalTransportJournalEntity> =
+        transport.filter { it.journalKey.startsWith("restore-file-owner-v1:") }.sortedBy { it.journalKey }
+
     override suspend fun listFrozenMediaSpoolManifests(): List<CausalTransportJournalEntity> =
         transport.filter { it.journalKey.startsWith(FROZEN_MEDIA_SPOOL_KEY_PREFIX) }
             .sortedBy(CausalTransportJournalEntity::journalKey)
@@ -352,6 +372,14 @@ internal class FakeSourceRelationDao : SourceRelationDao() {
     ): List<SourceRelationMemberEntity> =
         members.filter { it.recordClientUuid == recordClientUuid }
 
+    override suspend fun listMembersForRecords(recordClientUuids: List<String>) =
+        members.filter { it.recordClientUuid in recordClientUuids }
+
+    override suspend fun deleteMembershipsForRecords(recordClientUuids: List<String>) {
+        members.removeAll { it.recordClientUuid in recordClientUuids }
+        publishMembers()
+    }
+
     override suspend fun deleteOtherMemberships(
         relationId: String,
         recordClientUuids: List<String>,
@@ -382,6 +410,9 @@ internal class FakeSourceRelationDao : SourceRelationDao() {
 
     override suspend fun listPendingDeclarations(): List<SourceRelationDeclarationEntity> =
         declarations.filter { it.status == "pending" }
+
+    override suspend fun listUnsettledDeclarations(): List<SourceRelationDeclarationEntity> =
+        declarations.filter { it.status == "pending" || it.status == "failed" }
 
     override suspend fun deleteAllMembers() {
         members.clear()
@@ -446,6 +477,9 @@ internal class FakeMediaReferenceDao : MediaReferenceDao {
             it.mediaUuid == mediaUuid && it.holderKind == holderKind && it.holderId == holderId
         }
     }
+
+    override suspend fun listAllHolders(): List<com.lezi.babylog.core.database.causal.MediaReferenceEntity> =
+        items.sortedWith(compareBy({ it.mediaUuid }, { it.holderKind }, { it.holderId }))
 
     override suspend fun listForMedia(mediaUuid: String): List<MediaReferenceEntity> =
         items.filter { it.mediaUuid == mediaUuid }

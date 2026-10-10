@@ -9,6 +9,15 @@ plugins {
     alias(libs.plugins.hilt)
 }
 
+// Explicitly separate test Application/DI assembly; ordinary and startup runners stay unchanged.
+val uiHostAcceptance = providers.gradleProperty("leziUiHostAcceptance").orNull
+check(uiHostAcceptance == null || uiHostAcceptance in setOf("widget", "routes")) {
+    "leziUiHostAcceptance must select exactly widget or routes"
+}
+check(!(uiHostAcceptance != null && providers.gradleProperty("leziStartupReadinessAcceptance").orNull == "true")) {
+    "UI host test-DI acceptance and production startup acceptance require separate test APKs"
+}
+
 // Local release signing (keystore.properties is gitignored). Required for
 // installable APKs on Chinese OEM ROMs — unsigned packages parse as PackageInfo null.
 val keystorePropertiesFile = providers.gradleProperty("leziReleaseKeystoreProperties")
@@ -60,14 +69,32 @@ android {
     namespace = "com.lezi.babylog"
     compileSdk = 35
 
+    // The app selects Chinese independently of the device locale. Keep the
+    // configured zh/en resources together if an AAB is built; APK packaging
+    // and the resourceConfigurations filter below remain unchanged.
+    bundle {
+        language {
+            enableSplit = false
+        }
+    }
+
     defaultConfig {
         applicationId = "com.lezi.babylog"
         minSdk = 26
         targetSdk = 35
-        versionCode = 34
-        versionName = "0.5.4"
+        versionCode = 35
+        versionName = "0.5.5"
 
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // Select the dedicated startup test APK without changing ordinary instrumentation.
+        testInstrumentationRunner = if (uiHostAcceptance != null) {
+            "com.lezi.babylog.validation.host.IsolatedUiHostTestRunner"
+        } else if (
+            providers.gradleProperty("leziStartupReadinessAcceptance").orNull == "true"
+        ) {
+            "com.lezi.babylog.validation.ProductionStartupTestRunner"
+        } else {
+            "androidx.test.runner.AndroidJUnitRunner"
+        }
         manifestPlaceholders["localDataContractVersion"] = currentLocalDataContract
         // Chinese-only product surface: ship only zh + en library locale
         // tables (default config is always kept) instead of every locale.
@@ -147,6 +174,15 @@ android {
     }
 
     sourceSets {
+        if (uiHostAcceptance != null) {
+            getByName("androidTest").java.srcDir("src/uiHostAcceptance/kotlin")
+            val groupSource = when (uiHostAcceptance) {
+                "widget" -> "src/widgetConfigureAcceptance"
+                "routes" -> "src/routeHostAcceptance"
+                else -> error("Unknown isolated UI host test group")
+            }
+            getByName("androidTest").java.srcDirs("$groupSource/kotlin", "$groupSource/java")
+        }
         getByName("androidTest").assets.srcDir(
             rootProject.file("core/database/schemas"),
         )
@@ -358,11 +394,17 @@ val validateAndroidAppUpdateMetadataCompatibility = tasks.register(
         check(appUpdateMetadata["package_name"] == androidReleaseCompatibility["application_id"]) {
             "App-update metadata package_name must match the Android applicationId"
         }
-        check(
-            appUpdateMetadata["min_supported_version_code"] ==
-                androidReleaseCompatibility["minimum_sync_version_code"],
-        ) {
-            "The compatibility catalog and app-update metadata must share one sync floor"
+        // A source build can lead the real signed channel. Validate that channel's exact
+        // recorded historical floor; never fabricate new release metadata to compile sources.
+        // Packaging retains its current-generation APK/contract/floor checks independently.
+        val channelRelease = cataloguedAndroidVersions.singleOrNull {
+            it["version_code"] == appUpdateMetadata["version_code"] &&
+                it["version_name"] == appUpdateMetadata["version_name"]
+        }
+        val channelFloor = channelRelease?.get("minimum_sync_version_code")
+            ?: androidReleaseCompatibility["minimum_sync_version_code"]
+        check(appUpdateMetadata["min_supported_version_code"] == channelFloor) {
+            "App-update metadata must match its exact release's recorded sync floor"
         }
         val allowedMetadataIdentities = listOf(
             releasedAndroidVersions.last(),
@@ -380,7 +422,7 @@ val validateAndroidAppUpdateMetadataCompatibility = tasks.register(
 }
 
 tasks.matching { it.name in setOf("preDebugBuild", "preReleaseBuild") }.configureEach {
-    dependsOn(validateLocalDataContractLedger, validateAndroidReleaseCompatibilityCatalog)
+    dependsOn(validateLocalDataContractLedger, validateAndroidReleaseCompatibilityCatalog, validateAndroidAppUpdateMetadataCompatibility)
 }
 
 dependencies {
@@ -431,6 +473,11 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation(libs.androidx.espresso.intents)
+    if (uiHostAcceptance != null) {
+        androidTestImplementation(libs.hilt.android.testing)
+        add("kspAndroidTest", libs.hilt.compiler)
+    }
     androidTestImplementation(libs.androidx.room.testing)
     androidTestImplementation(libs.truth)
     testImplementation(libs.junit)

@@ -1,5 +1,7 @@
 package com.lezi.babylog.feature.onboarding
 
+// 192.168.77.10 is a synthetic RFC1918 LAN test endpoint, never a deployment default.
+
 import com.lezi.babylog.domain.family.FamilyWizardEntry
 import com.lezi.babylog.domain.family.FamilyWizardMode
 import com.lezi.babylog.domain.family.FamilyWizardState

@@ -41,7 +41,7 @@ class ReplicaSyncEnginePersistMediaSha256Test {
         rig.backend.nextPull = PullResult(
             entities = listOf(
                 remoteReplicaRecord(recordUuid, babyClientUuid = babyUuid),
-                remoteReplicaMedia(mediaUuid, recordUuid),
+                remoteReplicaMedia(mediaUuid, recordUuid).withAuthenticatedMediaBytes(byteArrayOf(1, 2, 3, 4)),
             ),
             cursor = 2,
             generation = session.pullGeneration,
@@ -51,7 +51,8 @@ class ReplicaSyncEnginePersistMediaSha256Test {
         rig.engine.synchronize(session, SyncTrigger.Foreground)
 
         val stored = requireNotNull(rig.media.getByClientUuid(mediaUuid))
-        assertThat(stored.localUri).isEqualTo("downloaded/$mediaUuid")
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(stored.localUri)).readBytes())
+            .isEqualTo(byteArrayOf(1, 2, 3, 4))
         assertThat(stored.sha256).isEqualTo(KNOWN_BYTES_1234_SHA256)
         assertThat(stored.syncDirty).isFalse()
         assertThat(rig.backend.mediaGets).containsExactly(mediaUuid)
@@ -107,7 +108,8 @@ class ReplicaSyncEnginePersistMediaSha256Test {
         rig.engine.synchronize(session, SyncTrigger.Foreground)
 
         val stored = requireNotNull(rig.media.getByClientUuid(mediaUuid))
-        assertThat(stored.localUri).isEqualTo("downloaded/$mediaUuid")
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(stored.localUri)).readBytes())
+            .isEqualTo(byteArrayOf(1, 2, 3, 4))
         assertThat(stored.sha256).isEqualTo(KNOWN_BYTES_1234_SHA256)
         assertThat(stored.updatedAt).isEqualTo(100)
         assertThat(stored.syncDirty).isFalse()
@@ -175,7 +177,8 @@ class ReplicaSyncEnginePersistMediaSha256Test {
         val stored = requireNotNull(rig.media.getByClientUuid(mediaUuid))
         assertThat(stored.sha256).isEqualTo(KNOWN_BYTES_8675_SHA256)
         assertThat(stored.updatedAt).isEqualTo(100)
-        assertThat(stored.localUri).isEqualTo(mediaUri)
+        assertThat(rig.mediaFiles.readableFile(stored.localUri)?.readBytes()).isEqualTo(mediaBytes)
+        assertThat(stored.byteSize).isEqualTo(mediaBytes.size.toLong())
         assertThat(rig.records.getByClientUuid(recordUuid)?.syncDirty).isFalse()
     }
 
@@ -237,14 +240,15 @@ class ReplicaSyncEnginePersistMediaSha256Test {
             assertThat(stored.syncDirty).isFalse()
             assertThat(rig.media.persistSha256IfAbsentCalls - persistCallsBefore).isEqualTo(0)
             assertThat(rig.backend.mediaGets).isEmpty()
-            assertThat(rig.backend.pullCount).isEqualTo(1)
+            // Empty incremental plus the one-time legacy-authority rewalk; neither hashes the file.
+            assertThat(rig.backend.pullCount).isEqualTo(2)
         } finally {
             file.delete()
         }
     }
 
     @Test
-    fun thisPageSkipCandidateHashesRelativeUriOnceAndDoesNotRehash() = runTest {
+    fun thisPageSkipCandidateVerifiesRelativeUriAndRepairsLaterCorruption() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 3)
         val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
         val filesRoot = File.createTempFile("media-files-root", "").apply {
@@ -298,7 +302,7 @@ class ReplicaSyncEnginePersistMediaSha256Test {
             rig.backend.nextPull = PullResult(
                 entities = listOf(
                     remoteReplicaRecord(recordUuid, babyClientUuid = babyUuid),
-                    remoteReplicaMedia(mediaUuid, recordUuid),
+                    remoteReplicaMedia(mediaUuid, recordUuid).withAuthenticatedMediaBytes(byteArrayOf(1, 2, 3, 4)),
                 ),
                 cursor = 3,
                 generation = session.pullGeneration,
@@ -313,12 +317,13 @@ class ReplicaSyncEnginePersistMediaSha256Test {
             assertThat(first.syncDirty).isFalse()
             assertThat(first.localUri).isEqualTo(relativeUri)
             assertThat(rig.backend.mediaGets).isEmpty()
-            assertThat(rig.media.persistSha256IfAbsentCalls).isEqualTo(1)
+            assertThat(requireNotNull(rig.mediaFiles.readableFile(first.localUri)).readBytes())
+                .isEqualTo(byteArrayOf(1, 2, 3, 4))
 
             rig.backend.nextPull = PullResult(
                 entities = listOf(
                     remoteReplicaRecord(recordUuid, babyClientUuid = babyUuid),
-                    remoteReplicaMedia(mediaUuid, recordUuid),
+                    remoteReplicaMedia(mediaUuid, recordUuid).withAuthenticatedMediaBytes(byteArrayOf(1, 2, 3, 4)),
                 ),
                 cursor = 3,
                 generation = session.pullGeneration,
@@ -329,7 +334,27 @@ class ReplicaSyncEnginePersistMediaSha256Test {
             val second = requireNotNull(rig.media.getByClientUuid(mediaUuid))
             assertThat(second.sha256).isEqualTo(KNOWN_BYTES_1234_SHA256)
             assertThat(rig.backend.mediaGets).isEmpty()
-            assertThat(rig.media.persistSha256IfAbsentCalls).isEqualTo(1)
+            assertThat(second.localUri).isEqualTo(relativeUri)
+            assertThat(second.updatedAt).isEqualTo(210)
+            assertThat(second.recordId).isEqualTo(recordId)
+            // The digest column is not evidence that the file is still intact. A
+            // same-length change must be found on the next reuse, then repaired
+            // from authenticated bytes without invoking the image codec.
+            onDisk.writeBytes(byteArrayOf(4, 3, 2, 1))
+            rig.backend.mediaBytes = byteArrayOf(1, 2, 3, 4)
+            rig.engine.synchronize(rig.preferences.current(), SyncTrigger.Foreground)
+
+            val repaired = requireNotNull(rig.media.getByClientUuid(mediaUuid))
+            assertThat(rig.backend.mediaGets).containsExactly(mediaUuid)
+            assertThat(repaired.sha256).isEqualTo(KNOWN_BYTES_1234_SHA256)
+            assertThat(repaired.byteSize).isEqualTo(4)
+            assertThat(repaired.updatedAt).isEqualTo(210)
+            assertThat(repaired.recordId).isEqualTo(recordId)
+            assertThat(repaired.deletedAt).isNull()
+            assertThat(repaired.syncDirty).isFalse()
+            assertThat(requireNotNull(rig.mediaFiles.readableFile(repaired.localUri)).readBytes())
+                .isEqualTo(byteArrayOf(1, 2, 3, 4))
+            assertThat(rig.mediaFiles.prepareUploadCounts).isEmpty()
         } finally {
             onDisk.delete()
             onDisk.parentFile?.delete()

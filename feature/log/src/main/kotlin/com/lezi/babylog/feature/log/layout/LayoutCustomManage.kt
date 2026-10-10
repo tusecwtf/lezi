@@ -21,6 +21,8 @@ internal fun LayoutCustomManageDialog(
     onAdd: (String, Int, (String?) -> Unit) -> Unit,
     onUpdate: (CustomRecordItem, (String?) -> Unit) -> Unit,
     onDelete: (Long, (String?) -> Unit) -> Unit,
+    saveCommand: com.lezi.babylog.core.ui.CustomItemSaveCommandState? = null,
+    onConsumeSaveResult: () -> Unit = {},
 ) {
     val byId = items.associateBy { it.id }
     CustomItemManageDialog(
@@ -30,6 +32,8 @@ internal fun LayoutCustomManageDialog(
         mode = CustomItemManageMode.LayoutEdit,
         onDismiss = onDismiss,
         onAdd = onAdd,
+        saveCommand = saveCommand,
+        onConsumeSaveResult = onConsumeSaveResult,
         onUpdate = { row, done ->
             val base = byId[row.id] ?: return@CustomItemManageDialog done("项目不存在")
             onUpdate(base.copy(name = row.name, iconSlot = row.iconSlot), done)

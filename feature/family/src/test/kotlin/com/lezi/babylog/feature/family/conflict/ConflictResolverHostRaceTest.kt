@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.family.conflict
 
+import com.lezi.babylog.sync.session.toPresentation
 import androidx.lifecycle.SavedStateHandle
 import com.lezi.babylog.domain.carelog.ConflictResolveOutcome
 import com.lezi.babylog.domain.carelog.ConflictResolverLoad
@@ -713,7 +714,7 @@ class ConflictResolverHostRaceTest {
             SyncSession(
                 role = role,
                 membershipId = "member-author",
-            ),
+            ).toPresentation(),
         ),
         nowMillis = nowMillis,
         savedStateHandle = savedStateHandle,

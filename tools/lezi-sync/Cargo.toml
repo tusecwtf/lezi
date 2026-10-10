@@ -1,6 +1,6 @@
 [package]
 name = "lezi-sync"
-version = "0.5.4"
+version = "0.5.5"
 
 edition = "2021"
 description = "Lezi family home-LAN sync server for NAS"
@@ -33,7 +33,7 @@ unicode-normalization = "0.1.24"
 uuid = { version = "1.23.4", features = ["serde", "v4", "v5"] }
 
 [dev-dependencies]
-rusqlite = { version = "0.32.1", features = ["trace"] }
+rusqlite = { version = "0.32.1", features = ["trace", "hooks"] }
 tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }
 

@@ -71,7 +71,7 @@ class HttpSyncBackendHandshakeTest {
                 .startsWith("POST /v1/sync/handshake ")
             assertThat(requests[0]).contains("Authorization: Bearer family-token")
             assertThat(requests[0].substringAfter("\n\n")).isEqualTo(
-                """{"protocol_version":1,"required_capabilities":["causal_sync_v2"]}""",
+                """{"protocol_version":1,"required_capabilities":["causal_sync_v2","nursing_plan_intent_v1"]}""",
             )
             assertThat(requests[1].lineSequence().first())
                 .startsWith("GET /v1/family/members ")
@@ -120,16 +120,17 @@ class HttpSyncBackendHandshakeTest {
         val principal = valid.getValue("principal").jsonObject
         val limits = valid.getValue("limits").jsonObject
         val cases = mapOf(
+            "old peer without nursing plan intent" to valid.withRaw("capabilities", """["causal_sync_v2"]"""),
             "unknown top-level" to JsonObject(valid + ("future" to JsonPrimitive(true))),
             "missing field" to JsonObject(valid - "limits"),
             "wrong type" to JsonObject(valid + ("ready" to JsonPrimitive("true"))),
             "duplicate capability" to valid.withRaw(
                 "capabilities",
-                """["causal_sync_v2","causal_sync_v2"]""",
+                """["causal_sync_v2","nursing_plan_intent_v1","causal_sync_v2"]""",
             ),
             "unexpected extra capability" to valid.withRaw(
                 "capabilities",
-                """["causal_sync_v2","future_extra"]""",
+                """["causal_sync_v2","nursing_plan_intent_v1","future_extra"]""",
             ),
             "mixed source capabilities" to valid.withRaw(
                 "capabilities",
@@ -192,7 +193,7 @@ class HttpSyncBackendHandshakeTest {
     }
 
     private fun validHandshakeJson(): JsonObject = Json.parseToJsonElement(
-        """{"protocol_version":1,"server_version":"0.4.0","ready":true,"capabilities":["causal_sync_v2"],"principal":{"membership_id":"membership-self","device_id":"device","role":"owner"},"directory_generation":"${"a".repeat(64)}","limits":{"pull_page_max_entities":200,"pull_page_max_encoded_bytes":9437184,"pull_page_max_decoded_bytes":8388608,"pull_max_pages":500,"commit_batch_max_units":64,"media_max_bytes":10485760},"compression":{"pull_response":["gzip","identity"]},"retry_hints":{"retry_after":true}}""",
+        """{"protocol_version":1,"server_version":"0.5.5","ready":true,"capabilities":["causal_sync_v2","nursing_plan_intent_v1"],"principal":{"membership_id":"membership-self","device_id":"device","role":"owner"},"directory_generation":"${"a".repeat(64)}","limits":{"pull_page_max_entities":200,"pull_page_max_encoded_bytes":9437184,"pull_page_max_decoded_bytes":8388608,"pull_max_pages":500,"commit_batch_max_units":64,"media_max_bytes":10485760},"compression":{"pull_response":["gzip","identity"]},"retry_hints":{"retry_after":true}}""",
     ).jsonObject
 
     private fun JsonObject.withRaw(key: String, raw: String): JsonObject = JsonObject(

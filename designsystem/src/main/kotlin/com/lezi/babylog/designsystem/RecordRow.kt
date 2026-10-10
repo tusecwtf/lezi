@@ -38,13 +38,13 @@ fun RecordRow(
     title: String,
     summary: String,
     relative: String,
+    modifier: Modifier = Modifier,
     tone: LeziTone = LeziTone.Neutral,
     anomaly: Boolean = false,
     leading: @Composable () -> Unit = {
         LeziPlaceholderDot(color = MaterialTheme.colorScheme.onSurface)
     },
     onClick: () -> Unit,
-    modifier: Modifier = Modifier,
     meta: String = "",
 ) {
     if (LeziThemeExt.isElder) {

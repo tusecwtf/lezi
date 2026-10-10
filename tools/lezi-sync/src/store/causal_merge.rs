@@ -86,6 +86,13 @@ impl CausalMediaItem {
         if self.byte_size <= 0 {
             return Err("invalid_media_byte_size");
         }
+        if [self.width, self.height]
+            .into_iter()
+            .flatten()
+            .any(|value| !(1..=i64::from(i32::MAX)).contains(&value))
+        {
+            return Err("invalid_media_dimensions");
+        }
         if self.mime.is_empty() || self.mime.len() > 128 {
             return Err("invalid_media_mime");
         }

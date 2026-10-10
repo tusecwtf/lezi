@@ -1,4 +1,6 @@
 package com.lezi.babylog.sync.engine
+
+// 192.168.77.10 is a synthetic RFC1918 LAN test endpoint, never a deployment default.
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.BabyEntity
 import com.lezi.babylog.core.database.CarePlanEntity
@@ -297,4 +299,11 @@ internal fun remoteReplicaPlanMedia(
         }
     """.trimIndent(),
     updatedAt = 210,
+)
+
+/** Opt-in modern server declaration; legacy/malformed fixtures keep their original wire. */
+internal fun SyncEntity.withAuthenticatedMediaBytes(bytes: ByteArray, role: String = "log"): SyncEntity = copy(
+    mediaIdentity = com.lezi.babylog.sync.backend.PullMediaIdentity(
+        clientUuid, role, com.lezi.babylog.core.common.MediaContentDigest.ofBytes(bytes), bytes.size.toLong(),
+    ),
 )

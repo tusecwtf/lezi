@@ -7,3 +7,14 @@ plugins {
     alias(libs.plugins.hilt) apply false
     alias(libs.plugins.ksp) apply false
 }
+
+// Fast JVM proof is explicit; default `test` still includes required real-server seams.
+subprojects {
+    tasks.withType<Test>().configureEach {
+        if (providers.gradleProperty("leziFastUnitTests").orNull == "true") {
+            filter {
+                excludeTestsMatching("*RealServer*")
+            }
+        }
+    }
+}

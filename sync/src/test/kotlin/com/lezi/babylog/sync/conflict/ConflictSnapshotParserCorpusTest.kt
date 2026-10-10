@@ -47,28 +47,7 @@ class ConflictSnapshotParserCorpusTest {
 
     @Test
     fun fiveCanonicalRootKindsMapToTypedDomainRoots() {
-        val cases = listOf(
-            "baby" to (
-                """{"nickname":"安安","sex":null,"birthday":null,"birth_weight_grams":null,"avatar_media_uuid":null,"updated_at":100,"created_by_membership_id":"member-a"}""" to
-                    ConflictRoot.Baby::class.java
-                ),
-            "record" to (
-                """{"baby_client_uuid":"$BABY_UUID","type":"formula","custom_item_client_uuid":null,"timestamp":100,"end_timestamp":null,"note":null,"payload_json":{"amount_ml":60},"schema_version":2,"updated_at":100,"created_by_membership_id":"member-a"}""" to
-                    ConflictRoot.Record::class.java
-                ),
-            "care_plan" to (
-                """{"baby_client_uuid":"$BABY_UUID","type":"formula","scheduled_at":100,"scheduled_zone_id":"Asia/Shanghai","note":null,"payload_json":{"amount_ml":60},"schema_version":2,"status":"pending","fulfilled_record_client_uuid":null,"fulfilled_at":null,"source_record_client_uuid":null,"custom_item_client_uuid":null,"updated_at":100,"created_by_membership_id":"member-a"}""" to
-                    ConflictRoot.CarePlan::class.java
-                ),
-            "custom_item" to (
-                """{"name":"散步","icon_slot":3,"updated_at":100,"created_by_membership_id":"member-a"}""" to
-                    ConflictRoot.CustomItem::class.java
-                ),
-            "wake_observation" to (
-                """{"sleep_record_client_uuid":"$RECORD_UUID","wake_timestamp":120,"note":null,"withdrawn":false,"updated_at":120,"observer_membership_id":"member-a"}""" to
-                    ConflictRoot.WakeObservation::class.java
-                ),
-        )
+        val cases = canonicalRoots()
 
         cases.forEach { (entityType, expectation) ->
             val (root, rootClass) = expectation
@@ -182,6 +161,69 @@ class ConflictSnapshotParserCorpusTest {
             ).isInstanceOf(IllegalArgumentException::class.java)
         }
     }
+
+    @Test
+    fun anonymousSnapshotAndAcceptedProjectionKeepFactsVersionsAndProvenanceReadable() {
+        canonicalRoots().forEach { (entityType, expectation) ->
+            val (originalRoot, _) = expectation
+            val identityKey = if (entityType == "wake_observation") "observer_membership_id" else "created_by_membership_id"
+            val anonymousRoot = originalRoot.replace("\"$identityKey\":\"member-a\"", "\"$identityKey\":null")
+            val original = ConflictSnapshotCodec.decode(snapshot(entityType, originalRoot))
+            val anonymous = ConflictSnapshotCodec.decode(
+                snapshot(entityType, anonymousRoot)
+                    .replace("\"actor_id\":\"member-a\"", "\"actor_id\":\"__anonymous__\"")
+                    .replace("\"device_id\":\"device-a\"", "\"device_id\":\"__anonymous__\""),
+            )
+            assertThat(anonymous.stable.versionId).isEqualTo(original.stable.versionId)
+            assertThat(anonymous.stable.media).isEqualTo(original.stable.media)
+            assertThat(anonymous.stable.root.canonical - identityKey).isEqualTo(original.stable.root.canonical - identityKey)
+            assertThat(anonymous.stable.root.canonical[identityKey]).isEqualTo(kotlinx.serialization.json.JsonNull)
+            assertThat(anonymous.stable.actorId).isEqualTo("__anonymous__")
+            assertThat(anonymous.stable.deviceId).isEqualTo("__anonymous__")
+            assertThat(ConflictSnapshotCodec.validateAcceptedProjection(anonymous.entityType, anonymousRoot, emptyList()))
+                .isEqualTo(anonymous.stable.root)
+        }
+    }
+
+    @Test
+    fun nullableIdentityDoesNotPermitMissingEmptyOrWrongTypeMembership() {
+        canonicalRoots().forEach { (entityType, expectation) ->
+            val key = if (entityType == "wake_observation") "observer_membership_id" else "created_by_membership_id"
+            val root = Json.parseToJsonElement(expectation.first).jsonObject
+            val bad = listOf(
+                kotlinx.serialization.json.JsonObject(root - key),
+                kotlinx.serialization.json.JsonObject(root + (key to kotlinx.serialization.json.JsonPrimitive(""))),
+                kotlinx.serialization.json.JsonObject(root + (key to kotlinx.serialization.json.JsonPrimitive(2))),
+            )
+            bad.forEach { malformed ->
+                assertThat(runCatching { ConflictSnapshotCodec.decode(snapshot(entityType, malformed.toString())) }.exceptionOrNull())
+                    .isInstanceOf(IllegalArgumentException::class.java)
+            }
+        }
+    }
+
+    private fun canonicalRoots() = listOf(
+            "baby" to (
+                """{"nickname":"安安","sex":null,"birthday":null,"birth_weight_grams":null,"avatar_media_uuid":null,"updated_at":100,"created_by_membership_id":"member-a"}""" to
+                    ConflictRoot.Baby::class.java
+                ),
+            "record" to (
+                """{"baby_client_uuid":"$BABY_UUID","type":"formula","custom_item_client_uuid":null,"timestamp":100,"end_timestamp":null,"note":null,"payload_json":{"amount_ml":60},"schema_version":2,"updated_at":100,"created_by_membership_id":"member-a"}""" to
+                    ConflictRoot.Record::class.java
+                ),
+            "care_plan" to (
+                """{"baby_client_uuid":"$BABY_UUID","type":"formula","scheduled_at":100,"scheduled_zone_id":"Asia/Shanghai","note":null,"payload_json":{"amount_ml":60},"schema_version":2,"status":"pending","fulfilled_record_client_uuid":null,"fulfilled_at":null,"source_record_client_uuid":null,"custom_item_client_uuid":null,"updated_at":100,"created_by_membership_id":"member-a"}""" to
+                    ConflictRoot.CarePlan::class.java
+                ),
+            "custom_item" to (
+                """{"name":"散步","icon_slot":3,"updated_at":100,"created_by_membership_id":"member-a"}""" to
+                    ConflictRoot.CustomItem::class.java
+                ),
+            "wake_observation" to (
+                """{"sleep_record_client_uuid":"$RECORD_UUID","wake_timestamp":120,"note":null,"withdrawn":false,"updated_at":120,"observer_membership_id":"member-a"}""" to
+                    ConflictRoot.WakeObservation::class.java
+                ),
+        )
 
     private fun recordRoot(payload: String): String =
         """{"baby_client_uuid":"$BABY_UUID","type":"formula","custom_item_client_uuid":null,"timestamp":100,"end_timestamp":null,"note":null,"payload_json":$payload,"schema_version":2,"updated_at":100,"created_by_membership_id":"member-a"}"""

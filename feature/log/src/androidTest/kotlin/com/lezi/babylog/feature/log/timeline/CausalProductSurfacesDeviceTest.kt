@@ -3,12 +3,16 @@ package com.lezi.babylog.feature.log.timeline
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertContentDescriptionContains
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performTextReplacement
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.google.common.truth.Truth.assertThat
@@ -33,6 +37,56 @@ import org.junit.runner.RunWith
 class CausalProductSurfacesDeviceTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun wakeCorrectionRestoresDraftAndReceivesRetainedFailure() {
+        val restore = StateRestorationTester(composeRule)
+        val wake = TimelineWakeObservation("wake-retained", 3_000, "本人", "self", null,
+            emptyList(), true, false, true)
+        val row = timelineRow(SleepIntervalProjection("sleep-1", 1_000, 3_000,
+            SleepEndSource.PROVISIONAL, "wake-retained", isProvisional = true), listOf(wake), true)
+        var command by mutableStateOf(WakeEditCommandState())
+        restore.setContent {
+            LeziTheme {
+                SleepObservationSheet(row, ZoneId.of("UTC"), {}, {},
+                    onUpdate = { _, _, _ -> command = WakeEditCommandState("wake-retained", saving = true) },
+                    onWithdraw = {}, onSelect = {}, editCommand = command)
+            }
+        }
+        composeRule.onNodeWithTag("wake_edit_wake-retained").performClick()
+        composeRule.onNodeWithTag("wake_edit_note").performTextReplacement("重建后保留")
+        composeRule.onNodeWithTag("wake_edit_confirm").performClick()
+        restore.emulateSavedInstanceStateRestore()
+        composeRule.runOnIdle { command = WakeEditCommandState("wake-retained", error = "请重试修正") }
+        composeRule.onNodeWithText("重建后保留").assertExists()
+        composeRule.onNodeWithText("请重试修正").assertExists()
+    }
+
+    @Test
+    fun wakeEditorPreservesLaterOverlapInstantAndFailedDraft() {
+        val original = java.time.Instant.parse("2026-11-01T06:30:17Z").toEpochMilli()
+        val wake = TimelineWakeObservation("wake-dst", original, "本人", "self", "原备注",
+            emptyList(), false, true, true)
+        var failure by mutableStateOf<String?>(null)
+        var submitted: Long? = null
+        composeRule.setContent {
+            LeziTheme {
+                WakeObservationEditSheet(
+                    wake, ZoneId.of("America/New_York"), {},
+                    onSave = { timestamp, _ -> submitted = timestamp; failure = "未保存，请重试" },
+                    saveError = failure,
+                )
+            }
+        }
+        composeRule.onNodeWithTag("wake_edit_note").performTextReplacement("保留这份草稿")
+        composeRule.onNodeWithTag("wake_edit_confirm").performClick()
+        composeRule.runOnIdle { assertThat(submitted).isEqualTo(original) }
+        composeRule.onNodeWithText("保留这份草稿").assertExists()
+        composeRule.onNodeWithText("未保存，请重试").assertExists()
+        composeRule.onNodeWithTag("wake_edit_date").performTextReplacement("2026-03-08")
+        composeRule.onNodeWithTag("wake_edit_time").performTextReplacement("02:30")
+        composeRule.onNodeWithTag("wake_edit_confirm").assertIsNotEnabled()
+    }
 
     @Test
     fun sleepSheetRendersProvisionalOverlapProvenanceAndAclActions() {
@@ -137,8 +191,11 @@ class CausalProductSurfacesDeviceTest {
             .assertContentDescriptionContains("已展开", substring = true)
         composeRule.onNodeWithTag("duplicate_source_r1").assertExists()
         composeRule.onNodeWithText("声明我的记录与另一来源相同").performClick()
-        composeRule.onAllNodesWithText("以 配方奶 展示", useUnmergedTree = true)[0]
+        composeRule.onAllNodesWithText("以 来源 1", substring = true, useUnmergedTree = true)[0]
             .performClick()
+        composeRule.onAllNodesWithText("以 来源 2", substring = true, useUnmergedTree = true)[0].assertExists()
+        composeRule.onAllNodesWithText("member-self", substring = true).assertCountEquals(0)
+        composeRule.onAllNodesWithText("member-peer", substring = true).assertCountEquals(0)
         composeRule.onNodeWithTag("duplicate_toggle_g1").performClick()
         composeRule.onNodeWithTag("duplicate_source_r1").assertDoesNotExist()
         composeRule.runOnIdle {

@@ -158,7 +158,9 @@ class RecordCommitFirstRoomReplayTest {
         conflictSummaryDao = database.conflictSummaryDao(),
         conflictSnapshotCacheDao = database.conflictSnapshotCacheDao(),
         immutableMediaSpool = NoMediaImmutableSpool,
+        mediaFiles = NoMediaFileStore,
         transactionRunner = DatabaseModule.transactionRunner(database),
+        cleanupUnownedMediaPaths = { paths -> check(paths.isEmpty()) { "unexpected media in no-media replay" } },
         requireRemoteAllowed = {},
     )
 

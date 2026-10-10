@@ -45,8 +45,9 @@ class ConflictV2GoldenCorpusTest {
         assertThat(release.getValue("server_schema").jsonPrimitive.content).isEqualTo("13")
         assertThat(corpus.getValue("capability").jsonObject.getValue("key").jsonPrimitive.content)
             .isEqualTo(CAPABILITY_CAUSAL_SYNC_V2)
+        // Preserve the released 0.4.0 corpus; the current ordinary dialect also requires nursing intent.
         assertThat(REQUIRED_CAUSAL_WIRE_CAPABILITIES)
-            .containsExactly(CAPABILITY_CAUSAL_SYNC_V2)
+            .containsExactly(CAPABILITY_CAUSAL_SYNC_V2, "nursing_plan_intent_v1")
 
         assertThat(schema.getValue("\$defs").jsonObject)
             .containsKey("snapshotPage")

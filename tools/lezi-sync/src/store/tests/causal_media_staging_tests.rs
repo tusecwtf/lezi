@@ -12,8 +12,8 @@ use super::super::causal_media_staging::{
 };
 use super::super::*;
 use super::test_support::{
-    entity, family, owner_principal, publish_root, publish_root_with_media, stage_log_media,
-    TestCausalMediaStage,
+    entity, family, owner_principal, publish_root, publish_root_with_media,
+    register_test_principal, stage_log_media, TestCausalMediaStage,
 };
 use serde_json::json;
 
@@ -177,8 +177,10 @@ fn causal_media_staging_enforces_file_membership_family_and_byte_quotas() {
     let peer = Principal {
         membership_id: "m-peer".to_owned(),
         device_id: "d-peer".to_owned(),
+        role: "member".to_owned(),
         ..owner.clone()
     };
+    register_test_principal(&store, &peer);
     assert!(matches!(
         store.stage_test_preimage(&peer, &first, b"abc", &digest(b"abc"), 101, limits(),),
         Err(StoreError::CausalMediaMembershipMismatch)
@@ -212,8 +214,10 @@ fn causal_media_staging_enforces_file_membership_family_and_byte_quotas() {
     let peer = Principal {
         membership_id: "m-peer".to_owned(),
         device_id: "d-peer".to_owned(),
+        role: "member".to_owned(),
         ..owner.clone()
     };
+    register_test_principal(&store, &peer);
     assert!(matches!(
         store.stage_test_preimage(
             &peer,
@@ -385,6 +389,7 @@ fn causal_media_family_scoped_gc_does_not_touch_peer_family_files() {
         )
         .unwrap();
     let peer = owner_principal(&peer_family_id);
+    register_test_principal(&store, &peer);
     let peer_reservation = store
         .reserve_causal_media_upload(&peer, &Uuid::new_v4().to_string(), 1)
         .unwrap();
@@ -1101,6 +1106,15 @@ fn consume_family_log_media(
     owner: &Principal,
     bytes: &[u8],
 ) -> (Uuid, CausalMediaItem) {
+    consume_family_log_media_by(store, owner, owner, bytes)
+}
+
+fn consume_family_log_media_by(
+    store: &Store,
+    owner: &Principal,
+    author: &Principal,
+    bytes: &[u8],
+) -> (Uuid, CausalMediaItem) {
     let baby_id = Uuid::new_v4();
     publish_root(
         store,
@@ -1118,11 +1132,11 @@ fn consume_family_log_media(
     )
     .unwrap();
     let media_id = Uuid::new_v4();
-    let item = stage_log_media(store, owner, media_id, bytes);
+    let item = stage_log_media(store, author, media_id, bytes);
     let record_id = Uuid::new_v4();
-    publish_root_with_media(
+    let published = publish_root_with_media(
         store,
-        owner,
+        author,
         entity(
             "record",
             record_id,
@@ -1142,6 +1156,10 @@ fn consume_family_log_media(
         10,
     )
     .unwrap();
+    assert_eq!(
+        published.applied, 1,
+        "fixture media commit must be accepted"
+    );
     (media_id, item)
 }
 
@@ -1249,6 +1267,7 @@ fn empty_put_does_not_bind_cross_family_consumed_sha() {
         )
         .unwrap();
     let stranger = owner_principal(&other_family);
+    register_test_principal(&store, &stranger);
     let new_id = Uuid::new_v4();
 
     assert!(matches!(
@@ -1477,4 +1496,206 @@ fn empty_put_fails_closed_when_same_uuid_stored_size_does_not_match_file() {
         )
         .unwrap();
     assert_eq!(count, 1);
+}
+
+mod renewal_tests;
+
+#[test]
+fn consumed_member_media_empty_replay_is_family_shared_without_rebinding_or_writing() {
+    let (directory, store, owner) = fixture();
+    let member = Principal {
+        membership_id: "shared-media-member".to_owned(),
+        device_id: "shared-media-device".to_owned(),
+        role: "member".to_owned(),
+        ..owner.clone()
+    };
+    register_test_principal(&store, &member);
+    let bytes = b"abc";
+    let (id, item) = consume_family_log_media_by(&store, &owner, &member, bytes);
+    let path = directory
+        .path()
+        .join("media")
+        .join(&owner.family_id)
+        .join(id.to_string());
+    let original_row = media_replay_row(&store, &owner.family_id, &id.to_string());
+    #[cfg(unix)]
+    let original_inode = {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(&path).unwrap().ino()
+    };
+    let receipt = store
+        .bind_empty_causal_media_preimage(
+            &owner,
+            &id.to_string(),
+            &item.sha256,
+            1_700_000_000,
+            limits(),
+        )
+        .unwrap();
+    assert_eq!(receipt.status, "consumed");
+    assert_eq!(receipt.media_uuid, id.to_string());
+    assert_eq!(receipt.sha256, item.sha256);
+    assert_eq!(receipt.byte_size, bytes.len());
+    assert_eq!(
+        media_replay_row(&store, &owner.family_id, &id.to_string()),
+        original_row
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(fs::metadata(&path).unwrap().ino(), original_inode);
+    }
+    // The full PUT still cannot repair/overwrite another membership's bytes.
+    assert!(matches!(
+        store.stage_test_preimage(
+            &owner,
+            &id.to_string(),
+            bytes,
+            &item.sha256,
+            1_700_000_000,
+            limits(),
+        ),
+        Err(StoreError::CausalMediaMembershipMismatch)
+    ));
+    assert!(matches!(
+        store.bind_empty_causal_media_preimage(
+            &owner,
+            &id.to_string(),
+            &digest(b"xyz"),
+            1_700_000_000,
+            limits(),
+        ),
+        Err(StoreError::CausalMediaPreimageConflict)
+    ));
+    assert_eq!(
+        media_replay_row(&store, &owner.family_id, &id.to_string()),
+        original_row
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    drop(store);
+    let restarted = Store::open(directory.path().join("lezi.db")).unwrap();
+    assert_eq!(
+        restarted
+            .bind_empty_causal_media_preimage(
+                &owner,
+                &id.to_string(),
+                &item.sha256,
+                1_700_000_001,
+                limits(),
+            )
+            .unwrap()
+            .status,
+        "consumed"
+    );
+    assert_eq!(
+        media_replay_row(&restarted, &owner.family_id, &id.to_string()),
+        original_row
+    );
+}
+
+#[test]
+fn foreign_unconsumed_media_empty_replay_never_transfers_staging_ownership() {
+    for status in ["staged", "writing", "gc_pending"] {
+        let (_directory, store, owner) = fixture();
+        let member = Principal {
+            membership_id: "private-media-member".to_owned(),
+            device_id: "private-media-device".to_owned(),
+            role: "member".to_owned(),
+            ..owner.clone()
+        };
+        register_test_principal(&store, &member);
+        let id = Uuid::new_v4().to_string();
+        store
+            .stage_test_preimage(&member, &id, b"abc", &digest(b"abc"), 100, limits())
+            .unwrap();
+        store
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE causal_media_staging SET status=?1 WHERE family_id=?2 AND media_uuid=?3",
+                rusqlite::params![status, owner.family_id, id],
+            )
+            .unwrap();
+        let original = media_replay_row(&store, &owner.family_id, &id);
+        let result =
+            store.bind_empty_causal_media_preimage(&owner, &id, &digest(b"abc"), 101, limits());
+        if status == "staged" {
+            assert!(matches!(
+                result,
+                Err(StoreError::CausalMediaMembershipMismatch)
+            ));
+        } else {
+            assert!(matches!(result, Err(StoreError::InvalidCausalMediaStaging)));
+        }
+        assert_eq!(media_replay_row(&store, &owner.family_id, &id), original);
+    }
+}
+
+#[test]
+fn consumed_cross_member_replay_keeps_family_and_blob_integrity_checks() {
+    for damage in ["other_family", "size", "hash", "missing"] {
+        let (directory, store, owner) = fixture();
+        let member = Principal {
+            membership_id: "integrity-media-member".to_owned(),
+            device_id: "integrity-media-device".to_owned(),
+            role: "member".to_owned(),
+            ..owner.clone()
+        };
+        register_test_principal(&store, &member);
+        let (id, item) = consume_family_log_media_by(&store, &owner, &member, b"abc");
+        let original = media_replay_row(&store, &owner.family_id, &id.to_string());
+        let path = directory
+            .path()
+            .join("media")
+            .join(&owner.family_id)
+            .join(id.to_string());
+        let requester = if damage == "other_family" {
+            let family_id = Uuid::new_v4().to_string();
+            store
+                .connect()
+                .unwrap()
+                .execute(
+                    "INSERT INTO families(id, created_at) VALUES (?1, 1)",
+                    [&family_id],
+                )
+                .unwrap();
+            let stranger = owner_principal(&family_id);
+            register_test_principal(&store, &stranger);
+            stranger
+        } else {
+            match damage {
+                "size" => fs::write(&path, b"abcd").unwrap(),
+                "hash" => fs::write(&path, b"xyz").unwrap(),
+                "missing" => fs::remove_file(&path).unwrap(),
+                _ => unreachable!(),
+            }
+            owner.clone()
+        };
+        assert!(
+            matches!(
+                store.bind_empty_causal_media_preimage(
+                    &requester,
+                    &id.to_string(),
+                    &item.sha256,
+                    1_700_000_000,
+                    limits(),
+                ),
+                Err(StoreError::InvalidCausalMediaStaging)
+            ),
+            "{damage}"
+        );
+        assert_eq!(
+            media_replay_row(&store, &owner.family_id, &id.to_string()),
+            original
+        );
+    }
+}
+
+fn media_replay_row(store: &Store, family_id: &str, media_uuid: &str) -> String {
+    store.connect().unwrap().query_row(
+        "SELECT quote(membership_id)||'|'||quote(status)||'|'||quote(sha256)||'|'||quote(byte_size)||'|'||quote(created_at)||'|'||quote(expires_at)||'|'||quote(consumed_at)||'|'||quote(publication_confirmed) FROM causal_media_staging WHERE family_id=?1 AND media_uuid=?2",
+        rusqlite::params![family_id, media_uuid],
+        |row| row.get(0),
+    ).unwrap()
 }

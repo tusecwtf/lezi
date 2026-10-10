@@ -2,14 +2,20 @@ package com.lezi.babylog.feature.export
 
 import android.content.Context
 import java.io.File
+import java.util.UUID
 
 /** Removes abandoned private export artifacts without racing the Android Sharesheet. */
 object ExportCacheCleanup {
+    private val processSession = UUID.randomUUID().toString()
+
+    internal fun newAttemptToken(): String = "$processSession-${UUID.randomUUID()}"
+
     internal const val STALE_EXPORT_AGE_MS = 24L * 60L * 60L * 1_000L
 
     /**
-     * Clean only aged artifacts. Opening a chooser is not proof that its target has consumed the
-     * URI, so a live share must never start a fixed deletion timer.
+     * Completed shares are age-only: opening a chooser does not prove the URI was consumed.
+     * Staging from a previous app process can be reclaimed immediately. Current-session staging
+     * is protected even if startup cleanup overlaps the first export or another screen's request.
      */
     fun cleanupStale(
         context: Context,
@@ -32,7 +38,9 @@ object ExportCacheCleanup {
     ): List<File> {
         val cutoff = nowMillis - maxAgeMillis
         return files.filter { file ->
-            file.isFile && file.lastModified() in 1..cutoff
+            val staging = file.extension == "partial" || file.extension == "request"
+            val abandoned = staging && !file.name.startsWith("$processSession-")
+            file.isFile && (abandoned || file.lastModified() in 1..cutoff)
         }
     }
 

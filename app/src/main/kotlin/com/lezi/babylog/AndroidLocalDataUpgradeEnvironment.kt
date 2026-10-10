@@ -12,6 +12,7 @@ import com.lezi.babylog.core.common.LocalDataUpgradeEnvironment
 import com.lezi.babylog.core.common.LocalDataUpgradeFailure
 import com.lezi.babylog.core.common.LocalDataUpgradeStep
 import com.lezi.babylog.sync.session.SecureRefreshTokenStore
+import com.lezi.babylog.validation.LocalDataInspectionControl
 import dagger.Lazy
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
@@ -72,6 +73,7 @@ internal class AndroidLocalDataUpgradeEnvironment internal constructor(
     @Volatile private var lastObservedContract: Int? = null
 
     override suspend fun inspect(): LocalDataInspection {
+        LocalDataInspectionControl.awaitInspection()
         val markerVersion = readContractMarker()
         val roomFilesWithoutDatabase = listOf(
             File(database.path + "-wal"),

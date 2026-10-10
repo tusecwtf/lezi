@@ -50,6 +50,7 @@ pub(crate) mod inventory;
 pub(crate) mod live_cutover;
 pub(crate) mod media;
 pub(crate) mod migrator;
+mod private_output;
 pub(crate) mod schema_contract;
 pub(crate) mod v11;
 pub(crate) mod v13;

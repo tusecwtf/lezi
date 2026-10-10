@@ -159,6 +159,9 @@ internal class FakeMediaAssetDao : MediaAssetDao {
         return before - items.size
     }
 
+    override suspend fun listCanonicalAuditPage(afterUuid: String, limit: Int): List<MediaAssetEntity> =
+        items.filter { it.clientUuid > afterUuid }.sortedBy(MediaAssetEntity::clientUuid).take(limit)
+
     override suspend fun listMissingLocalBytes(): List<MediaAssetEntity> =
         items.filter {
             it.deletedAt == null && it.remoteUri != null && it.localUri.isEmpty()

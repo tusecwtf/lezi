@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.shareIn
 
 private const val SHALLOW_SYNC_TICK_MILLIS = 60_000L
@@ -289,6 +290,31 @@ private fun projectMainSyncLine(facts: ShallowSyncFacts): ShallowSyncLine {
 fun shallowSyncLineFlow(
     transportStatus: Flow<SyncStatus>,
     session: Flow<SyncSession>,
+    pendingMemberLogin: Flow<PendingMemberLogin?>,
+    pendingPublishCount: Flow<Int>,
+    pendingGenerationResync: Flow<Boolean> = kotlinx.coroutines.flow.flowOf(false),
+    unacceptedFact: Flow<UnacceptedFactPresentation?> = kotlinx.coroutines.flow.flowOf(null),
+    badGroup: Flow<BadGroupPresentation?> = kotlinx.coroutines.flow.flowOf(null),
+    skippedPullItems: Flow<List<SkippedPullItem>> = kotlinx.coroutines.flow.flowOf(emptyList()),
+    nowMillis: () -> Long = System::currentTimeMillis,
+    clockTicks: Flow<Unit> = processShallowSyncTicks,
+): Flow<ShallowSyncLine> = shallowSyncLinePresentationFlow(
+    transportStatus = transportStatus,
+    session = session.map(SyncSession::toPresentation),
+    pendingMemberLogin = pendingMemberLogin,
+    pendingPublishCount = pendingPublishCount,
+    pendingGenerationResync = pendingGenerationResync,
+    unacceptedFact = unacceptedFact,
+    badGroup = badGroup,
+    skippedPullItems = skippedPullItems,
+    nowMillis = nowMillis,
+    clockTicks = clockTicks,
+)
+
+/** Product status needs only the owner-coherent, credential-free read model. */
+internal fun shallowSyncLinePresentationFlow(
+    transportStatus: Flow<SyncStatus>,
+    session: Flow<SyncSessionPresentation>,
     pendingMemberLogin: Flow<PendingMemberLogin?>,
     pendingPublishCount: Flow<Int>,
     pendingGenerationResync: Flow<Boolean> = kotlinx.coroutines.flow.flowOf(false),

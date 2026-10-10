@@ -1,0 +1,24 @@
+PASS app-update success
+PASS app-update stuck-helper
+PASS app-update copy-apk-before
+PASS app-update copy-apk-after
+PASS app-update copy-meta-before
+PASS app-update copy-meta-after
+PASS app-update rename-apk-before
+PASS app-update rename-apk-after
+PASS app-update rename-meta-before
+PASS app-update rename-meta-after
+PASS app-update helper-before
+PASS app-update helper-after
+PASS app-update final-check
+PASS app-update commit-before
+PASS app-update commit-after
+PASS app-update curl
+PASS app-update wrong-download
+PASS app-update HUP
+PASS app-update INT
+PASS app-update TERM
+tools/lezi-sync/deploy/test-remote-deploy-app-update-atomic.sh: line 85:  8012 Killed                  bash "$work/fragment.sh" > "$TEST_CASE/run.log" 2>&1
+PASS app-update KILL
+PASS app-update rollback-failure
+app-update transaction: 22 synthetic cases passed

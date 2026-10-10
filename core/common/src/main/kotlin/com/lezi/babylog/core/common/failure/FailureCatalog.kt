@@ -191,6 +191,16 @@ private val CATALOG: Map<FailureKind, FailureExplanation> = listOf(
         FailureAction.GoUpdate,
     ),
     row(
+        kind = FailureKind.ServerUpdateRequired,
+        category = FailureCategory.Other,
+        title = "需要升级家庭服务器",
+        whatHappened = "家庭服务器还不能提供这些照片的校验信息，已停止本页同步",
+        likelyCause = "请先升级家里的乐记服务器，再重新同步",
+        localDataStatus = "本机记录和照片已保留，可以继续离线使用",
+        FailureAction.StayOffline,
+        FailureAction.GotIt,
+    ),
+    row(
         kind = FailureKind.InvalidInput,
         category = FailureCategory.Other,
         title = "填写的内容不对",

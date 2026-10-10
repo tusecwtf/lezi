@@ -552,6 +552,18 @@ Android 本机表 `fulfillment_candidates` 在履行事务中写入稳定 `clien
 两台设备上各转一次且未共享指针时，产品接受两条独立普通记录。`adoptionStatus` 与
 `convertedRecordClientUuid` 均为本机派生字段，不进家庭 wire。
 
+睡眠落选履行转独立记录时，沿用当前合法有效／暂定投影的起止时间与选中醒来内容，
+为新 SleepStart 创建**新 UUID、当前转换者署名**的 WakeObservation 及独立媒体所有权；
+有效选择映射到新观察，暂定选择保持暂定。原观察身份、全部竞争观察、履行证据与
+原媒体不重绑、不改写。转换指针提供原候选追溯，重复提交返回同一独立根；不得
+把已醒事实复制成开放睡眠，也不得借 legacy end 绕过当前 wire。
+
+普通亲喂（nursing）计划允许左右两侧都为零分钟，表达尚未履行的意图；负时长、
+未知顺序或记录模式仍拒绝。履行所创建的实际亲喂 Record 仍要求有效正时长。
+该计划例外不扩展到普通零奶量计划；formula/pumped_feed 的零量仍仅适用于已有
+next-feed 标记。Android 出站、拉取、冲突／settlement 与服务器 care_plan 验证保持
+一致；共用接受矩阵为 config/care-plan-intent-v1-golden.json。
+
 ### 3.12 权威裁决与 commit-first 发表
 
 当前合同：ADR-0022 与 [`causal-sync-wire.md`](./causal-sync-wire.md)。普通发表 commit-first、完整 ConflictSnapshot 与 choice-only resolution。FulfillmentCandidate **仍不** 三方编辑。不得把 0.3.13 reconcile-first 当 v2 fallback。

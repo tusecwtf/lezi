@@ -93,6 +93,7 @@ import com.lezi.babylog.domain.nextSyncUpdatedAt
 import com.lezi.babylog.domain.toModel
 
 // Split from CareLogTest kitchen sink by contract cluster (ticket 06).
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class CareLogCarePlanTest {
     @Test
     fun carePlanCreationRejectsUnsupportedPayloadSchema() = runTest {
@@ -1638,8 +1639,9 @@ class CareLogCarePlanTest {
             endTimestamp = now - 10 * 60_000L,
             nowMillis = now + 4,
         )
-        val closed = fakes.records.get(closedId)!!
+        val closed = care.getRecord(closedId)!!
         assertThat(closed.endTimestamp).isEqualTo(now - 10 * 60_000L)
+        assertThat(care.projectSleepRecord(closedId)!!.observations).hasSize(1)
         assertThat(care.getCarePlan(plan2)!!.status).isEqualTo(CarePlanStatus.COMPLETED)
     }
     @Test

@@ -1,5 +1,7 @@
 package com.lezi.babylog.feature.export
 
+// 192.168.77.10 is a synthetic RFC1918 LAN test endpoint, never a deployment default.
+
 import com.lezi.babylog.core.common.failure.FailureKind
 import com.lezi.babylog.core.common.failure.failureExplanation
 import java.io.IOException

@@ -3,14 +3,10 @@ package com.lezi.babylog.domain.carelog
 import com.lezi.babylog.core.common.newClientUuid
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.causal.SourceRelationDao
-import com.lezi.babylog.core.database.causal.SourceRelationDeclarationEntity
-import com.lezi.babylog.core.database.causal.SourceRelationDeclarationStatus
-import com.lezi.babylog.core.database.causal.SourceRelationEntity
-import com.lezi.babylog.core.database.causal.SourceRelationMemberEntity
-import com.lezi.babylog.core.database.causal.SourceRelationReason
 import com.lezi.babylog.core.database.causal.SourceRelationRole
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.sync.SyncPort
+import com.lezi.babylog.sync.sourcerelation.SourceRelationCommandRefreshRequiredException
 import com.lezi.babylog.sync.backend.SourceRelationDeclareRequest
 import com.lezi.babylog.sync.backend.SourceRelationResolveGroupRequest
 import com.lezi.babylog.sync.backend.SourceRelationResult
@@ -35,7 +31,7 @@ internal class SourceRelationCoordinator(
     private val syncPort: SyncPort,
     private val currentMembershipId: suspend () -> String,
     private val isFamilyOwner: suspend () -> Boolean,
-    private val nowMillis: () -> Long,
+    @Suppress("UNUSED_PARAMETER") nowMillis: () -> Long,
 ) {
     /**
      * Soft open groups from live records, excluding source-role UUIDs already
@@ -118,17 +114,6 @@ internal class SourceRelationCoordinator(
         val expectedOther = other.baseVersion
             ?: return SourceRelationOutcome.Rejected("missing_version", "对照记录尚未获得稳定版本")
         val mutationId = newClientUuid()
-        val pending = SourceRelationDeclarationEntity(
-            mutationId = mutationId,
-            recordClientUuid = recordClientUuid,
-            equivalentToClientUuid = equivalentToClientUuid,
-            expectedRecordVersion = expectedRecord,
-            expectedOtherVersion = expectedOther,
-            authorMembershipId = membershipId,
-            status = SourceRelationDeclarationStatus.PENDING,
-            createdAt = nowMillis(),
-        )
-        sourceRelationDao.upsertDeclaration(pending)
         val result = try {
             syncPort.declareSourceRelation(
                 SourceRelationDeclareRequest(
@@ -141,21 +126,15 @@ internal class SourceRelationCoordinator(
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (refresh: SourceRelationCommandRefreshRequiredException) {
+            return SourceRelationOutcome.ConfirmedRefreshRequired(requireNotNull(refresh.message))
         } catch (error: Throwable) {
-            sourceRelationDao.upsertDeclaration(
-                pending.copy(status = SourceRelationDeclarationStatus.FAILED),
-            )
             return SourceRelationOutcome.Rejected(
                 "transport",
                 error.message ?: "声明来源关系失败",
             )
         }
-        return consumeResult(
-            result = result,
-            pendingDeclaration = pending,
-            reason = SourceRelationReason.AUTHOR_DECLARE,
-            membershipId = membershipId,
-        )
+        return consumeResult(result)
     }
 
     /**
@@ -172,6 +151,9 @@ internal class SourceRelationCoordinator(
         val members = memberClientUuids.distinct().sorted()
         if (members.size < 2) {
             return SourceRelationOutcome.Rejected("invalid", "组内至少需要两条记录")
+        }
+        if (members.size > 64) {
+            return SourceRelationOutcome.Rejected("invalid", "组内最多允许 64 条记录")
         }
         if (displayClientUuid !in members) {
             return SourceRelationOutcome.Rejected("invalid", "展示版本必须属于该组")
@@ -196,146 +178,49 @@ internal class SourceRelationCoordinator(
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (refresh: SourceRelationCommandRefreshRequiredException) {
+            return SourceRelationOutcome.ConfirmedRefreshRequired(requireNotNull(refresh.message))
         } catch (error: Throwable) {
             return SourceRelationOutcome.Rejected(
                 "transport",
                 error.message ?: "解决疑似重复组失败",
             )
         }
-        return consumeResult(
-            result = result,
-            pendingDeclaration = null,
-            reason = SourceRelationReason.OWNER_GROUP_RESOLVE,
-            membershipId = currentMembershipId(),
-            ownerMutationId = mutationId,
+        return consumeResult(result)
+    }
+
+    /** SyncPort returns only after its canonical rows and command evidence settle atomically. */
+    private fun consumeResult(result: SourceRelationResult): SourceRelationOutcome = when (result.status) {
+        "accepted" -> {
+            val relationId = result.relationId
+            val display = result.displayClientUuid
+            val current = result.currentProjection
+            val stillCurrent = current == null || current.sourceRelations.any { group ->
+                group.relationId == relationId && group.displayClientUuid == display &&
+                    group.sourceClientUuids.toSet() == result.sourceClientUuids.toSet()
+            }
+            when {
+                !stillCurrent -> SourceRelationOutcome.ConfirmedAndRefreshed("选择已确认，已同步服务器当前来源关系")
+                relationId.isNullOrBlank() -> SourceRelationOutcome.Rejected("invalid", "服务器未返回 relation_id")
+                display.isNullOrBlank() -> SourceRelationOutcome.Rejected("invalid", "服务器未返回 display")
+                else -> SourceRelationOutcome.Accepted(relationId, display, result.sourceClientUuids)
+            }
+        }
+        "cas_mismatch" -> SourceRelationOutcome.CasMismatch(
+            latestVersions = result.latestVersions,
+            message = "疑似重复内容已更新，请根据最新版本重新确认",
         )
-    }
-
-    private suspend fun consumeResult(
-        result: SourceRelationResult,
-        pendingDeclaration: SourceRelationDeclarationEntity?,
-        reason: String,
-        membershipId: String,
-        ownerMutationId: String? = null,
-    ): SourceRelationOutcome {
-        val mutationId = pendingDeclaration?.mutationId ?: ownerMutationId.orEmpty()
-        when (result.status) {
-            "accepted" -> {
-                val relationId = result.relationId
-                    ?: return failDeclaration(
-                        pendingDeclaration,
-                        SourceRelationOutcome.Rejected("invalid", "服务器未返回 relation_id"),
-                    )
-                val display = result.displayClientUuid
-                    ?: return failDeclaration(
-                        pendingDeclaration,
-                        SourceRelationOutcome.Rejected("invalid", "服务器未返回 display"),
-                    )
-                val sources = result.sourceClientUuids
-                persistRelation(
-                    relationId = relationId,
-                    display = display,
-                    sources = sources,
-                    reason = reason,
-                    mutationId = mutationId,
-                    membershipId = membershipId,
-                    declaration = pendingDeclaration?.copy(
-                        status = SourceRelationDeclarationStatus.CONSUMED,
-                    ),
-                )
-                return SourceRelationOutcome.Accepted(
-                    relationId = relationId,
-                    displayClientUuid = display,
-                    sourceClientUuids = sources,
-                )
-            }
-            "cas_mismatch" -> {
-                if (pendingDeclaration != null) {
-                    sourceRelationDao.upsertDeclaration(
-                        pendingDeclaration.copy(
-                            status = SourceRelationDeclarationStatus.SUPERSEDED,
-                        ),
-                    )
-                }
-                return SourceRelationOutcome.CasMismatch(
-                    latestVersions = result.latestVersions,
-                    message = "疑似重复内容已更新，请根据最新版本重新确认",
-                )
-            }
-            else -> {
-                return failDeclaration(
-                    pendingDeclaration,
-                    SourceRelationOutcome.Rejected(
-                        result.code ?: result.status,
-                        "来源关系请求被拒绝",
-                    ),
-                )
-            }
-        }
-    }
-
-    private suspend fun failDeclaration(
-        pending: SourceRelationDeclarationEntity?,
-        outcome: SourceRelationOutcome.Rejected,
-    ): SourceRelationOutcome.Rejected {
-        if (pending != null) {
-            sourceRelationDao.upsertDeclaration(
-                pending.copy(status = SourceRelationDeclarationStatus.FAILED),
-            )
-        }
-        return outcome
-    }
-
-    private suspend fun persistRelation(
-        relationId: String,
-        display: String,
-        sources: List<String>,
-        reason: String,
-        mutationId: String,
-        membershipId: String,
-        declaration: SourceRelationDeclarationEntity?,
-    ) {
-        val relation = SourceRelationEntity(
-            relationId = relationId,
-            displayClientUuid = display,
-            mediaRetained = true,
-            reason = reason,
-            mutationId = mutationId,
-            createdByMembershipId = membershipId,
-            createdAt = nowMillis(),
+        else -> SourceRelationOutcome.Rejected(
+            result.code ?: result.status,
+            "来源关系请求被拒绝",
         )
-        val members = buildList {
-            add(
-                SourceRelationMemberEntity(
-                    relationId = relationId,
-                    recordClientUuid = display,
-                    role = SourceRelationRole.DISPLAY,
-                ),
-            )
-            for (source in sources) {
-                add(
-                    SourceRelationMemberEntity(
-                        relationId = relationId,
-                        recordClientUuid = source,
-                        role = SourceRelationRole.SOURCE,
-                    ),
-                )
-            }
-        }
-        when (reason) {
-            SourceRelationReason.AUTHOR_DECLARE -> {
-                requireNotNull(declaration) { "author declare requires declaration status" }
-                sourceRelationDao.applyAuthorDeclaration(relation, members, declaration)
-            }
-            SourceRelationReason.OWNER_GROUP_RESOLVE -> {
-                sourceRelationDao.applyOwnerGroupResolution(relation, members)
-            }
-            else -> sourceRelationDao.applyCanonicalTransition(relation, members, declaration)
-        }
     }
 }
 
 sealed class SourceRelationOutcome {
+    data class ConfirmedRefreshRequired(val message: String) : SourceRelationOutcome()
+    data class ConfirmedAndRefreshed(val message: String) : SourceRelationOutcome()
+
     data class Accepted(
         val relationId: String,
         val displayClientUuid: String,

@@ -525,11 +525,11 @@ Owner。详细页面、错误和删除恢复见
 | 本机数据状态 | `localDataStatus` | 明确「已保存在本机 / 未保存 / 部分保存」，消除「数据丢了吗」焦虑 |
 | 动作 | `actions` | 可执行按钮（重试 / 检查后重试 / 稍后再试 / 去设置等） |
 
-- `FailureKind` 为闭合集合（24 类）：`AddressNotFound`、`Unreachable`、
+- `FailureKind` 为闭合集合（25 类）：`AddressNotFound`、`Unreachable`、
   `CertificateChanged`、`SendStalled`、`ResponseTimedOut`、`HouseholdUnavailable`、
   `HouseholdSyncing`、`SyncTookTooLong`、`SafetyCheckStuck`、`AlbumReadStalled`、
   `SystemCalendarWriteFailed`、`ExportTookTooLong`、`HouseholdFactRejected`、
-  `SessionExpired`、`AppUpdateRequired`、`InvalidInput`、`TooFast`、
+  `SessionExpired`、`AppUpdateRequired`、`ServerUpdateRequired`、`InvalidInput`、`TooFast`、
   `HouseholdStateChanged`、`QrExpired`、`QrWrongHousehold`、`ServerHasNoFamily`、
   `UnexpectedError`、`LocalSaveFailed`、`DeviceRemoved`；新增类别须同步本节。
 - **禁令**：不新增「X 失败，请重试」式无原因、无数据状态、无差异化的模板句；
@@ -537,3 +537,8 @@ Owner。详细页面、错误和删除恢复见
   普通网络错误（对齐 [`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md) §7.3）。
 - 各页浅状态行（`已同步 · …` / `已保存在本机 · 待同步 N 项` / `暂时无法同步 · 下拉重试`）
   见 [`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md) §7.3，与本节目录互补不重复。
+
+媒体身份按需门禁：只有照片缺少可信校验身份且已确认服务端未声明
+`causal_media_identity_v1` 时显示 `ServerUpdateRequired`（「需要升级家庭服务器」）。
+本机记录和照片保留，动作仅「先离线用 / 知道了」；不进入客户端 APK 强制更新壳。
+声明支持却提供缺失或错误身份属于协议数据错误；无照片或可安全验证的旧照片流程不阻断。

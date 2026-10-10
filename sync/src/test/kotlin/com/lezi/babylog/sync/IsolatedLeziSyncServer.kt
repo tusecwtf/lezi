@@ -25,17 +25,42 @@ internal class IsolatedLeziSyncServer private constructor(
     val bootstrapSecret: String,
     val origin: String,
     val spkiSha256Base64: String,
-    private val process: Process,
+    private var process: Process,
+    private val launch: () -> Process,
 ) : AutoCloseable {
     val databaseFile: File
         get() = File(dataRoot, "lezi.db")
 
-    override fun close() {
+    /** Preserve the exact data root/TLS identity and run the production startup GC. */
+    fun advanceReceiptClockAndRestart(epochSeconds: Long) {
+        val clock = File(dataRoot, "receipt-test-clock")
+        check(clock.isFile) { "Only the test-only clock runner supports time advancement" }
+        stopProcess()
+        setReceiptClock(epochSeconds)
+        process = launch()
+        waitForHttpsReady(certificateFile, publicPort)
+    }
+
+    fun setReceiptClock(epochSeconds: Long) {
+        val clock = File(dataRoot, "receipt-test-clock")
+        check(clock.isFile)
+        val temporary = File(dataRoot, "receipt-test-clock.next")
+        temporary.writeText(epochSeconds.toString())
+        Files.move(temporary.toPath(), clock.toPath(),
+            java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+            java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+    }
+
+    private fun stopProcess() {
         process.destroy()
         if (!process.waitFor(3, TimeUnit.SECONDS)) {
             process.destroyForcibly()
             process.waitFor(2, TimeUnit.SECONDS)
         }
+    }
+
+    override fun close() {
+        stopProcess()
         dataRoot.deleteRecursively()
     }
 
@@ -44,10 +69,13 @@ internal class IsolatedLeziSyncServer private constructor(
         private const val READY_ATTEMPTS = 80
         private const val READY_SLEEP_MS = 100L
 
-        fun start(): IsolatedLeziSyncServer {
-            val binary = resolveLeziSyncBinary()
+        fun start(controlledReceiptClock: Boolean = false): IsolatedLeziSyncServer {
+            val binary = resolveLeziSyncBinary(controlledReceiptClock)
             val dataRoot = Files.createTempDirectory("lezi-h44-seam-").toFile()
             dataRoot.deleteOnExit()
+            if (controlledReceiptClock) {
+                File(dataRoot, "receipt-test-clock").writeText((System.currentTimeMillis() / 1000).toString())
+            }
             val certificateFile = File(dataRoot, "server.crt")
             val privateKeyFile = File(dataRoot, "server.key")
             generateCertificate(certificateFile, privateKeyFile)
@@ -90,39 +118,37 @@ internal class IsolatedLeziSyncServer private constructor(
                 origin = "https://127.0.0.1:$publicPort",
                 spkiSha256Base64 = spkiSha256Base64(certificateFile),
                 process = child,
+                launch = { builder.start() },
             )
         }
 
-        private fun resolveLeziSyncBinary(): File {
-            val override = System.getenv("LEZI_SYNC_BIN")?.trim().orEmpty()
-            if (override.isNotEmpty()) {
-                val file = File(override)
-                require(file.isFile && file.canExecute()) {
-                    "LEZI_SYNC_BIN is not an executable file: $override"
-                }
-                return file
+        private fun resolveLeziSyncBinary(controlledReceiptClock: Boolean): File {
+            val binaryVariable = if (controlledReceiptClock) "LEZI_SYNC_CLOCK_BIN" else "LEZI_SYNC_BIN"
+            val path = requireNotNull(System.getenv(binaryVariable)) {
+                "Required integration artifact missing; run tools/testing/run-isolated-integration.sh"
             }
-            val repoRoot = resolveRepoRoot()
-            val cargoTarget = System.getenv("CARGO_TARGET_DIR")?.trim()?.takeIf { it.isNotEmpty() }
-                ?.let(::File)
-            val homeCache = File(System.getProperty("user.home"), ".cache/cargo-target")
-            val candidates = buildList {
-                if (cargoTarget != null) {
-                    add(File(cargoTarget, "debug/lezi-sync"))
-                    add(File(cargoTarget, "release/lezi-sync"))
-                }
-                add(File(homeCache, "debug/lezi-sync"))
-                add(File(homeCache, "release/lezi-sync"))
-                add(repoRoot.resolve("tools/lezi-sync/target/debug/lezi-sync"))
-                add(repoRoot.resolve("tools/lezi-sync/target/release/lezi-sync"))
+            val binary = File(path).canonicalFile
+            require(binary.isFile && binary.canExecute()) { "LEZI_SYNC_BIN is not executable: $path" }
+            val expectedHash = requireNotNull(System.getenv("${binaryVariable}_SHA256")) {
+                "Missing current-build artifact digest; use run-isolated-integration.sh"
             }
-            val binary = candidates
-                .filter { it.isFile && it.canExecute() && it.length() > 10_000_000L }
-                .maxByOrNull { it.lastModified() }
-            requireNotNull(binary) {
-                "lezi-sync binary missing. Build with " +
-                    "`cargo build -p lezi-sync` under tools/lezi-sync, or set LEZI_SYNC_BIN. " +
-                    "Looked in: ${candidates.joinToString()}"
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            binary.inputStream().use { input ->
+                val buffer = ByteArray(65536)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    digest.update(buffer, 0, count)
+                }
+            }
+            require(digest.digest().joinToString("") { "%02x".format(it) } == expectedHash) {
+                "Integration server artifact digest mismatch"
+            }
+            val revision = ProcessBuilder("git", "rev-parse", "HEAD")
+                .directory(resolveRepoRoot()).start()
+            val currentRevision = revision.inputStream.bufferedReader().readText().trim()
+            require(revision.waitFor() == 0 && currentRevision == System.getenv("LEZI_SYNC_SOURCE_REVISION")) {
+                "Integration server was not built for the current checkout revision"
             }
             return binary
         }
@@ -180,9 +206,9 @@ internal class IsolatedLeziSyncServer private constructor(
                 """
                 {
                   "package_name": "com.lezi.babylog",
-                  "version_code": 21,
-                  "version_name": "0.4.0",
-                  "min_supported_version_code": 21,
+                  "version_code": 35,
+                  "version_name": "0.5.5",
+                  "min_supported_version_code": 35,
                   "sha256": "$sha",
                   "release_notes": "H44 isolated real-server media receipt fault seam"
                 }

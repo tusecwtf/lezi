@@ -13,7 +13,7 @@
 
 use super::cutover::{
     cutover_help_text, cutover_step_labels, COPY_BACK_RUNBOOK, COPY_BACK_SCRIPT,
-    DEFAULT_LAN_HTTPS_ENDPOINT,
+    EXAMPLE_LAN_HTTPS_ENDPOINT,
 };
 
 /// Tracker-relative evidence directory for ticket 07 acceptance.
@@ -90,7 +90,7 @@ pub(crate) fn live_cutover_help_text() -> String {
 #
 # Post-cutover probe (ticket 07):
 #   bash {LIVE_CUTOVER_PROBE_SCRIPT}
-#   Success requires **LAN HTTPS** health+ready at {DEFAULT_LAN_HTTPS_ENDPOINT}
+#   Success requires **LAN HTTPS** health+ready at {EXAMPLE_LAN_HTTPS_ENDPOINT}
 #   with version matching LEZI_EXPECTED_VERSION (default package version).
 #   Container-internal readiness is optional corroboration via:
 #     docker exec lezi-sync lezi-sync healthcheck
@@ -179,7 +179,7 @@ mod tests {
             text.contains(COPY_BACK_RUNBOOK) || text.contains(LIVE_CUTOVER_RUNBOOK),
             "{text}"
         );
-        assert!(text.contains(DEFAULT_LAN_HTTPS_ENDPOINT), "{text}");
+        assert!(text.contains(EXAMPLE_LAN_HTTPS_ENDPOINT), "{text}");
         assert!(
             text.contains(&DATABASE_SCHEMA_VERSION.to_string()) || text.contains("user_version"),
             "{text}"
@@ -212,7 +212,7 @@ mod tests {
         );
         // Probe topology: LAN HTTPS required; host:8766 dead path forbidden.
         assert!(
-            text.contains("LAN HTTPS") || text.contains("https://192.168.77.4:8765"),
+            text.contains("LAN HTTPS") || text.contains("https://192.168.77.10:8765"),
             "{text}"
         );
         assert!(

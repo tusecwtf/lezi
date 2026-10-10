@@ -27,6 +27,12 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.mapLatest
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 
 data class SummaryAggregationRequest(
@@ -39,6 +45,7 @@ data class SummaryAggregationRequest(
     val zone: ZoneId,
     /** Source-role UUIDs excluded from ordinary stats (live for 来源详情). */
     val sourceRoleClientUuids: Set<String> = emptySet(),
+    val evaluationTimeMillis: Long? = null,
 )
 
 /** Background calculation boundary used by the Summary presentation layer. */
@@ -46,9 +53,18 @@ class SummaryAggregationEngine(
     private val computationDispatcher: CoroutineDispatcher = Dispatchers.Default,
     private val nowMillis: () -> Long = { RecordTime.currentTimeMillis() },
 ) {
+    internal suspend fun requiresMinuteTicks(request: SummaryAggregationRequest): Boolean =
+        withContext(computationDispatcher) {
+            val context = currentCoroutineContext()
+            request.records.any {
+                context.ensureActive()
+                it.type == RecordType.SLEEP && it.endTimestamp == null && it.deletedAt == null
+            }
+        }
+
     suspend fun calculate(request: SummaryAggregationRequest): SummaryUi =
         withContext(computationDispatcher) {
-            val now = nowMillis()
+            val now = request.evaluationTimeMillis ?: nowMillis()
             val rangeStart = request.range.startDate(request.anchorDate)
             val compareStart = if (
                 request.range == SummaryRange.Week && request.comparePrevWeek
@@ -130,7 +146,29 @@ class SummaryAggregationEngine(
 @OptIn(ExperimentalCoroutinesApi::class)
 fun Flow<SummaryAggregationRequest>.calculateLatest(
     engine: SummaryAggregationEngine,
-): Flow<SummaryUi> = mapLatest(engine::calculate)
+    minuteTicks: Flow<Long> = summaryMinuteTicks(),
+): Flow<SummaryUi> = flatMapLatest { request ->
+    // Reuse the loaded bounded snapshot: ticks must not re-subscribe the database.
+    // Eligibility is also a potentially large scan, so it shares the engine's
+    // cancellable computation boundary rather than blocking the collecting UI.
+    val timedRequests = if (engine.requiresMinuteTicks(request)) {
+        minuteTicks.map { request.copy(evaluationTimeMillis = it) }
+    } else {
+        flowOf(request)
+    }
+    // Keep calculation inside this request's child: a newer snapshot cancels both
+    // its old ticker and its in-flight calculation before scanning the new input.
+    timedRequests.mapLatest(engine::calculate)
+}
+
+/** Cold: cancellation stops ticking; resume immediately samples the current wall clock. */
+private fun summaryMinuteTicks(): Flow<Long> = flow {
+    while (currentCoroutineContext().isActive) {
+        val now = RecordTime.currentTimeMillis()
+        emit(now)
+        delay(60_000L - Math.floorMod(now, 60_000L))
+    }
+}
 
 /** Rolling week/month windows end at the anchor date (default: today). */
 internal fun SummaryRange.startDate(anchorDate: LocalDate): LocalDate =

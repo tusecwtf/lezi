@@ -1,0 +1,27 @@
+PASS schema app-update success
+PASS schema app-update snapshot-apk-before
+PASS schema app-update snapshot-apk-after
+PASS schema app-update snapshot-meta-before
+PASS schema app-update snapshot-meta-after
+PASS schema app-update copy-apk-before
+PASS schema app-update copy-apk-after
+PASS schema app-update copy-meta-before
+PASS schema app-update copy-meta-after
+PASS schema app-update rename-apk-before
+PASS schema app-update rename-apk-after
+PASS schema app-update rename-meta-before
+PASS schema app-update rename-meta-after
+PASS schema app-update helper-before
+PASS schema app-update helper-after
+PASS schema app-update final-check
+PASS schema app-update release-before
+PASS schema app-update release-after
+PASS schema app-update curl
+PASS schema app-update wrong-download
+PASS schema app-update HUP
+PASS schema app-update INT
+PASS schema app-update TERM
+tools/lezi-sync/deploy/test-schema-update-pair.sh: line 87: 17377 Killed                  bash "$work/remote.sh" fixture "$stage" "$sha" "$data" "$LEZI_UPDATE_PUBLICATION_TOKEN" > "$TEST_CASE/run.log" 2>&1
+PASS schema app-update KILL
+PASS schema app-update rollback-failure
+schema app-update: 25 synthetic fault cases, idempotent pre-open rollback, busy-helper refusal, two lease rejections and durable lost-SSH intent passed

@@ -25,6 +25,7 @@
 //! - Family-member admin routes remain in [`crate::members`] (not merged back).
 
 pub(crate) mod app_update;
+pub(crate) mod current_source_relations;
 pub(crate) mod disaster_restore;
 pub(crate) mod health;
 pub(crate) mod identity;

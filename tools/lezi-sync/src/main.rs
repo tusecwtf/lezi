@@ -68,6 +68,22 @@ async fn main() {
         eprintln!("startup error: {error:?}");
         std::process::exit(1);
     });
+    // Bind every required socket before exposing any readiness endpoint.
+    let public_listener = std::net::TcpListener::bind(address).unwrap_or_else(|error| {
+        eprintln!("cannot bind HTTPS endpoint {address}: {error}");
+        std::process::exit(1);
+    });
+    public_listener
+        .set_nonblocking(true)
+        .unwrap_or_else(|error| {
+            eprintln!("cannot configure nonblocking HTTPS endpoint {address}: {error}");
+            std::process::exit(1);
+        });
+    let public_server =
+        axum_server::from_tcp_rustls(public_listener, tls).unwrap_or_else(|error| {
+            eprintln!("cannot configure HTTPS endpoint {address}: {error}");
+            std::process::exit(1);
+        });
     let internal_listener = TcpListener::bind(internal_address)
         .await
         .unwrap_or_else(|error| {
@@ -90,15 +106,15 @@ async fn main() {
 
     let tls_handle = Handle::new();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    tokio::spawn(wait_for_shutdown(shutdown_tx, tls_handle.clone()));
+    let signal_task = tokio::spawn(wait_for_shutdown(shutdown_tx.clone(), tls_handle.clone()));
     tracing::info!(%address, "lezi-sync HTTPS server listening");
     tracing::info!(%internal_address, "lezi-sync internal health endpoint listening");
     if lan_apk_listener.is_some() {
         tracing::info!(%lan_apk_address, "lezi-sync LAN APK download endpoint listening");
     }
 
-    let public_server = axum_server::bind_rustls(address, tls)
-        .handle(tls_handle)
+    let public_server = public_server
+        .handle(tls_handle.clone())
         .serve(public_app.into_make_service_with_connect_info::<SocketAddr>());
     let internal_server = axum::serve(
         internal_listener,
@@ -115,23 +131,43 @@ async fn main() {
                 .with_graceful_shutdown(shutdown_requested(shutdown_rx))
                 .await
             }
-            _ => Ok(()),
+            // An absent optional listener is not a completed required task.
+            _ => {
+                shutdown_requested(shutdown_rx).await;
+                Ok(())
+            }
         }
     };
-    let (public_result, internal_result, lan_apk_result) =
-        tokio::join!(public_server, internal_server, lan_apk_server);
-    public_result.unwrap_or_else(|error| {
-        eprintln!("HTTPS server error: {error}");
+    let mut servers = tokio::task::JoinSet::new();
+    servers.spawn(async move { ("HTTPS", public_server.await) });
+    servers.spawn(async move { ("internal health", internal_server.await) });
+    servers.spawn(async move { ("LAN APK download", lan_apk_server.await) });
+    let first = servers.join_next().await;
+    let expected_shutdown = *shutdown_tx.borrow();
+    let _ = shutdown_tx.send(true);
+    tls_handle.graceful_shutdown(Some(Duration::from_secs(5)));
+    signal_task.abort();
+    let failed = !expected_shutdown
+        || first
+            .as_ref()
+            .is_some_and(|result| !matches!(result, Ok((_, Ok(())))));
+    if failed {
+        eprintln!("required server task terminated: {first:?}");
+        // Stop siblings immediately: an unavailable public server must not
+        // leave internal readiness reporting success during a drain window.
+        tls_handle.shutdown();
+        servers.abort_all();
+    }
+    let drained = tokio::time::timeout(Duration::from_secs(6), async {
+        while servers.join_next().await.is_some() {}
+    })
+    .await;
+    if drained.is_err() {
+        servers.abort_all();
+    }
+    if failed {
         std::process::exit(1);
-    });
-    internal_result.unwrap_or_else(|error| {
-        eprintln!("internal health server error: {error}");
-        std::process::exit(1);
-    });
-    lan_apk_result.unwrap_or_else(|error| {
-        eprintln!("LAN APK download server error: {error}");
-        std::process::exit(1);
-    });
+    }
 }
 
 fn tls_files() -> Result<(PathBuf, PathBuf), &'static str> {

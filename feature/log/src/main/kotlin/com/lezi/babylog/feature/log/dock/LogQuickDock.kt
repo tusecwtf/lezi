@@ -72,8 +72,8 @@ internal fun OneHandQuickDock(
     onBound: (RecordItemIdentity) -> Unit,
     onEmpty: () -> Unit,
     onMore: () -> Unit,
-    onLongPress: () -> Unit = {},
     modifier: Modifier = Modifier,
+    onLongPress: () -> Unit = {},
 ) {
     val resolved = remember(storedSlots, hiddenTypeKeys, customItems) {
         resolveQuickSlots(storedSlots, hiddenTypeKeys, customItems)
@@ -374,8 +374,8 @@ internal fun MoreSheet(
 private fun MoreCatalogCard(
     entry: MoreCatalogEntry,
     onClick: () -> Unit,
-    onLongClick: () -> Unit = {},
     modifier: Modifier = Modifier,
+    onLongClick: () -> Unit = {},
 ) {
     val recordType = when (entry) {
         is MoreCatalogEntry.BuiltIn -> entry.type

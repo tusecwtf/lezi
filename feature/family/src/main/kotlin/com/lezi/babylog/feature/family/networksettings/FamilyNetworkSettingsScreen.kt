@@ -47,7 +47,10 @@ internal fun disasterRecoveryStatusCopy(status: String?): String = when (status)
     "manifest_received" -> "正在校验已上传的家庭数据"
     "ready_to_commit" ->
         "数据和照片已校验完成，提交前对其他设备不可见。请再次输入根密码。"
-    "committed" -> "家庭恢复已提交"
+    "committed" -> "服务器已提交恢复，本机恢复尚未完成；请继续原批次"
+    "local_capture_pending" -> "本机恢复准备尚未完成，可重新准备并继续，或取消本机快照"
+    "repair_required" -> "原恢复快照和请求已保留，需要按错误说明修复后重新打开此页；输入密码不会补齐缺失的历史证据"
+    "start_unknown" -> "原开始请求结果尚未确认，请使用原服务器和原批次继续；不能仅在本机取消"
     "cancelled" -> "恢复批次已取消"
     "expired" -> "恢复批次已过期，请重新开始"
     else -> "暂时查不到恢复进度，稍后再点一次「查询恢复进度」"
@@ -157,53 +160,75 @@ fun FamilyNetworkSettingsScreen(
                     modifier = Modifier.fillMaxWidth(),
                 )
 
+                if (ui.pendingMember != null && ui.candidate !is FamilyNetworkCandidate.Ready) {
+                    Text("原申请服务器：${ui.pendingMember.endpointOrigin}", style = LeziTypography.Meta)
+                    Text(if (ui.pendingMember.remoteOutcomeUnknown) "申请结果待确认；在处理原申请前不会重复发送"
+                        else "已恢复原申请，可以继续检查管理员确认结果", style = LeziTypography.Body)
+                    LeziPrimaryButton(
+                        "检查确认结果",
+                        onClick = onCheckReconnectMember,
+                        enabled = canCheckPendingReconnect(ui),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    LeziSecondaryButton(
+                        "在这台设备放弃等待",
+                        onClick = onCancelReconnectMember,
+                        enabled = !ui.busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 AnimatedVisibility(
                     visible = ui.candidate is FamilyNetworkCandidate.CertificateApproval ||
                         ui.candidate is FamilyNetworkCandidate.Ready,
                 ) {
-                    when (val candidate = ui.candidate) {
-                        is FamilyNetworkCandidate.CertificateApproval -> {
-                            LeziSurfacePanel(modifier = Modifier.fillMaxWidth()) {
-                                Text("服务器证书需要确认", style = LeziTypography.BodyStrong)
-                                Text(
-                                    "旧指纹：${ui.currentFingerprint ?: "系统证书验证"}",
-                                    style = LeziTypography.Meta,
-                                )
-                                Text(
-                                    "新指纹：${candidate.candidate.fingerprint}",
-                                    style = LeziTypography.Meta,
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(LeziSpacing.Md),
+                    ) {
+                        when (val candidate = ui.candidate) {
+                            is FamilyNetworkCandidate.CertificateApproval -> {
+                                LeziSurfacePanel(modifier = Modifier.fillMaxWidth()) {
+                                    Text("服务器证书需要确认", style = LeziTypography.BodyStrong)
+                                    Text(
+                                        "旧指纹：${ui.currentFingerprint ?: "系统证书验证"}",
+                                        style = LeziTypography.Meta,
+                                    )
+                                    Text(
+                                        "新指纹：${candidate.candidate.fingerprint}",
+                                        style = LeziTypography.Meta,
+                                    )
+                                }
+                                LeziSecondaryButton(
+                                    "核对并接受新证书",
+                                    onClick = { certificateConfirmation = candidate.candidate },
+                                    enabled = !ui.busy,
+                                    modifier = Modifier.fillMaxWidth(),
                                 )
                             }
-                            LeziSecondaryButton(
-                                "核对并接受新证书",
-                                onClick = { certificateConfirmation = candidate.candidate },
-                                enabled = !ui.busy,
-                                modifier = Modifier.fillMaxWidth(),
+                            is FamilyNetworkCandidate.Ready -> CandidateLoginControls(
+                                ui = ui,
+                                familyState = candidate.familyState,
+                                displayName = displayName,
+                                onDisplayNameChange = { displayName = it },
+                                deviceName = deviceName,
+                                onDeviceNameChange = { deviceName = it },
+                                rootPassword = rootPassword,
+                                onRootPasswordChange = { rootPassword = it },
+                                onReconnectOwner = {
+                                    onReconnectOwner(deviceName, rootPassword)
+                                    rootPassword = ""
+                                },
+                                onRequestReconnectMember = {
+                                    onRequestReconnectMember(displayName, deviceName)
+                                },
+                                onCheckReconnectMember = onCheckReconnectMember,
+                                onCancelReconnectMember = onCancelReconnectMember,
+                                onPrepareDisasterRecovery = onPrepareDisasterRecovery,
                             )
+                            is FamilyNetworkCandidate.Failed,
+                            null,
+                            -> Unit
                         }
-                        is FamilyNetworkCandidate.Ready -> CandidateLoginControls(
-                            ui = ui,
-                            familyState = candidate.familyState,
-                            displayName = displayName,
-                            onDisplayNameChange = { displayName = it },
-                            deviceName = deviceName,
-                            onDeviceNameChange = { deviceName = it },
-                            rootPassword = rootPassword,
-                            onRootPasswordChange = { rootPassword = it },
-                            onReconnectOwner = {
-                                onReconnectOwner(deviceName, rootPassword)
-                                rootPassword = ""
-                            },
-                            onRequestReconnectMember = {
-                                onRequestReconnectMember(displayName, deviceName)
-                            },
-                            onCheckReconnectMember = onCheckReconnectMember,
-                            onCancelReconnectMember = onCancelReconnectMember,
-                            onPrepareDisasterRecovery = onPrepareDisasterRecovery,
-                        )
-                        is FamilyNetworkCandidate.Failed,
-                        null,
-                        -> Unit
                     }
                 }
 
@@ -373,15 +398,15 @@ private fun CandidateLoginControls(
                 modifier = Modifier.fillMaxWidth(),
             )
         } else {
-            Text("等待候选服务器的家庭管理员确认", style = LeziTypography.Meta)
+            Text(if (ui.pendingMember?.remoteOutcomeUnknown == true) "申请结果待确认，请先联系管理员检查旧申请" else "等待候选服务器的家庭管理员确认", style = LeziTypography.Meta)
             LeziPrimaryButton(
                 "检查确认结果",
                 onClick = onCheckReconnectMember,
-                enabled = !ui.busy,
+                enabled = !ui.busy && ui.pendingMember?.remoteOutcomeUnknown != true,
                 modifier = Modifier.fillMaxWidth(),
             )
             LeziSecondaryButton(
-                "取消这条申请",
+                "在这台设备放弃等待",
                 onClick = onCancelReconnectMember,
                 enabled = !ui.busy,
                 modifier = Modifier.fillMaxWidth(),
@@ -407,7 +432,7 @@ private fun DisasterRecoveryControls(
     LeziSurfacePanel(modifier = Modifier.fillMaxWidth()) {
         val summary = ui.recoverySummary
         if (summary == null) {
-            Text("已找到服务器暂存批次", style = LeziTypography.BodyStrong)
+            Text(if (ui.recoveryStatus == "local_capture_pending") "已找到本机恢复准备" else if (ui.recoveryStatus == "start_unknown") "开始请求结果待确认" else "已找到服务器暂存批次", style = LeziTypography.BodyStrong)
         } else {
             Text("将恢复 ${summary.totalEntities} 项家庭数据", style = LeziTypography.BodyStrong)
             Text(
@@ -422,19 +447,24 @@ private fun DisasterRecoveryControls(
             )
         }
         Text(
-            "不恢复旧设备、加入申请、设置、墓碑、游标或凭据；全部历史作者归新管理员。",
+            "不恢复旧设备、加入申请、设置、游标或凭据；保留历史关联所需的已删除上下文，全部历史作者归新管理员。",
             style = LeziTypography.Meta,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 
-    if (ui.recoveryStatus == "summary_ready") {
+    if (ui.recoveryStatus in setOf("summary_ready", "local_capture_pending", "start_unknown")) {
+        if (ui.recoveryStatus == "start_unknown") {
+            ui.recoveryRetainedStart?.let { intent ->
+                Text("原服务器：${intent.origin}\n管理员：${intent.ownerDisplayName} · 设备：${intent.deviceName}", style = LeziTypography.Meta)
+            }
+        }
         LeziTextField(
             value = ownerDisplayName,
             onValueChange = onOwnerDisplayNameChange,
             label = { Text("新管理员家庭称呼") },
             singleLine = true,
-            enabled = !ui.busy,
+            enabled = !ui.busy && ui.recoveryStatus != "start_unknown",
             modifier = Modifier.fillMaxWidth(),
         )
         LeziTextField(
@@ -442,28 +472,29 @@ private fun DisasterRecoveryControls(
             onValueChange = onDeviceNameChange,
             label = { Text("这台设备的称呼") },
             singleLine = true,
-            enabled = !ui.busy,
+            enabled = !ui.busy && ui.recoveryStatus != "start_unknown",
             modifier = Modifier.fillMaxWidth(),
         )
         RecoveryRootPasswordField(rootPassword, onRootPasswordChange, ui.busy)
         LeziPrimaryButton(
-            "确认摘要并开始上传",
+            if (ui.recoveryStatus == "start_unknown") "重试原开始请求" else if (ui.recoveryStatus == "local_capture_pending") "继续本机快照上传" else "确认摘要并开始上传",
             onClick = onStart,
-            enabled = !ui.busy && ownerDisplayName.isNotBlank() &&
-                deviceName.isNotBlank() && rootPassword.isNotBlank(),
+            enabled = !ui.busy && rootPassword.isNotBlank() &&
+                (ui.recoveryStatus == "start_unknown" || (ownerDisplayName.isNotBlank() && deviceName.isNotBlank())),
             modifier = Modifier.fillMaxWidth(),
         )
+    } else if (ui.recoveryStatus == "repair_required") {
+        Text(disasterRecoveryStatusCopy(ui.recoveryStatus), style = LeziTypography.Meta)
     } else {
         Text(
             disasterRecoveryStatusCopy(ui.recoveryStatus),
             style = LeziTypography.Meta,
         )
-        RecoveryRootPasswordField(rootPassword, onRootPasswordChange, ui.busy)
+        if (!ui.recoveryLocalActivationReady) RecoveryRootPasswordField(rootPassword, onRootPasswordChange, ui.busy)
         LeziPrimaryButton(
-            "最终检查并恢复家庭",
+            if (ui.recoveryLocalActivationReady) "继续完成本机激活" else if (ui.recoveryStatus == "committed") "取回原批次结果并完成恢复" else "最终检查并恢复家庭",
             onClick = onCommit,
-            enabled = !ui.busy && ui.recoveryStatus in setOf("ready_to_commit", "committed") &&
-                rootPassword.isNotBlank(),
+            enabled = canCommitDisasterRecovery(ui, rootPassword),
             modifier = Modifier.fillMaxWidth(),
         )
     }

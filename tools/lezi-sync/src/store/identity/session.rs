@@ -523,7 +523,8 @@ impl Store {
         })
     }
 
-    /// Sets the current shared family name. Caller validates non-empty and owner role.
+    /// Sets the current shared family name after checking the live Owner in this transaction.
+    /// Caller validates that the name is non-empty.
     ///
     /// Rename is a family-fact change: it advances the shared watermark
     /// (`family_meta.rev`, the same one behind the pull cursor and the
@@ -534,9 +535,15 @@ impl Store {
     /// could never reach other devices; with it, the next ordinary pull round
     /// observes the advanced cursor and delivers the new name through the
     /// pull page's existing `family_name` field.
-    pub fn rename_family(&self, family_id: &str, family_name: &str) -> Result<(), StoreError> {
+    pub fn rename_family(
+        &self,
+        principal: &Principal,
+        family_name: &str,
+    ) -> Result<(), StoreError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let family_id = principal.family_id.as_str();
+        super::require_identity_role(&transaction, principal, "owner")?;
         transaction.execute(
             "UPDATE families SET name = ?1 WHERE id = ?2",
             params![family_name, family_id],
@@ -549,40 +556,53 @@ impl Store {
 
     pub fn authenticate(&self, token: &str, now: i64) -> Result<Option<Principal>, StoreError> {
         let token_hash = crate::hash_secret(token);
-        let mut expired_cached = false;
-        if let Ok(cache) = self.auth_cache.read() {
-            if let Some(cached) = cache.get(&token_hash) {
-                if cached.access_expires_at > now {
-                    let should_sync_last_used =
-                        now.saturating_sub(cached.last_used_synced_at) >= 60;
-                    let principal = cached.principal.clone();
-                    drop(cache);
-                    if should_sync_last_used {
-                        if let Ok(connection) = self.connect() {
-                            let _ = connection.execute(
-                                "UPDATE devices SET last_used_at = ?1 WHERE device_id = ?2",
-                                params![now, principal.device_id],
-                            );
-                        }
-                        if let Ok(mut cache) = self.auth_cache.write() {
-                            cache.retain(|_, entry| entry.access_expires_at > now);
-                            if let Some(entry) = cache.get_mut(&token_hash) {
-                                entry.last_used_synced_at = now;
-                            }
-                        }
-                    }
-                    return Ok(Some(principal));
+        loop {
+            let (generation, cached) = {
+                let cache = self
+                    .auth_cache
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (
+                    self.auth_cache_generation
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    cache.get(&token_hash).cloned(),
+                )
+            };
+            if let Some(cached) = cached.filter(|cached| cached.access_expires_at > now) {
+                // The test barrier also covers a fresh cache hit, which may finish an
+                // already-started request but must never repopulate invalidated state.
+                #[cfg(test)]
+                self.auth_cache_read_barrier();
+                if now.saturating_sub(cached.last_used_synced_at) < 60 {
+                    return Ok(Some(cached.principal));
                 }
-                expired_cached = true;
+                let mut cache = self
+                    .auth_cache
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if self
+                    .auth_cache_generation
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    != generation
+                {
+                    continue;
+                }
+                if let Ok(connection) = self.connect() {
+                    let _ = connection.execute(
+                    "UPDATE devices SET last_used_at = MAX(last_used_at, ?1) WHERE device_id = ?2 AND status = 'active'",
+                    params![now, cached.principal.device_id],
+                );
+                }
+                if let Some(entry) = cache.get_mut(&token_hash) {
+                    entry.last_used_synced_at = entry.last_used_synced_at.max(now);
+                }
+                return Ok(Some(cached.principal));
             }
-        }
-        if expired_cached {
             self.drop_expired_auth_entries(now);
-        }
-        let connection = self.connect()?;
-        let row = connection
-            .query_row(
-                "
+            let connection = self.connect()?;
+            let row = connection
+                .query_row(
+                    "
             SELECT memberships.family_id, memberships.role, memberships.membership_id,
                    devices.device_id, device_sessions.access_expires_at
             FROM device_sessions
@@ -594,32 +614,44 @@ impl Store {
               AND devices.status = 'active'
               AND memberships.left_at IS NULL
             ",
-                params![token_hash, now],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, i64>(4)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((family_id, role, membership_id, device_id, access_expires_at)) = row else {
-            return Ok(None);
-        };
-        connection.execute(
-            "UPDATE devices SET last_used_at = ?1 WHERE device_id = ?2",
+                    params![token_hash, now],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((family_id, role, membership_id, device_id, access_expires_at)) = row else {
+                return Ok(None);
+            };
+            #[cfg(test)]
+            self.auth_cache_read_barrier();
+            let mut cache = self
+                .auth_cache
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self
+                .auth_cache_generation
+                .load(std::sync::atomic::Ordering::Relaxed)
+                != generation
+            {
+                continue;
+            }
+            connection.execute(
+            "UPDATE devices SET last_used_at = MAX(last_used_at, ?1) WHERE device_id = ?2 AND status = 'active'",
             params![now, device_id],
         )?;
-        let principal = Principal {
-            family_id,
-            role,
-            membership_id,
-            device_id,
-        };
-        if let Ok(mut cache) = self.auth_cache.write() {
+            let principal = Principal {
+                family_id,
+                role,
+                membership_id,
+                device_id,
+            };
             cache.retain(|_, entry| entry.access_expires_at > now);
             cache.insert(
                 token_hash,
@@ -629,8 +661,16 @@ impl Store {
                     last_used_synced_at: now,
                 },
             );
+            return Ok(Some(principal));
         }
-        Ok(Some(principal))
+    }
+
+    #[cfg(test)]
+    fn auth_cache_read_barrier(&self) {
+        let hook = self.auth_cache_read_hook.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     fn drop_expired_auth_entries(&self, now: i64) {
@@ -991,15 +1031,21 @@ impl Store {
 
     /// Revokes one device and every session lineage attached to it without
     /// changing its membership or sibling devices. Repeating the same request
-    /// is successful while the opaque device still belongs to this family.
+    /// is successful for a still-active Owner while the opaque device belongs to
+    /// this family. An ordinary member can only log out their current device.
     pub fn revoke_family_device(
         &self,
-        family_id: &str,
+        principal: &Principal,
         device_id: &str,
         now: i64,
     ) -> Result<(), StoreError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let family_id = principal.family_id.as_str();
+        super::super::causal::require_current_principal(&transaction, principal)?;
+        if principal.role != "owner" && principal.device_id != device_id {
+            return Err(StoreError::ForbiddenIdentityAdministration);
+        }
         let belongs_to_family = transaction
             .query_row(
                 "
@@ -1067,49 +1113,6 @@ impl Store {
                 membership_id,
             })
             .collect())
-    }
-
-    /// Returns only active devices the authenticated viewer is allowed to inspect.
-    ///
-    /// Owner sees the whole family; an ordinary member is constrained in SQL to
-    /// their own membership so another member's device metadata never crosses
-    /// the store boundary.
-    pub fn visible_active_devices(
-        &self,
-        family_id: &str,
-        viewer_membership_id: &str,
-        viewer_is_owner: bool,
-    ) -> Result<Vec<ActiveDevice>, StoreError> {
-        let connection = self.connect()?;
-        let mut statement = connection.prepare(
-            "
-        SELECT devices.device_id, devices.membership_id,
-               devices.device_name, devices.last_used_at
-        FROM devices
-        JOIN memberships ON memberships.membership_id = devices.membership_id
-        WHERE memberships.family_id = ?1
-          AND memberships.left_at IS NULL
-          AND devices.status = 'active'
-          AND (?3 = 1 OR devices.membership_id = ?2)
-        ORDER BY devices.membership_id COLLATE BINARY,
-                 devices.created_at,
-                 devices.device_id COLLATE BINARY
-        ",
-        )?;
-        let rows = statement
-            .query_map(
-                params![family_id, viewer_membership_id, viewer_is_owner],
-                |row| {
-                    Ok(ActiveDevice {
-                        device_id: row.get(0)?,
-                        membership_id: row.get(1)?,
-                        device_name: row.get(2)?,
-                        last_used_at: row.get(3)?,
-                    })
-                },
-            )?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
     }
 }
 

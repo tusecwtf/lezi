@@ -12,6 +12,7 @@ import com.lezi.babylog.domain.CustomItemPermissionException
 import com.lezi.babylog.domain.CustomRecordItem
 import com.lezi.babylog.domain.canManageCreatorOwnedFamilyEntity
 import com.lezi.babylog.domain.toModel
+import com.lezi.babylog.domain.nextSyncUpdatedAt
 
 /**
  * Shared custom-item definition catalog (name/icon/tombstone).
@@ -23,6 +24,7 @@ internal class CustomItemCatalog(
     private val syncPort: SyncPort,
     private val resolveFamilyId: suspend () -> Long,
     private val requestLocalSync: () -> Unit,
+    private val nowMillis: () -> Long,
 ) {
     fun observeCustomItems(): Flow<List<CustomRecordItem>> =
         customItemDao.observeAll().map { items -> items.map { it.toModel() } }
@@ -32,7 +34,7 @@ internal class CustomItemCatalog(
         require(normalized.isNotEmpty()) { "自定义项目名称不能为空" }
         require(iconSlot in 0..7) { "图标槽必须在 0..7" }
         val familyId = resolveFamilyId()
-        val now = System.currentTimeMillis()
+        val now = nowMillis()
         val creatorMembership = currentMembershipActorId()
         // Limit/uniqueness check and insert share one DB transaction so concurrent
         // adds cannot both pass the pre-check and create an 11th item / duplicate.
@@ -60,8 +62,9 @@ internal class CustomItemCatalog(
         require(normalized.isNotEmpty()) { "自定义项目名称不能为空" }
         require(item.iconSlot in 0..7) { "图标槽必须在 0..7" }
         val sharedChanged = transactionRunner.run {
-            val existing = customItemDao.getById(item.id) ?: return@run false
-            if (existing.deletedAt != null) return@run false
+            val existing = customItemDao.getById(item.id)
+                ?: error("自定义项目已不存在，请重新打开")
+            check(existing.deletedAt == null) { "自定义项目已删除，请重新打开" }
             requireCanManageCustomItem(existing)
             require(
                 customItemDao.listAll().none { it.id != item.id && it.name == normalized },
@@ -74,7 +77,7 @@ internal class CustomItemCatalog(
                     iconSlot = item.iconSlot,
                     sortOrder = item.sortOrder.coerceAtLeast(0),
                     updatedAt = if (changed) {
-                        System.currentTimeMillis().coerceAtLeast(existing.updatedAt + 1)
+                        nowMillis().coerceAtLeast(existing.updatedAt + 1)
                     } else {
                         existing.updatedAt
                     },
@@ -114,11 +117,17 @@ internal class CustomItemCatalog(
      * Local hide via [SettingsLocal.hiddenItems] is separate and does not call this.
      */
     suspend fun deleteCustomItem(id: Long) {
-        val existing = customItemDao.getById(id) ?: return
-        if (existing.deletedAt != null) return
-        requireCanManageCustomItem(existing)
-        customItemDao.softDelete(id, System.currentTimeMillis())
-        requestLocalSync()
+        val changed = transactionRunner.run {
+            val existing = customItemDao.getById(id) ?: return@run false
+            if (existing.deletedAt != null) return@run false
+            requireCanManageCustomItem(existing)
+            val revision = nextSyncUpdatedAt(existing.updatedAt, nowMillis())
+            customItemDao.update(
+                existing.copy(deletedAt = revision, updatedAt = revision, syncDirty = true),
+            )
+            true
+        }
+        if (changed) requestLocalSync()
     }
 
     /**
@@ -138,7 +147,7 @@ internal class CustomItemCatalog(
     )
 
     suspend fun canManageCustomItem(item: CustomRecordItem): Boolean {
-        val session = syncPort.session().first()
+        val session = syncPort.sessionPresentation().first()
         return canManageCreatorOwnedFamilyEntity(
             creatorMembershipId = item.createdByMembershipId,
             actorMembershipId = session.membershipId.trim(),
@@ -151,7 +160,7 @@ internal class CustomItemCatalog(
     }
 
     private suspend fun requireCanManageCustomItem(existing: CustomItemEntity) {
-        val session = syncPort.session().first()
+        val session = syncPort.sessionPresentation().first()
         val allowed = canManageCreatorOwnedFamilyEntity(
             creatorMembershipId = existing.createdByMembershipId,
             actorMembershipId = session.membershipId.trim(),
@@ -166,5 +175,5 @@ internal class CustomItemCatalog(
 
 
     private suspend fun currentMembershipActorId(): String =
-        syncPort.session().first().membershipId.trim()
+        syncPort.sessionPresentation().first().membershipId.trim()
 }

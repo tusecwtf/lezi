@@ -14,6 +14,7 @@ import com.lezi.babylog.core.database.FulfillmentCandidateEntity
 import com.lezi.babylog.core.database.fulfillment.FulfillmentAuthoritySettlement
 import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.NEXT_FEED_PLAN_MARKER
+import com.lezi.babylog.core.model.carePlanAllowsIntentOnlyFeed
 import com.lezi.babylog.core.model.isNextFeedPlanNote
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
@@ -27,6 +28,10 @@ import com.lezi.babylog.core.model.RecordType
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
@@ -54,6 +59,7 @@ import com.lezi.babylog.core.database.causal.dismissedEntityCacheKey
 import com.lezi.babylog.core.database.causal.dismissedSkipCacheKey
 import com.lezi.babylog.core.database.causal.parseDismissedEntityCacheKey
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -131,6 +137,10 @@ private data class StagedLogMedia(
     val localUri: String,
     val sha256: String?,
     val byteSize: Long? = null,
+    val authenticatedIdentity: Boolean = false,
+    val sourceRevision: MediaAssetEntity? = null,
+    val owned: Boolean = false,
+    val legacySourceUnchanged: Boolean = false,
 )
 
 private enum class MediaDigestOrigin {
@@ -237,7 +247,9 @@ internal class ReplicaSyncEngine(
         conflictSummaryDao = conflictSummaryDao,
         conflictSnapshotCacheDao = conflictSnapshotCacheDao,
         immutableMediaSpool = immutableMediaSpool,
+        mediaFiles = mediaFiles,
         transactionRunner = transactionRunner,
+        cleanupUnownedMediaPaths = mediaFileCleanup::cleanupUnreferencedPaths,
         requireRemoteAllowed = requireRemoteAllowed,
     )
 
@@ -283,6 +295,14 @@ internal class ReplicaSyncEngine(
         // LocalWrite still fail-closes: it must not invent a replica epoch.
         session.requireCurrentReplicaSession(requireGeneration = !plan.pull)
         var current = preferences.session.first()
+        val directoryOwner = preferences.familyReadSnapshot.first()
+        if (directoryOwner.identityEpoch != null) {
+            check(directoryOwner.session.familyId == current.familyId &&
+                directoryOwner.session.membershipId == current.membershipId &&
+                directoryOwner.session.deviceId == current.deviceId &&
+                directoryOwner.session.role == current.role && directoryOwner.session.baseUrl == current.baseUrl
+            ) { "member directory identity changed before sync" }
+        }
         requireRemoteAllowed(current)
         // The handshake RTT overlaps the round's local pre-work (tombstone
         // sweep + reset-receipt journal): neither reads anything the handshake
@@ -293,6 +313,7 @@ internal class ReplicaSyncEngine(
                 backend.authenticatedHandshake(current).also { it.requireCompatible(current) }
             }
             mediaFileCleanup.cleanupPendingTombstones()
+            recoverStagedDownloadPaths()
             val receipt = try {
                 resetReceiptJournal?.load()?.takeIf { it.belongsTo(current) }
             } catch (cancelled: CancellationException) {
@@ -306,16 +327,26 @@ internal class ReplicaSyncEngine(
             handshakeAsync.await() to receipt
         }
         val pullTransport = handshake.pullTransport()
-        if (preferences.familyMemberDirectoryGeneration.first() != handshake.directoryGeneration) {
+        val needsDirectoryOwner = directoryOwner.identityEpoch != null && !directoryOwner.hasCurrentDirectory
+        val cachedDirectoryGeneration = if (directoryOwner.identityEpoch != null) {
+            directoryOwner.directoryGeneration
+        } else {
+            preferences.familyMemberDirectoryGeneration.first()
+        }
+        if (needsDirectoryOwner || cachedDirectoryGeneration != handshake.directoryGeneration) {
             val directory = backend.memberDirectory(current)
             check(directory.generation == handshake.directoryGeneration) {
                 "member directory changed during authenticated sync handshake"
             }
             current = convergeAuthenticatedSelfMembership(current, directory.members)
-            preferences.saveFamilyMemberDirectorySnapshot(
-                generation = directory.generation,
-                members = directory.members,
-            )
+            val ownerEpoch = directoryOwner.identityEpoch
+            if (ownerEpoch != null) {
+                check(preferences.saveFamilyMemberDirectoryIfCurrent(ownerEpoch, directory.generation, directory.members)) {
+                    "member directory identity changed during sync"
+                }
+            } else {
+                preferences.saveFamilyMemberDirectorySnapshot(directory.generation, directory.members)
+            }
         }
         // LocalWrite no-pull plan applies only with the capabilities frozen by this handshake.
         // Spec / ADR-0020: no-pull before causal base/three-way/branch is rejected.
@@ -372,6 +403,9 @@ internal class ReplicaSyncEngine(
                 }
             }
         }
+        val mediaUpgradeReady = if (classifiedPullFailure == null && plan.pull) {
+            repairLegacyPublishedMedia(current, pullTransport, ensureMediaEditGuard())
+        } else true
         // Historical missing media is a bounded full-cycle queue, not a per-page
         // scan. Run it after pull pages and before freeze so a GET-window local
         // edit is still captured by this cycle's publish. LocalWrite never
@@ -379,7 +413,7 @@ internal class ReplicaSyncEngine(
         if (classifiedPullFailure == null && (trigger == SyncTrigger.Foreground || trigger == SyncTrigger.PullToRefresh)) {
             downloadMissingMedia(current, ensureMediaEditGuard())
         }
-        if (plan.push && !recovered) {
+        if (plan.push && !recovered && mediaUpgradeReady) {
             if (current.role == FamilyRole.Member) {
                 // Incremental cycles do not go through recoverFullResync. Local-only
                 // orphan subtrees are not family intent; settle them before capture
@@ -399,6 +433,9 @@ internal class ReplicaSyncEngine(
                     captured.candidates,
                     captured.mediaRepair,
                 )
+            } catch (error: PublishedMediaAuthorityRequiredException) {
+                rearmLegacyMediaMaintenance(current)
+                throw error
             } catch (error: AuthorityProofException) {
                 if (trigger == SyncTrigger.LocalWrite) {
                     // Keep dirty roots; do not reuse reset-receipt (that would force doPull).
@@ -621,6 +658,7 @@ internal class ReplicaSyncEngine(
         val parsedMediaWires = linkedMapOf<String, MediaWire>()
         val stagedLogMediaBytes = stageLogMediaDownloads(session, entities, parsedMediaWires)
         val appliedCarePlanUuids = mutableListOf<String>()
+        val retiredMediaMutations = linkedSetOf<String>()
         val unresolved = mutableListOf<UnresolvedPull>()
         try {
             transactionRunner.run {
@@ -745,7 +783,7 @@ internal class ReplicaSyncEngine(
                 // transaction. An explicit no-conflict entity removes every stale
                 // summary/snapshot for that root instead of leaving a ghost badge.
                 applied.filter { it.type in CAUSAL_ROOT_TYPES }.forEach { entity ->
-                    causalSettlement.applyPullConflictSummary(
+                    retiredMediaMutations += causalSettlement.applyPullConflictSummary(
                         entityType = entity.type,
                         clientUuid = entity.clientUuid,
                         summary = entity.conflictSummary?.takeIfOpenBranches(),
@@ -806,8 +844,14 @@ internal class ReplicaSyncEngine(
                     }
             }
         } finally {
-            cleanupUnownedStagedMedia(stagedLogMediaBytes.values.map { it.localUri }.toSet())
+            withContext(NonCancellable) {
+                cleanupUnownedStagedMedia(stagedLogMediaBytes.values.filter { it.owned }.map { it.localUri }.toSet())
+                conflictSnapshotCacheDao?.deleteTransportJournal("staged-media-downloads-v1")
+            }
         }
+        // Room retirement is committed now. A crash before this unlink is an
+        // ordinary unreferenced orphan; a rollback above never removes sole bytes.
+        causalSettlement.sweepRetiredMedia(retiredMediaMutations)
         mediaFileCleanup.cleanupTombstones(deletedMediaClientUuids.toSet())
         cleanupDiscardedLocalMedia(discardedLocalMediaPaths)
         // Side effects only after full package apply — never during partial download.
@@ -844,16 +888,7 @@ internal class ReplicaSyncEngine(
         discardedLocalMediaPaths: MutableList<String>,
         forceAuthority: Boolean = false,
     ): ApplyVerdict {
-        val existing = carePlanDao.getByClientUuid(entity.clientUuid)
-        dismissedEntityApplyGate(
-            entityType = "care_plan",
-            clientUuid = entity.clientUuid,
-            incomingDeletedAt = entity.deletedAt,
-            localDismissedTombstone = existing != null &&
-                existing.deletedAt != null &&
-                !existing.syncDirty &&
-                existing.mutationId == null,
-        )?.let { return it }
+        val prior = carePlanDao.getByClientUuid(entity.clientUuid)
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
         val wire = decodeCarePlanWire(
             payload,
@@ -870,6 +905,34 @@ internal class ReplicaSyncEngine(
         }
         val baby = references.baby
         val customItemId = references.customItem?.id
+        val identityRedacted = payload["created_by_membership_id"] === JsonNull
+        if (identityRedacted) {
+            SyncWireMapper.requireCurrentTransportPayload(
+                wire.type,
+                wire.payload,
+                allowIntentOnlyFeed = carePlanAllowsIntentOnlyFeed(wire.type, wire.note),
+            )
+            invalidateIdentityRedactedConflictState(entity)
+        }
+        // ADR-0025: authenticated explicit-null identity metadata is independent
+        // of care-content epochs, dirty intent, and the unchanged version ID.
+        // This copy runs inside the page transaction and never rewrites the frozen retry.
+        val existing = prior?.let { local ->
+            if (identityRedacted && local.createdByMembershipId.isNotEmpty()) {
+                local.copy(createdByMembershipId = "").also { carePlanDao.update(it) }
+            } else {
+                local
+            }
+        }
+        dismissedEntityApplyGate(
+            entityType = "care_plan",
+            clientUuid = entity.clientUuid,
+            incomingDeletedAt = entity.deletedAt,
+            localDismissedTombstone = existing != null &&
+                existing.deletedAt != null &&
+                !existing.syncDirty &&
+                existing.mutationId == null,
+        )?.let { return it }
         if (!forceAuthority &&
             existing != null &&
             !causalSettlement.shouldApplyStablePull(
@@ -948,7 +1011,7 @@ internal class ReplicaSyncEngine(
             wire.type,
             wire.payload,
             customItemId,
-            allowIntentOnlyFeed = isNextFeedPlanNote(wire.note),
+            allowIntentOnlyFeed = carePlanAllowsIntentOnlyFeed(wire.type, wire.note),
         )
         val calendarDisposition = carePlanCalendarDisposition(
             existing = existing,
@@ -1173,7 +1236,33 @@ internal class ReplicaSyncEngine(
         entity: SyncEntity,
         forceAuthority: Boolean = false,
     ): ApplyVerdict {
-        val existing = wakeObservationDao.getByClientUuid(entity.clientUuid)
+        val prior = wakeObservationDao.getByClientUuid(entity.clientUuid)
+        val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
+        val wire = decodeWakeRootWire(
+            payload,
+            WakeRootWireShape.Pull,
+        )
+        // Records from the same pull page apply first; an existing Wake cannot
+        // be retargeted to a different source Sleep by a later stable version.
+        resolveWakeReference(
+            wire = wire,
+            recordDao = recordDao,
+            expectedSleepClientUuid = prior?.sleepRecordClientUuid,
+        ).toDeferredVerdict()?.let { return it }
+        val identityRedacted = payload["observer_membership_id"] === JsonNull
+        if (identityRedacted) {
+            invalidateIdentityRedactedConflictState(entity)
+        }
+        // ADR-0025: authenticated explicit-null identity metadata is independent
+        // of care-content epochs, dirty intent, and the unchanged version ID.
+        // This copy runs inside the page transaction and never rewrites the frozen retry.
+        val existing = prior?.let { local ->
+            if (identityRedacted && local.observerMembershipId.isNotEmpty()) {
+                local.copy(observerMembershipId = "").also { wakeObservationDao.update(it) }
+            } else {
+                local
+            }
+        }
         dismissedEntityApplyGate(
             entityType = "wake_observation",
             clientUuid = entity.clientUuid,
@@ -1217,17 +1306,6 @@ internal class ReplicaSyncEngine(
         ) {
             return ApplyVerdict.Applied
         }
-        val wire = decodeWakeRootWire(
-            Json.parseToJsonElement(entity.payloadJson).jsonObject,
-            WakeRootWireShape.Pull,
-        )
-        // Records from the same pull page apply first; an existing Wake cannot
-        // be retargeted to a different source Sleep by a later stable version.
-        resolveWakeReference(
-            wire = wire,
-            recordDao = recordDao,
-            expectedSleepClientUuid = existing?.sleepRecordClientUuid,
-        ).toDeferredVerdict()?.let { return it }
         wakeObservationDao.upsert(
             com.lezi.babylog.core.database.causal.WakeObservationEntity(
                 id = existing?.id ?: 0,
@@ -1258,7 +1336,23 @@ internal class ReplicaSyncEngine(
         entity: SyncEntity,
         forceAuthority: Boolean = false,
     ): ApplyVerdict {
-        val existing = customItemDao.getByClientUuid(entity.clientUuid)
+        val prior = customItemDao.getByClientUuid(entity.clientUuid)
+        val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
+        val wire = decodeCustomItemWire(payload)
+        val identityRedacted = payload["created_by_membership_id"] === JsonNull
+        if (identityRedacted) {
+            invalidateIdentityRedactedConflictState(entity)
+        }
+        // ADR-0025: authenticated explicit-null identity metadata is independent
+        // of care-content epochs, dirty intent, and the unchanged version ID.
+        // This copy runs inside the page transaction and never rewrites the frozen retry.
+        val existing = prior?.let { local ->
+            if (identityRedacted && local.createdByMembershipId.isNotEmpty()) {
+                local.copy(createdByMembershipId = "").also { customItemDao.update(it) }
+            } else {
+                local
+            }
+        }
         dismissedEntityApplyGate(
             entityType = "custom_item",
             clientUuid = entity.clientUuid,
@@ -1268,8 +1362,6 @@ internal class ReplicaSyncEngine(
                 !existing.syncDirty &&
                 existing.mutationId == null,
         )?.let { return it }
-        val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
-        val wire = decodeCustomItemWire(payload)
         if (!forceAuthority &&
             existing != null &&
             !causalSettlement.shouldApplyStablePull(
@@ -1345,6 +1437,22 @@ internal class ReplicaSyncEngine(
         return ApplyVerdict.Applied
     }
 
+    /** Server redaction revokes snapshot tokens/choices even when all version IDs survive. */
+    private suspend fun invalidateIdentityRedactedConflictState(entity: SyncEntity) {
+        entity.conflictSummary?.let { summary ->
+            require(summary.entityType == entity.type && summary.clientUuid == entity.clientUuid &&
+                (entity.versionId == null || summary.stableVersionId == entity.versionId)
+            ) { "匿名身份 pull conflict summary 与 root 不匹配" }
+        }
+        val cache = conflictSnapshotCacheDao ?: return
+        val conflictIds = conflictSummaryDao.listForRoot(entity.type, entity.clientUuid)
+            .mapTo(mutableSetOf()) { it.conflictId }
+        entity.conflictSummary?.conflictId?.let(conflictIds::add)
+        // Do not remove summaries, frozen retry envelopes, or media retirement journals.
+        // Removing the stage also fences an in-flight old snapshot loader's lease.
+        conflictIds.forEach { cache.deleteConflictState(it) }
+    }
+
     private fun acknowledgedEqualRevisionCreator(
         session: SyncSession,
         existingCreator: String?,
@@ -1386,6 +1494,9 @@ internal class ReplicaSyncEngine(
         val existing = babyDao.getByClientUuid(entity.clientUuid)
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
         val wire = decodeBabyWire(payload)
+        if (payload["created_by_membership_id"] === JsonNull) {
+            invalidateIdentityRedactedConflictState(entity)
+        }
         // Members still accept family authority babies (force path / member role).
         if (existing != null && session.role != FamilyRole.Member && !forceAuthority) {
             if (!causalSettlement.shouldApplyStablePull(
@@ -1498,16 +1609,7 @@ internal class ReplicaSyncEngine(
         entity: SyncEntity,
         forceAuthority: Boolean = false,
     ): ApplyVerdict {
-        val existing = recordDao.getByClientUuid(entity.clientUuid)
-        dismissedEntityApplyGate(
-            entityType = "record",
-            clientUuid = entity.clientUuid,
-            incomingDeletedAt = entity.deletedAt,
-            localDismissedTombstone = existing != null &&
-                existing.deletedAt != null &&
-                !existing.syncDirty &&
-                existing.mutationId == null,
-        )?.let { return it }
+        val prior = recordDao.getByClientUuid(entity.clientUuid)
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
         val wire = parseRecordWire(payload)
         val customItemId = wire.customItemClientUuid?.let { customItemUuid ->
@@ -1529,6 +1631,30 @@ internal class ReplicaSyncEngine(
                 missingClientUuid = wire.babyClientUuid,
                 localSnapshot = "baby=absent",
             )
+        val identityRedacted = payload["created_by_membership_id"] === JsonNull
+        if (identityRedacted) {
+            SyncWireMapper.requireCurrentTransportPayload(wire.type, wire.payload)
+            invalidateIdentityRedactedConflictState(entity)
+        }
+        // ADR-0025: authenticated explicit-null identity metadata is independent
+        // of care-content epochs, dirty intent, and the unchanged version ID.
+        // This copy runs inside the page transaction and never rewrites the frozen retry.
+        val existing = prior?.let { local ->
+            if (identityRedacted && local.createdByMembershipId.isNotEmpty()) {
+                local.copy(createdByMembershipId = "").also { recordDao.update(it) }
+            } else {
+                local
+            }
+        }
+        dismissedEntityApplyGate(
+            entityType = "record",
+            clientUuid = entity.clientUuid,
+            incomingDeletedAt = entity.deletedAt,
+            localDismissedTombstone = existing != null &&
+                existing.deletedAt != null &&
+                !existing.syncDirty &&
+                existing.mutationId == null,
+        )?.let { return it }
         applySourceRelationSummary(entity)
         if (!forceAuthority &&
             existing != null &&
@@ -1673,14 +1799,23 @@ internal class ReplicaSyncEngine(
         entities: List<SyncEntity>,
         parsedMediaWires: MutableMap<String, MediaWire>,
     ): Map<String, StagedLogMedia> {
+        recoverStagedDownloadPaths()
         val staged = linkedMapOf<String, StagedLogMedia>()
+        val ownedPaths = linkedSetOf<String>()
+        val ownershipMutex = Mutex()
+        suspend fun reservePath(path: String) = ownershipMutex.withLock {
+            ownedPaths += path
+            requireNotNull(conflictSnapshotCacheDao).putTransportJournal("staged-media-downloads-v1",
+                JsonArray(ownedPaths.map(::JsonPrimitive)).toString(), 0L)
+        }
+        try {
         val expectedDigests = collectCausalMediaDigests(entities)
         val pageMedia = buildList {
             for (entity in entities) {
                 if (entity.type != "media" || entity.deletedAt != null) continue
                 val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
                 val kind = (payload["kind"] as? JsonPrimitive)?.contentOrNull
-                if (kind != "log" && kind != "wake") continue
+                if (kind != "log" && kind != "wake" && kind != "avatar") continue
                 val wire = parsedMediaWires.getOrPut(entity.clientUuid) {
                     parseMediaWire(payload)
                 }
@@ -1703,10 +1838,9 @@ internal class ReplicaSyncEngine(
             requireCanonicalUuid(entity.clientUuid, "media client_uuid")
             val existing = existingByUuid[entity.clientUuid]
             val expected = expectedDigests[entity.clientUuid]
-            if (wire.kind == "wake") {
-                require(expected != null) {
-                    "下载媒体缺少内容身份期望，不得写成已校验成功"
-                }
+            if (existing != null && expected != null) captureLegacyMediaSource(session, existing)
+            if (wire.kind == "wake" && expected == null) {
+                throw MissingTrustedMediaIdentityException()
             }
             val reused = resolveReusableLogMedia(
                 clientUuid = entity.clientUuid,
@@ -1721,7 +1855,12 @@ internal class ReplicaSyncEngine(
             }
             pending += PendingDownload(entity, wire, expected)
         }
-        if (pending.isEmpty()) return staged
+        suspend fun withCapture(): Map<String, StagedLogMedia> = staged.mapValues { (uuid, bytes) ->
+            bytes.copy(authenticatedIdentity = expectedDigests[uuid] != null,
+                sourceRevision = existingByUuid[uuid],
+                legacySourceUnchanged = existingByUuid[uuid]?.let { legacyMediaSourceStillMatches(session, it) } == true)
+        }
+        if (pending.isEmpty()) return withCapture()
         // One download unit per unique causal identity (keyed by the first
         // page item carrying it); items without an identity — older pages
         // without a causal manifest — cannot share bytes, exactly like the
@@ -1747,17 +1886,16 @@ internal class ReplicaSyncEngine(
                         val identity = item.expected
                         val bytes = backend.getMedia(session, item.entity.clientUuid)
                         requireDownloadedMatchesExpected(bytes, identity)
-                        val localUri = mediaFiles.saveDownloaded(
-                            item.entity.clientUuid,
-                            item.wire.kind,
-                            bytes,
-                            item.wire.mime,
-                        )
+                        val localUri = withContext(NonCancellable) {
+                            mediaFiles.saveDownloadedOwned(UUID.randomUUID().toString(),
+                                item.wire.kind, bytes, item.wire.mime, ::reservePath)
+                        }
                         StagedLogMedia(
                             localUri = localUri,
                             sha256 = identity?.sha256
                                 ?: MediaContentDigest.ofBytes(bytes),
                             byteSize = bytes.size.toLong(),
+                            owned = true,
                         )
                     }
                 }
@@ -1790,9 +1928,26 @@ internal class ReplicaSyncEngine(
                 hit.localUri,
                 identity.sha256,
                 identity.byteSize,
+                owned = hit.owned,
             )
         }
-        return staged
+        return withCapture()
+        } catch (error: Throwable) {
+            withContext(NonCancellable) {
+                cleanupUnownedStagedMedia(ownedPaths)
+                conflictSnapshotCacheDao?.deleteTransportJournal("staged-media-downloads-v1")
+            }
+            throw error
+        }
+    }
+
+    private suspend fun recoverStagedDownloadPaths() {
+        val cache = conflictSnapshotCacheDao ?: return
+        val previous = cache.getTransportJournal("staged-media-downloads-v1") ?: return
+        val paths = (Json.parseToJsonElement(previous.payloadJson) as JsonArray)
+            .map { it.jsonPrimitive.content }.toSet()
+        cleanupUnownedStagedMedia(paths)
+        cache.deleteTransportJournal(previous.journalKey)
     }
 
     private fun collectCausalMediaDigests(
@@ -1800,6 +1955,24 @@ internal class ReplicaSyncEngine(
     ): Map<String, MediaContentIdentity> {
         val collected = linkedMapOf<String, MediaContentIdentity>()
         for (entity in entities) {
+            entity.mediaIdentity?.let { item ->
+                require(entity.type == "media" && entity.deletedAt == null) {
+                    "独立内容身份只能属于 live media"
+                }
+                val wire = parseMediaWire(Json.parseToJsonElement(entity.payloadJson).jsonObject)
+                val role = if (wire.kind == "log" && wire.carePlanClientUuid != null) "plan" else wire.kind
+                require(item.mediaUuid == entity.clientUuid && item.role == role &&
+                    item.byteSize > 0L && item.byteSize == wire.byteSize
+                ) { "独立媒体内容身份与所属媒体不一致" }
+                val identity = MediaContentIdentity(
+                    MediaContentDigest.requireValid(item.sha256), item.byteSize,
+                    MediaDigestOrigin.CausalManifest,
+                )
+                val previous = collected.put(item.mediaUuid, identity)
+                require(previous == null || previous == identity) {
+                    "同页媒体给出了冲突的内容身份"
+                }
+            }
             if (entity.type !in CAUSAL_ROOT_TYPES) continue
             for (item in entity.media) {
                 val identity = MediaContentIdentity(
@@ -1827,9 +2000,12 @@ internal class ReplicaSyncEngine(
         if (existing != null && existingUri.isNotBlank() &&
             mediaFiles.readableFile(existingUri) != null
         ) {
-            val localSha = existing.sha256 ?: persistReadableSha256IfAbsent(existing)
+            // Historical rows may describe normalized server bytes while retaining the raw
+            // import path. Cached columns cannot certify the file actually being reused.
+            val file = requireNotNull(mediaFiles.readableFile(existingUri))
+            val localSha = MediaContentDigest.ofReadableFile(file)
             if (expected != null) {
-                if (localSha == expected.sha256) {
+                if (localSha == expected.sha256 && file.length() == expected.byteSize) {
                     return StagedLogMedia(existingUri, localSha, expected.byteSize)
                 }
             } else if (incomingUpdatedAt != null && existing.updatedAt >= incomingUpdatedAt) {
@@ -1846,7 +2022,9 @@ internal class ReplicaSyncEngine(
             sha256 = identity.sha256,
             byteSize = identity.byteSize,
             excludingClientUuid = clientUuid,
-        )?.takeIf { mediaFiles.readableFile(it.localUri) != null } ?: return null
+        )?.takeIf { row -> mediaFiles.readableFile(row.localUri)?.let { file ->
+            file.length() == identity.byteSize && MediaContentDigest.ofReadableFile(file) == identity.sha256
+        } == true } ?: return null
         return StagedLogMedia(donor.localUri, identity.sha256, identity.byteSize)
     }
 
@@ -1877,6 +2055,49 @@ internal class ReplicaSyncEngine(
         return digest
     }
 
+    private suspend fun hasCanonicalMediaEvidence(row: MediaAssetEntity): Boolean =
+        conflictSnapshotCacheDao?.getTransportJournal("canonical-media-bytes-v1:${row.clientUuid}")?.payloadJson == row.localUri ||
+            conflictSnapshotCacheDao?.getTransportJournal("restored-media-bytes-v1:${row.clientUuid}")?.payloadJson == row.localUri
+
+    private fun legacyMediaSourceEvidence(session: SyncSession, row: MediaAssetEntity): String? {
+        val file = mediaFiles.readableFile(row.localUri) ?: return null
+        return buildJsonObject {
+            put("authority", session.mediaAuthorityKey()); put("uuid", row.clientUuid)
+            put("uri", row.localUri); put("sha", row.sha256?.let(::JsonPrimitive) ?: JsonNull)
+            put("size", row.byteSize); put("actual_sha", MediaContentDigest.ofReadableFile(file))
+            put("actual_size", file.length()); put("kind", row.kind)
+            put("record", row.recordId?.let(::JsonPrimitive) ?: JsonNull)
+            put("plan", row.carePlanId?.let(::JsonPrimitive) ?: JsonNull)
+            put("baby", row.babyId?.let(::JsonPrimitive) ?: JsonNull)
+            put("wake", row.wakeObservationId?.let(::JsonPrimitive) ?: JsonNull)
+        }.toString()
+    }
+
+    private suspend fun captureLegacyMediaSource(session: SyncSession, row: MediaAssetEntity) {
+        val cache = conflictSnapshotCacheDao ?: return
+        if (row.syncDirty || row.deletedAt != null || !row.hasReceiptFor(session) || hasCanonicalMediaEvidence(row)) return
+        val key = "legacy-media-source-v1:${row.clientUuid}"
+        if (cache.getTransportJournal(key) != null) return
+        val evidence = legacyMediaSourceEvidence(session, row) ?: return
+        transactionRunner.run {
+            if (mediaDao.getByClientUuid(row.clientUuid) == row && cache.getTransportJournal(key) == null)
+                cache.putTransportJournal(key, evidence, row.updatedAt)
+        }
+    }
+
+    private suspend fun legacyMediaSourceStillMatches(session: SyncSession, row: MediaAssetEntity): Boolean {
+        val evidence = conflictSnapshotCacheDao?.getTransportJournal("legacy-media-source-v1:${row.clientUuid}") ?: return false
+        return row.deletedAt == null && evidence.payloadJson == legacyMediaSourceEvidence(session, row)
+    }
+
+    private suspend fun mediaWireKeepsOwner(wire: MediaWire, row: MediaAssetEntity): Boolean =
+        wire.kind == row.kind && when (row.kind) {
+            "avatar" -> row.babyId?.let { babyDao.getIncludingDeleted(it)?.clientUuid } == wire.babyClientUuid
+            "wake" -> row.wakeObservationId?.let { wakeObservationDao.get(it)?.clientUuid } == wire.wakeObservationClientUuid
+            else -> row.recordId?.let { recordDao.getIncludingDeleted(it)?.clientUuid } == wire.recordClientUuid &&
+                row.carePlanId?.let { carePlanDao.get(it)?.clientUuid } == wire.carePlanClientUuid
+        }
+
     private suspend fun applyMedia(
         session: SyncSession,
         entity: SyncEntity,
@@ -1891,6 +2112,11 @@ internal class ReplicaSyncEngine(
             parseMediaWire(Json.parseToJsonElement(entity.payloadJson).jsonObject)
         }
         val existing = mediaDao.getByClientUuid(entity.clientUuid)
+        val stagedCanonical = stagedLogMediaBytes[entity.clientUuid]?.takeIf { it.authenticatedIdentity }
+        if (stagedCanonical != null && existing != stagedCanonical.sourceRevision) {
+            return applyDeferred(DeferredGate.MediaEditGuard, "media", entity.clientUuid,
+                "media.changedDuringVerifiedDownload=true")
+        }
         dismissedEntityApplyGate(
             entityType = "media",
             clientUuid = entity.clientUuid,
@@ -1919,14 +2145,77 @@ internal class ReplicaSyncEngine(
                 localSnapshot = "media.inCycleLocalEdit=true",
             )
         }
+        if (!forceAuthority && existing != null && existing.deletedAt == null && entity.deletedAt == null &&
+            stagedCanonical != null && hasCanonicalMediaEvidence(existing) &&
+            (existing.syncDirty || existing.updatedAt >= entity.updatedAt)) {
+            if (existing.sha256 != stagedCanonical.sha256 || existing.byteSize != stagedCanonical.byteSize ||
+                !mediaWireKeepsOwner(wire, existing)) return applyDeferred(DeferredGate.MediaEditGuard,
+                    "media", entity.clientUuid, "media.canonicalIdentityChanged=true")
+            // Provenance and current readability are separate. Repair exact known bytes even
+            // for a newer/dirty row, retaining every business field and its pending intent.
+            val repaired = existing.copy(localUri = stagedCanonical.localUri,
+                remoteUri = session.receiptFor(entity.clientUuid))
+            mediaDao.update(repaired)
+            conflictSnapshotCacheDao?.putTransportJournal("canonical-media-bytes-v1:${repaired.clientUuid}",
+                repaired.localUri, repaired.updatedAt)
+            mediaEditGuard?.mediaRefreshed(repaired)
+            repaired.babyId?.let { refreshBabyAvatar(it, mediaEditGuard) }
+            return ApplyVerdict.Applied
+        }
+        if (!forceAuthority && existing != null && existing.deletedAt == null && entity.deletedAt == null &&
+            stagedCanonical?.legacySourceUnchanged == true && mediaWireKeepsOwner(wire, existing) &&
+            (existing.syncDirty || existing.updatedAt >= entity.updatedAt)) {
+            // Preserve pending/local-winning facts during byte repair. A clean newer
+            // remote revision must use the complete authoritative upsert below.
+            val preserveLocalMetadata = existing.syncDirty || existing.updatedAt > entity.updatedAt
+            val repaired = existing.copy(localUri = stagedCanonical.localUri,
+                sha256 = stagedCanonical.sha256, byteSize = requireNotNull(stagedCanonical.byteSize),
+                mime = if (preserveLocalMetadata) existing.mime else wire.mime,
+                width = if (preserveLocalMetadata) existing.width else wire.width,
+                height = if (preserveLocalMetadata) existing.height else wire.height,
+                remoteUri = session.receiptFor(entity.clientUuid))
+            mediaDao.update(repaired)
+            conflictSnapshotCacheDao?.putTransportJournal("canonical-media-bytes-v1:${repaired.clientUuid}",
+                repaired.localUri, repaired.updatedAt)
+            conflictSnapshotCacheDao?.deleteTransportJournal("legacy-media-source-v1:${repaired.clientUuid}")
+            mediaEditGuard?.mediaRefreshed(repaired)
+            repaired.babyId?.let { refreshBabyAvatar(it, mediaEditGuard) }
+            return ApplyVerdict.Applied
+        }
         // A newer local version still wins LWW. An equal remote version is the
         // authoritative receipt for the exact local bytes/metadata, including
         // after full-resync deliberately invalidated only sync bookkeeping.
         if (!forceAuthority && existing != null && existing.updatedAt > entity.updatedAt) {
+            if (stagedCanonical != null && !hasCanonicalMediaEvidence(existing))
+                return applyDeferred(DeferredGate.MediaEditGuard, "media", entity.clientUuid, "media.legacySourceChanged=true")
             return ApplyVerdict.Applied
         }
         if (!forceAuthority && existing != null && existing.updatedAt == entity.updatedAt) {
             val keepLocalDelete = existing.deletedAt != null && entity.deletedAt == null
+            // Equal timestamps are common on upgraded devices. Adopt verified canonical
+            // bytes only for the unchanged clean row; never erase a pending local edit.
+            if (stagedCanonical != null && !existing.syncDirty && !keepLocalDelete && entity.deletedAt == null) {
+                val established = hasCanonicalMediaEvidence(existing)
+                if (established && (existing.sha256 != stagedCanonical.sha256 || existing.byteSize != stagedCanonical.byteSize))
+                    return applyDeferred(DeferredGate.MediaEditGuard, "media", entity.clientUuid, "media.canonicalIdentityChanged=true")
+                val repaired = existing.copy(localUri = stagedCanonical.localUri,
+                    sha256 = stagedCanonical.sha256, byteSize = requireNotNull(stagedCanonical.byteSize),
+                    mime = if (established) existing.mime else wire.mime,
+                    width = if (established) existing.width else wire.width,
+                    height = if (established) existing.height else wire.height,
+                    remoteUri = session.receiptFor(entity.clientUuid))
+                mediaDao.update(repaired)
+                conflictSnapshotCacheDao?.putTransportJournal("canonical-media-bytes-v1:${repaired.clientUuid}",
+                    repaired.localUri, repaired.updatedAt)
+                mediaEditGuard?.mediaRefreshed(repaired)
+                repaired.babyId?.let { refreshBabyAvatar(it, mediaEditGuard) }
+                return ApplyVerdict.Applied
+            }
+            if (existing.syncDirty && stagedCanonical != null) {
+                if (!hasCanonicalMediaEvidence(existing)) return applyDeferred(DeferredGate.MediaEditGuard,
+                    "media", entity.clientUuid, "media.legacySourceChanged=true")
+                return ApplyVerdict.Applied
+            }
             val acknowledged = existing.copy(
                 remoteUri = session.receiptFor(entity.clientUuid),
                 deletedAt = if (keepLocalDelete) existing.deletedAt else entity.deletedAt ?: existing.deletedAt,
@@ -2009,6 +2298,11 @@ internal class ReplicaSyncEngine(
                 sha256 = stagedLocal?.sha256 ?: existing?.sha256,
         )
         val appliedId = mediaDao.upsert(applied)
+        if (stagedCanonical != null && entity.deletedAt == null) {
+            conflictSnapshotCacheDao?.putTransportJournal("canonical-media-bytes-v1:${applied.clientUuid}",
+                applied.localUri, applied.updatedAt)
+            conflictSnapshotCacheDao?.deleteTransportJournal("legacy-media-source-v1:${applied.clientUuid}")
+        }
         mediaEditGuard?.mediaRefreshed(applied.copy(id = existing?.id ?: appliedId))
         if (entity.deletedAt != null && !existing?.localUri.isNullOrBlank()) {
             // Keep the exact path on the tombstoned row until physical cleanup
@@ -3643,6 +3937,18 @@ internal class ReplicaSyncEngine(
                     // those historical fields under the same revision CAS before capture.
                     // A row that already matches the probe makes that UPDATE a value no-op.
                     val prepared = requireNotNull(inspected)
+                    val exactCanonicalMetadata = current.remoteUri?.isNotBlank() == true ||
+                        conflictSnapshotCacheDao?.getTransportJournal("canonical-media-bytes-v1:${current.clientUuid}")?.payloadJson == current.localUri ||
+                        conflictSnapshotCacheDao?.getTransportJournal(
+                            "restored-media-bytes-v1:${current.clientUuid}",
+                        )?.payloadJson == current.localUri
+                    if (exactCanonicalMetadata) {
+                        // Published/restored MIME and nullable dimensions are business metadata.
+                        // A decoder probe cannot replace null/blank/Unicode with sniffed values.
+                        // Freeze verifies bytes against durable canonical evidence. A legacy
+                        // receipt alone instead requests an authenticated authority rewalk.
+                        continue
+                    }
                     if (
                         current.mime == prepared.mime &&
                         current.width == prepared.width &&
@@ -3865,6 +4171,88 @@ internal class ReplicaSyncEngine(
      * The page staging section is deliberately NOT parallelized (atomic
      * receive contract; suspended ticket 10).
      */
+    /** Contract-6 rows can retain raw import bytes after publication. This maintenance
+     * journal owns its own keyset/pull cursors; ordinary replica progress is never reset.
+     * Each full cycle visits at most 256 local rows and eight authenticated pull pages.
+     * Completion is durable per authority, making settled cycles a single journal read.
+     */
+    private suspend fun rearmLegacyMediaMaintenance(session: SyncSession) {
+        val cache = conflictSnapshotCacheDao ?: return
+        val key = "published-media-upgrade-v1"
+        val state = cache.getTransportJournal(key)?.payloadJson?.let { Json.parseToJsonElement(it).jsonObject }
+        if (state?.get("authority")?.jsonPrimitive?.content == session.mediaAuthorityKey() &&
+            state["phase"]?.jsonPrimitive?.content == "pull") return
+        requireRemoteAllowed(session)
+        cache.putTransportJournal(key, buildJsonObject {
+            put("format", 1); put("authority", session.mediaAuthorityKey()); put("phase", "pull")
+            put("after", ""); put("cursor", 0L)
+        }.toString(), 0L)
+    }
+
+    private suspend fun repairLegacyPublishedMedia(
+        session: SyncSession,
+        transport: PullTransportContract,
+        guard: LocalMediaEditGuard,
+    ): Boolean {
+        val cache = conflictSnapshotCacheDao ?: return false
+        val key = "published-media-upgrade-v1"
+        val authority = session.mediaAuthorityKey()
+        val saved = cache.getTransportJournal(key)?.payloadJson?.let { Json.parseToJsonElement(it).jsonObject }
+        if (saved != null) require(saved.keys == setOf("format", "authority", "phase", "after", "cursor") &&
+            saved["format"]?.jsonPrimitive?.content == "1") { "invalid published media upgrade journal" }
+        val state = saved?.takeIf { it["authority"]?.jsonPrimitive?.content == authority }
+        var phase = state?.get("phase")?.jsonPrimitive?.content ?: "scan"
+        var after = state?.get("after")?.jsonPrimitive?.content ?: ""
+        var cursor = state?.get("cursor")?.jsonPrimitive?.content?.toLong() ?: 0L
+        require(phase in setOf("scan", "pull", "done") && cursor >= 0)
+        suspend fun persist() {
+            requireRemoteAllowed(session)
+            cache.putTransportJournal(key, buildJsonObject {
+                put("format", 1); put("authority", authority); put("phase", phase)
+                put("after", after); put("cursor", cursor)
+            }.toString(), 0L)
+        }
+        if (phase == "done") return true
+        if (phase == "scan") {
+            val rows = mediaDao.listCanonicalAuditPage(after, 256)
+            for (row in rows) {
+                if (row.deletedAt != null || !row.hasReceiptFor(session)) continue
+                val verified = cache.getTransportJournal("canonical-media-bytes-v1:${row.clientUuid}")?.payloadJson == row.localUri ||
+                    cache.getTransportJournal("restored-media-bytes-v1:${row.clientUuid}")?.payloadJson == row.localUri
+                if (!verified) { phase = "pull"; cursor = 0; break }
+            }
+            if (phase == "scan") {
+                after = rows.lastOrNull()?.clientUuid ?: after
+                if (rows.size < 256) phase = "done"
+                persist()
+                return true
+            }
+            // Durable ownership precedes all remote I/O, including an empty first page.
+            persist()
+        }
+        for (page in 0 until minOf(8, transport.budget.maxPages)) {
+            requireForegroundCycleBudgetRemaining()
+            requireRemoteAllowed(session)
+            val request = transport.page(page)
+            val result = backend.pull(session.copy(pullCursor = cursor), request).requireValidPage(request)
+            require(result.generation == session.pullGeneration && result.cursor >= cursor &&
+                (!result.hasMore || result.cursor > cursor)) { "invalid media maintenance pull progress" }
+            // Only media rows are repaired. Root notes, causal heads and normal pull checkpoints
+            // are owned by the ordinary receive path, never this maintenance pass.
+            val media = result.entities.filter { it.type == "media" }
+            require(media.filter { it.deletedAt == null }.all { it.mediaIdentity != null }) {
+                "media maintenance requires authenticated content identity"
+            }
+            val unresolved = applyRemote(session, media, mediaEditGuard = guard)
+            if (unresolved.isNotEmpty()) return false
+            cursor = result.cursor
+            if (!result.hasMore) phase = "done"
+            persist()
+            if (phase == "done") return true
+        }
+        return false
+    }
+
     private suspend fun downloadMissingMedia(
         session: SyncSession,
         mediaEditGuard: LocalMediaEditGuard?,
@@ -4432,6 +4820,10 @@ internal const val MAX_PUSH_BATCH_SIZE = 1_000
 private fun MediaAssetEntity.technicalProbeComplete(): Boolean {
     val probeWidth = width
     val probeHeight = height
+    if (remoteUri?.isNotBlank() == true && byteSize > 0L) {
+        return runCatching { com.lezi.babylog.sync.media.requireCanonicalMediaMime(mime) }.isSuccess &&
+            (probeWidth == null || probeWidth > 0) && (probeHeight == null || probeHeight > 0)
+    }
     return !mime.isNullOrBlank() &&
         probeWidth != null && probeWidth > 0 &&
         probeHeight != null && probeHeight > 0 &&

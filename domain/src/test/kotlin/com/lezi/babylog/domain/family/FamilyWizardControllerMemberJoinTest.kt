@@ -1,4 +1,5 @@
 package com.lezi.babylog.domain.family
+import com.lezi.babylog.sync.session.toPresentation
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.sync.CreateFamilyResult
 import com.lezi.babylog.sync.session.CertificateTrustCandidate
@@ -27,6 +28,60 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class FamilyWizardControllerMemberJoinTest {
+    @Test
+    fun queuedOldOperationEventsCannotCancelTheReplacementWaitingUi() = runTest {
+        for (entry in listOf(FamilyWizardEntry.Account, FamilyWizardEntry.Onboarding)) {
+            val controller = FamilyWizardController(RecordingFamilyWizardGateway())
+            val state = snapshot(entry, FamilyWizardMode.Join).copy(joinRole = FamilyWizardJoinRole.Member)
+            val newer = PendingMemberLogin("server-b", "妈妈", "Phone", 20, "operation-b")
+            controller.restorePendingMemberApproval(state, newer)
+            controller.observeMemberLoginCheck(MemberLoginCheckResult.Terminal(MemberLoginStatus.Cancelled, "operation-a"))
+            controller.observeMemberLoginCheck(MemberLoginCheckResult.Waiting(newer.copy(requestId = "server-a", operationId = "operation-a")))
+            val waiting = controller.state.value as FamilyWizardState.WaitingForMemberApproval
+            assertThat(waiting.request).isEqualTo(newer)
+            assertThat(waiting.feedback).isNull()
+        }
+    }
+
+    @Test
+    fun retiredCheckFailureCannotReplaceANewerWaitingOperationInEitherHost() = runTest {
+        for (entry in listOf(FamilyWizardEntry.Account, FamilyWizardEntry.Onboarding)) {
+            val gateway = RecordingFamilyWizardGateway().apply {
+                memberCheckStarted = CompletableDeferred()
+                memberCheckRelease = CompletableDeferred()
+                memberCheckResult = Result.failure(com.lezi.babylog.sync.MemberLoginAttemptRetiredException())
+            }
+            val controller = FamilyWizardController(gateway)
+            val state = snapshot(entry, FamilyWizardMode.Join).copy(joinRole = FamilyWizardJoinRole.Member)
+            controller.restorePendingMemberApproval(state, gateway.pendingRequest)
+            val oldCheck = async { controller.checkMemberApproval() }
+            gateway.memberCheckStarted!!.await()
+            controller.cancelMemberApproval()
+            val newer = gateway.pendingRequest.copy(requestId = "server-b", operationId = "operation-b")
+            controller.reconcilePendingMemberApproval(state, newer)
+            gateway.memberCheckRelease!!.complete(Unit)
+            oldCheck.await()
+            val waiting = controller.state.value as FamilyWizardState.WaitingForMemberApproval
+            assertThat(waiting.request).isEqualTo(newer)
+            assertThat(waiting.feedback).isNull()
+        }
+    }
+
+    @Test
+    fun sameOperationUnknownToKnownReceiptUpdatesTheWaitingPhaseForBothHosts() = runTest {
+        for (entry in listOf(FamilyWizardEntry.Account, FamilyWizardEntry.Onboarding)) {
+            val controller = FamilyWizardController(RecordingFamilyWizardGateway())
+            val state = snapshot(entry, FamilyWizardMode.Join).copy(joinRole = FamilyWizardJoinRole.Member)
+            val unknown = PendingMemberLogin("", "妈妈", "Phone", 0, "operation-a", "https://family.example.com", true)
+            controller.restorePendingMemberApproval(state, unknown)
+            val known = unknown.copy(requestId = "server-r", remoteOutcomeUnknown = false, expiresAtEpochSeconds = 20)
+            controller.reconcilePendingMemberApproval(state, known)
+            val waiting = controller.state.value as FamilyWizardState.WaitingForMemberApproval
+            assertThat(waiting.request).isEqualTo(known)
+            assertThat(waiting.request.remoteOutcomeUnknown).isFalse()
+        }
+    }
+
     @Test
     fun explicitMemberJoinCreatesAPendingRequestAndChecksWithoutLegacyInviteJoin() = runTest {
         val gateway = RecordingFamilyWizardGateway()
@@ -93,7 +148,7 @@ class FamilyWizardControllerMemberJoinTest {
 
         assertThat((controller.state.value as FamilyWizardState.Completed).outcome).isEqualTo(
             FamilyWizardOutcome.MemberApproved(
-                memberSession(),
+                memberSession().toPresentation(),
                 InitialFamilyDataRecovery.RetryRequired(),
             ),
         )
@@ -101,7 +156,7 @@ class FamilyWizardControllerMemberJoinTest {
         controller.retryReclaimedDataRecovery()
         assertThat((controller.state.value as FamilyWizardState.Completed).outcome).isEqualTo(
             FamilyWizardOutcome.MemberApproved(
-                memberSession(),
+                memberSession().toPresentation(),
                 InitialFamilyDataRecovery.NotRequired,
             ),
         )
@@ -127,7 +182,7 @@ class FamilyWizardControllerMemberJoinTest {
         val completed = controller.state.value
         assertThat((completed as FamilyWizardState.Completed).outcome).isEqualTo(
             FamilyWizardOutcome.MemberApproved(
-                memberSession(),
+                memberSession().toPresentation(),
                 InitialFamilyDataRecovery.RetryRequired(),
             ),
         )

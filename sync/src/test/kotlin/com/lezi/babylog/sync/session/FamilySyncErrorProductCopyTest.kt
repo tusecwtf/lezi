@@ -30,6 +30,15 @@ import org.junit.Test
 
 class FamilySyncErrorProductCopyTest {
     @Test
+    fun serverUpgradeStopsAutomaticContinuationWithoutForcingClientUpdate() {
+        val failure = ServerUpdateRequiredException()
+        assertThat(familyFailureKind(failure)).isEqualTo(FailureKind.ServerUpdateRequired)
+        assertThat(shouldContinueIncompleteForegroundCycle(failure, progressMade = true)).isFalse()
+        assertThat(familyFailureKind(MediaIdentityProtocolException(IllegalArgumentException("missing"))))
+            .isEqualTo(FailureKind.UnexpectedError)
+    }
+
+    @Test
     fun httpFailuresClassifyToCatalogKindsWithoutLeakingStatusOrServerDetail() {
         val serverFailure = SyncHttpException(
             statusCode = 500,

@@ -1,6 +1,9 @@
 # 分层架构（architecture）
 
-> 身份钉：current tree **0.5.4** / versionCode **34** / Room **29** / 本地数据契约 **6** /
+> 当前开发代：**0.5.5** / versionCode **35** / Room **29** / 本地数据契约 **7** /
+> server schema **13** / wire **0.5.0** / paired-software floor **35**；本开发代未部署。仓库历史记录的渠道与 NAS 为 0.5.4，非本轮实时探测结论。
+> 新代规范和发布阻塞见 [ADR0026](../adr/0026-durable-restore-authority-generation.md)。以下0.5.4身份记录为历史：
+> **0.5.4** / versionCode **34** / Room **29** / 本地数据契约 **6** /
 > server schema **13** / 同步 floor **21**；协议代 0.4.0（conflict-v2）。2026-09-30
 > 协同维护窗后 NAS 与渠道目标均为 0.5.4。构建真值以
 > `app/build.gradle.kts` + `config/android-release-compatibility.json` 为准。
@@ -42,7 +45,7 @@ sideways seam（非分层违规；完整边表见 §4）。feature 之间无 `pr
 | `:core:model` / `:core:common` | —（叶子） |
 | `:designsystem` | `core:model` |
 | `:core:database` | `core:model`、`core:common` |
-| `:core:datastore` | `core:model`、`core:common` |
+| `:core:datastore` | `core:model` |
 | `:sync` | `core:model`、`core:common`、**api**`core:database` |
 | `:domain` | `core:model`、`core:common`、**api**`core:database`、`core:datastore`、`sync` |
 | `:core:ui` | `core:common`、`core:model`、`designsystem`、`sync` |
@@ -54,8 +57,8 @@ sideways seam（非分层违规；完整边表见 §4）。feature 之间无 `pr
 | `:feature:summary` | `core:datastore`、`core:model`、`designsystem`、`domain`、`sync` |
 | `:feature:growth` | `core:common`、`core:datastore`、`core:model`、`designsystem`、`domain`、`sync` |
 | `:feature:export` | `core:common`、`core:model`、`core:ui`、`designsystem`、`domain` |
-| `:feature:search` | `core:model`、`core:ui`、`designsystem`、`domain` |
-| `:feature:widget` | `core:common`、`core:model`、`core:ui`、`designsystem`、`domain` |
+| `:feature:search` | `core:model`、`core:ui`、`designsystem`、`domain`、`sync` |
+| `:feature:widget` | `core:common`、`core:datastore`、`core:model`、`core:ui`、`designsystem`、`domain` |
 | `:app` | 以上全部 18 个模块 |
 
 `sync` 以 `api(core:database)` 暴露数据库，因此 `domain` 与全部（直接依赖 `:sync` 的）
@@ -118,11 +121,19 @@ seam）。**不得**为迎合文档而静默删改 Gradle 边；亦不得在文�
 | `feature:growth → sync` | 成长页下拉刷新触发 sync |
 | `feature:settings → sync` | 关于区检查更新 / 安装更新与相关文案 |
 | `feature:summary → sync` | 汇总页下拉刷新触发 sync |
+| `feature:search → sync` | 搜索页同步可用性与状态 |
 
-无直接 `project(":sync")` 的 feature（`timer` / `export` / `search` / `widget`）经 domain
+无直接 `project(":sync")` 的 feature（`timer` / `export` / `widget`）经 domain
 间接参与同步，不直连 sync 模块。
 
 ---
+
+普通 app／domain／feature 会话读取统一使用 `SyncPort.sessionPresentation()`，返回无凭据的
+`SyncSessionPresentation`；家庭向导已提交／重试状态同样只保留该只读投影。身份、endpoint、
+`isJoined`、reauth 与 provenance 来自同一 owner 快照；`isJoined` 在凭据丢弃前由原会话计算，
+不在 UI 根据缺少 token 重建。旧 `session()` 与命令结果的 `session` 仅作为内部／测试过渡适配器保留。
+源 API 迁移不改变持久化／wire，消费者和 fake 清单见
+[`session presentation migration`](./contracts/session-presentation.md)。
 
 ## 5. ★模块连线表（模块 ↔ 规格 ↔ 代码 ↔ 测试）
 

@@ -1,5 +1,7 @@
 package com.lezi.babylog.sync
 
+// 192.168.77.10 is a synthetic RFC1918 LAN test endpoint, never a deployment default.
+
 import com.lezi.babylog.sync.session.ShallowSyncLine
 import com.lezi.babylog.sync.session.ShallowSyncState
 import com.google.common.truth.Truth.assertThat
@@ -131,6 +133,30 @@ import com.lezi.babylog.sync.session.SESSION_BARRIER_WAIT_MILLIS
 // Split from RealSyncPortTest kitchen sink by contract cluster (ticket 05).
 class RealSyncPortDisasterRestoreTest {
     @Test
+    fun legacyPendingRestoreWithoutImmutableSnapshotPreservesCheckpointAndToken() = runTest {
+        val original = joinedSession("family-a")
+        val rig = SyncRig(original)
+        rig.awaitStartupRecovery()
+        rig.preferences.saveDisasterRestoreCheckpoint(
+            DisasterRestoreCheckpoint(
+                batchId = "retired-batch",
+                endpoint = TrustedEndpointProfile.systemPki("https://replacement.example.test"),
+                familyId = original.familyId,
+                startRequestId = "start", manifestRequestId = "manifest", commitRequestId = "commit",
+                expiresAtEpochSeconds = 9_999_999_999, status = "ready_to_commit", entityVersions = emptyList(),
+            ),
+            "recovery-token-secret",
+        )
+        rig.backend.disasterRestoreStatusFailure = SyncHttpException(401)
+
+        assertThat(rig.port.resumeDisasterRecovery().isFailure).isTrue()
+
+        assertThat(rig.preferences.disasterRestoreCheckpoint.first()?.batchId).isEqualTo("retired-batch")
+        assertThat(rig.preferences.disasterRestoreToken()).isEqualTo("recovery-token-secret")
+        assertThat(rig.preferences.current()).isEqualTo(original)
+    }
+
+    @Test
     fun disasterRestoreStartClientUpdateRequiredPublishesForceShellAndCandidateLanInvite() =
         runTest {
             val candidate = TrustedEndpointProfile.systemPki(
@@ -140,12 +166,12 @@ class RealSyncPortDisasterRestoreTest {
                 session = joinedSession("family-a"),
                 clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
                 setupProbe = SetupProbe { _, trusted ->
-                    SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Empty)
+                    SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Empty, setOf("nursing_plan_intent_v1", "restore_authority_v1"))
                 },
             )
             rig.awaitStartupRecovery()
             // Snapshot builder requires at least one baby before the network start call.
-            rig.babies.seed(localBaby())
+            rig.babies.seed(restoreBaby())
             // Empty restore candidate gates writes with the same client_update_required floor
             // as sync; no joined session on that origin → PackageUnknown + 8767 guidance.
             rig.backend.disasterRestoreStartFailure = SyncHttpException(
@@ -183,23 +209,25 @@ class RealSyncPortDisasterRestoreTest {
         val rig = SyncRig(
             session = joinedSession("family-a"),
             setupProbe = SetupProbe { _, trusted ->
-                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Empty)
+                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Empty, setOf("nursing_plan_intent_v1", "restore_authority_v1"))
             },
         )
         rig.awaitStartupRecovery()
         val oldSession = rig.preferences.current()
         val oldEndpoint = rig.preferences.verifiedEndpoint.first()
-        val babyId = rig.babies.seed(localBaby())
+        rig.mediaFiles.seedReadableSource("records/media-local.jpg", byteArrayOf(1))
+        val babyId = rig.babies.seed(restoreBaby())
         val recordId = rig.records.seed(
-            localRecord(babyId).copy(createdByMembershipId = oldSession.membershipId),
+            restoreRecord(babyId).copy(createdByMembershipId = oldSession.membershipId),
         )
-        rig.carePlans.seed(localCarePlan(babyId))
+        rig.carePlans.seed(restorePlan(babyId))
         rig.media.seed(
             MediaAssetEntity(
                 recordId = recordId,
-                clientUuid = "media-local",
+                clientUuid = "dea9e1e4-6f2c-56fe-9eeb-69d394a414b9",
                 kind = "log",
                 localUri = "records/media-local.jpg",
+                mime = "image/jpeg",
                 createdAt = 120,
                 updatedAt = 120,
             ),
@@ -230,21 +258,21 @@ class RealSyncPortDisasterRestoreTest {
         assertThat(rig.backend.disasterRestoreManifestMedia.single().single())
             .isEqualTo(
                 DisasterRestoreMediaSpec(
-                    clientUuid = "media-local",
+                    clientUuid = "dea9e1e4-6f2c-56fe-9eeb-69d394a414b9",
                     byteSize = 1,
                     sha256 =
                         "4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a",
                 ),
             )
-        assertThat(rig.backend.disasterRestoreMediaUuids).containsExactly("media-local")
+        assertThat(rig.backend.disasterRestoreMediaUuids).containsExactly("dea9e1e4-6f2c-56fe-9eeb-69d394a414b9")
         assertThat(rig.preferences.disasterRestoreCheckpoint.first()).isNotNull()
         assertThat(rig.preferences.disasterRestoreToken()).isEqualTo("recovery-token-secret")
 
         // Nursing work remains Room-first while media uploads. This row was not in the immutable
         // restore manifest and must survive endpoint activation as a publishable local change.
         rig.records.seed(
-            localRecord(babyId).copy(
-                clientUuid = "record-after-restore-start",
+            restoreRecord(babyId).copy(
+                clientUuid = "25d29265-5848-5b4d-9850-c73937f9b37b",
                 timestamp = 130,
                 updatedAt = 130,
                 createdByMembershipId = oldSession.membershipId,
@@ -252,22 +280,22 @@ class RealSyncPortDisasterRestoreTest {
         )
         val committed = rig.port.commitDisasterRecovery("commit-root-secret").getOrThrow()
 
-        assertThat(committed.session.familyId).isEqualTo(oldSession.familyId)
-        assertThat(committed.session.membershipId).isEqualTo("restored-owner-membership")
+        assertThat(committed.sessionPresentation.familyId).isEqualTo(oldSession.familyId)
+        assertThat(committed.sessionPresentation.membershipId).isEqualTo("restored-owner-membership")
         assertThat(rig.preferences.current().copy(lastSuccessAt = committed.session.lastSuccessAt))
             .isEqualTo(committed.session)
         assertThat(rig.preferences.verifiedEndpoint.first()).isEqualTo(candidate)
-        assertThat(rig.records.getByClientUuid("record-local")?.createdByMembershipId)
+        assertThat(rig.records.getByClientUuid("2f4f4d56-8341-564f-98fa-35ee35d1953d")?.createdByMembershipId)
             .isEqualTo("restored-owner-membership")
-        assertThat(rig.records.getByClientUuid("record-local")?.syncDirty).isFalse()
-        assertThat(rig.carePlans.getByClientUuid("plan-local")?.createdByMembershipId)
+        assertThat(rig.records.getByClientUuid("2f4f4d56-8341-564f-98fa-35ee35d1953d")?.syncDirty).isFalse()
+        assertThat(rig.carePlans.getByClientUuid("34adcf3a-2557-5e24-9343-262efd166122")?.createdByMembershipId)
             .isEqualTo("restored-owner-membership")
-        assertThat(rig.carePlans.getByClientUuid("plan-local")?.syncDirty).isFalse()
-        assertThat(rig.media.getByClientUuid("media-local")?.remoteUri).isNotNull()
-        assertThat(rig.media.getByClientUuid("media-local")?.syncDirty).isFalse()
-        assertThat(rig.records.getByClientUuid("record-after-restore-start")?.createdByMembershipId)
+        assertThat(rig.carePlans.getByClientUuid("34adcf3a-2557-5e24-9343-262efd166122")?.syncDirty).isFalse()
+        assertThat(rig.media.getByClientUuid("dea9e1e4-6f2c-56fe-9eeb-69d394a414b9")?.remoteUri).isNotNull()
+        assertThat(rig.media.getByClientUuid("dea9e1e4-6f2c-56fe-9eeb-69d394a414b9")?.syncDirty).isFalse()
+        assertThat(rig.records.getByClientUuid("25d29265-5848-5b4d-9850-c73937f9b37b")?.createdByMembershipId)
             .isEqualTo("restored-owner-membership")
-        assertThat(rig.records.getByClientUuid("record-after-restore-start")?.syncDirty).isTrue()
+        assertThat(rig.records.getByClientUuid("25d29265-5848-5b4d-9850-c73937f9b37b")?.syncDirty).isTrue()
         assertThat(rig.backend.disasterRestoreCommitRootPasswords)
             .containsExactly("commit-root-secret")
         assertThat(rig.preferences.disasterRestoreCheckpoint.first()).isNull()
@@ -353,26 +381,26 @@ class RealSyncPortDisasterRestoreTest {
         val rig = SyncRig(
             session = joinedSession("family-a"),
             setupProbe = SetupProbe { _, trusted ->
-                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Empty)
+                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Empty, setOf("nursing_plan_intent_v1", "restore_authority_v1"))
             },
         )
         rig.awaitStartupRecovery()
-        val babyId = rig.babies.seed(localBaby())
+        val babyId = rig.babies.seed(restoreBaby())
         rig.records.seed(
-            localRecord(babyId).copy(
-                clientUuid = "sleep-local",
+            restoreRecord(babyId).copy(
+                clientUuid = "d1067da9-3a1f-5acc-a3b3-1547f61874f7",
                 type = "sleep",
                 timestamp = 1_000,
                 payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
                 updatedAt = 1_000,
-                effectiveWakeObservationClientUuid = "wake-local",
+                effectiveWakeObservationClientUuid = "867b3b2b-ab0d-5bb2-9737-e9f140e6a19d",
                 createdByMembershipId = rig.preferences.current().membershipId,
             ),
         )
         val wakeId = rig.wakeObservations.seed(
             WakeObservationEntity(
-                clientUuid = "wake-local",
-                sleepRecordClientUuid = "sleep-local",
+                clientUuid = "867b3b2b-ab0d-5bb2-9737-e9f140e6a19d",
+                sleepRecordClientUuid = "d1067da9-3a1f-5acc-a3b3-1547f61874f7",
                 wakeTimestamp = 1_500,
                 observerMembershipId = "member-local",
                 note = null,
@@ -382,19 +410,21 @@ class RealSyncPortDisasterRestoreTest {
         )
         rig.wakeObservations.seed(
             WakeObservationEntity(
-                clientUuid = "wake-deleted",
-                sleepRecordClientUuid = "sleep-local",
+                clientUuid = "08d34967-af8b-573e-a9ed-bd64c9acdd59",
+                sleepRecordClientUuid = "d1067da9-3a1f-5acc-a3b3-1547f61874f7",
                 wakeTimestamp = 1_600,
                 updatedAt = 1_600,
                 deletedAt = 1_600,
             ),
         )
+        rig.mediaFiles.seedReadableSource("records/wake-media-local.jpg", byteArrayOf(1))
         rig.media.seed(
             MediaAssetEntity(
                 wakeObservationId = wakeId,
-                clientUuid = "wake-media-local",
+                clientUuid = "d1367bbe-fe4a-5ccc-8792-aacd56afe1c4",
                 kind = "wake",
                 localUri = "records/wake-media-local.jpg",
+                mime = "image/jpeg",
                 createdAt = 1_500,
                 updatedAt = 1_500,
             ),
@@ -410,10 +440,10 @@ class RealSyncPortDisasterRestoreTest {
         assertThat(staged.status).isEqualTo("ready_to_commit")
         val entities = rig.backend.disasterRestoreManifestEntities.single()
         assertThat(entities.map { it.type to it.clientUuid }).containsAtLeast(
-            "wake_observation" to "wake-local",
-            "media" to "wake-media-local",
+            "wake_observation" to "867b3b2b-ab0d-5bb2-9737-e9f140e6a19d",
+            "media" to "d1367bbe-fe4a-5ccc-8792-aacd56afe1c4",
         )
-        assertThat(entities.map { it.clientUuid }).doesNotContain("wake-deleted")
+        assertThat(entities.map { it.clientUuid }).doesNotContain("08d34967-af8b-573e-a9ed-bd64c9acdd59")
         val wakePayload = Json.parseToJsonElement(
             entities.single { it.type == "wake_observation" }.payloadJson,
         ).jsonObject
@@ -425,27 +455,32 @@ class RealSyncPortDisasterRestoreTest {
             "observer_membership_id",
         ).inOrder()
         assertThat(wakePayload.getValue("sleep_record_client_uuid").jsonPrimitive.content)
-            .isEqualTo("sleep-local")
+            .isEqualTo("d1067da9-3a1f-5acc-a3b3-1547f61874f7")
         assertThat(wakePayload.getValue("wake_timestamp").jsonPrimitive.longOrNull).isEqualTo(1_500)
         assertThat(wakePayload.getValue("note")).isEqualTo(JsonNull)
         assertThat(wakePayload.getValue("withdrawn").jsonPrimitive.content).isEqualTo("false")
         val mediaPayload = Json.parseToJsonElement(
-            entities.single { it.clientUuid == "wake-media-local" }.payloadJson,
+            entities.single { it.clientUuid == "d1367bbe-fe4a-5ccc-8792-aacd56afe1c4" }.payloadJson,
         ).jsonObject
         assertThat(mediaPayload.getValue("kind").jsonPrimitive.content).isEqualTo("wake")
         // Pull reuses record_client_uuid for the WakeObservation, not the sleep record.
         assertThat(mediaPayload.getValue("record_client_uuid").jsonPrimitive.content)
-            .isEqualTo("wake-local")
+            .isEqualTo("867b3b2b-ab0d-5bb2-9737-e9f140e6a19d")
         assertThat(mediaPayload.getValue("care_plan_client_uuid")).isEqualTo(JsonNull)
         assertThat(mediaPayload.getValue("baby_client_uuid")).isEqualTo(JsonNull)
-        val wakeVersions = rig.preferences.disasterRestoreCheckpoint.first()!!
-            .entityVersions
-            .filter { it.type == "wake_observation" }
+        val wakeCheckpoint = requireNotNull(rig.preferences.disasterRestoreCheckpoint.first())
+        assertThat(wakeCheckpoint.entityVersions).isEmpty()
+        val wakeVersions = com.lezi.babylog.sync.disasterrecovery.RestoreSnapshotJournal(
+            rig.conflictDetails, rig.immutableMediaSpool, rig.transactions,
+            com.lezi.babylog.sync.disasterrecovery.RestoreFileSnapshotStore(java.io.File(rig.appUpdateCacheDir, "restore-snapshots")),
+        ).load(wakeCheckpoint.startRequestId).use { snapshot ->
+            snapshot.retirementVersions.filter { it.type == "wake_observation" }
+        }
         assertThat(wakeVersions.map { it.clientUuid to it.restored }).containsExactly(
-            "wake-local" to true,
-            "wake-deleted" to false,
+            "867b3b2b-ab0d-5bb2-9737-e9f140e6a19d" to true,
+            "08d34967-af8b-573e-a9ed-bd64c9acdd59" to false,
         ).inOrder()
-        assertThat(rig.backend.disasterRestoreMediaUuids).containsExactly("wake-media-local")
+        assertThat(rig.backend.disasterRestoreMediaUuids).containsExactly("d1367bbe-fe4a-5ccc-8792-aacd56afe1c4")
     }
 
     @Test
@@ -454,29 +489,29 @@ class RealSyncPortDisasterRestoreTest {
         val rig = SyncRig(
             session = joinedSession("family-a"),
             setupProbe = SetupProbe { _, trusted ->
-                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Empty)
+                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Empty, setOf("nursing_plan_intent_v1", "restore_authority_v1"))
             },
         )
         rig.awaitStartupRecovery()
-        val babyId = rig.babies.seed(localBaby())
+        val babyId = rig.babies.seed(restoreBaby())
         // The sleep is tombstoned but a live wake still points at it — the
         // converged replica state after a sleep delete. The export must keep
         // succeeding and drop the wake plus its photo.
         rig.records.seed(
-            localRecord(babyId).copy(
-                clientUuid = "sleep-gone",
+            restoreRecord(babyId).copy(
+                clientUuid = "7a7cf507-7649-58d1-8707-d0eeedd7a963",
                 type = "sleep",
                 timestamp = 1_000,
                 payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
                 updatedAt = 2_000,
                 deletedAt = 2_000,
-                effectiveWakeObservationClientUuid = "wake-orphan",
+                effectiveWakeObservationClientUuid = "a77f6006-9b2d-59eb-8e4d-7215aa587471",
             ),
         )
         val wakeId = rig.wakeObservations.seed(
             WakeObservationEntity(
-                clientUuid = "wake-orphan",
-                sleepRecordClientUuid = "sleep-gone",
+                clientUuid = "a77f6006-9b2d-59eb-8e4d-7215aa587471",
+                sleepRecordClientUuid = "7a7cf507-7649-58d1-8707-d0eeedd7a963",
                 wakeTimestamp = 1_500,
                 observerMembershipId = "member-local",
                 updatedAt = 1_500,
@@ -485,7 +520,7 @@ class RealSyncPortDisasterRestoreTest {
         rig.media.seed(
             MediaAssetEntity(
                 wakeObservationId = wakeId,
-                clientUuid = "wake-media-orphan",
+                clientUuid = "1dd0cc43-358e-5964-a77b-adc7b7e15eb0",
                 kind = "wake",
                 localUri = "records/wake-media-orphan.jpg",
                 createdAt = 1_500,
@@ -502,9 +537,9 @@ class RealSyncPortDisasterRestoreTest {
 
         assertThat(staged.status).isEqualTo("ready_to_commit")
         val entities = rig.backend.disasterRestoreManifestEntities.single()
-        assertThat(entities.map { it.clientUuid }).doesNotContain("wake-orphan")
-        assertThat(entities.map { it.clientUuid }).doesNotContain("wake-media-orphan")
-        assertThat(rig.backend.disasterRestoreMediaUuids).doesNotContain("wake-media-orphan")
+        assertThat(entities.map { it.clientUuid }).doesNotContain("a77f6006-9b2d-59eb-8e4d-7215aa587471")
+        assertThat(entities.map { it.clientUuid }).doesNotContain("1dd0cc43-358e-5964-a77b-adc7b7e15eb0")
+        assertThat(rig.backend.disasterRestoreMediaUuids).doesNotContain("1dd0cc43-358e-5964-a77b-adc7b7e15eb0")
     }
 
     @Test
@@ -513,18 +548,18 @@ class RealSyncPortDisasterRestoreTest {
         val rig = SyncRig(
             session = joinedSession("family-a"),
             setupProbe = SetupProbe { _, trusted ->
-                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Empty)
+                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Empty, setOf("nursing_plan_intent_v1", "restore_authority_v1"))
             },
         )
         rig.awaitStartupRecovery()
-        val babyId = rig.babies.seed(localBaby())
+        val babyId = rig.babies.seed(restoreBaby())
         // The custom item was deleted while a record still referenced it — the
         // converged replica state after an ordinary custom-item delete. The
         // export must keep succeeding and the record rides with the dangling
         // reference stripped.
         val tombstonedItemId = rig.customItems.seed(
             CustomItemEntity(
-                clientUuid = "item-gone",
+                clientUuid = "4378c977-c4cb-5911-9d3d-ddf3d1f69008",
                 familyId = 1L,
                 name = "已删项目",
                 iconSlot = 0,
@@ -533,8 +568,8 @@ class RealSyncPortDisasterRestoreTest {
             ),
         )
         rig.records.seed(
-            localRecord(babyId).copy(
-                clientUuid = "record-dangling-item",
+            restoreRecord(babyId).copy(
+                clientUuid = "b46313ad-e771-5364-be87-13ad9859f6d5",
                 type = "custom",
                 timestamp = 1_000,
                 payloadJson = """{"title":"抚触","custom_item_id":$tombstonedItemId}""",
@@ -547,7 +582,7 @@ class RealSyncPortDisasterRestoreTest {
         // plan must ride as missed with the fulfillment pair stripped.
         val liveItemId = rig.customItems.seed(
             CustomItemEntity(
-                clientUuid = "item-live",
+                clientUuid = "8e042812-7fd7-5463-9bb7-04feb0cbf307",
                 familyId = 1L,
                 name = "存活项目",
                 iconSlot = 1,
@@ -556,7 +591,7 @@ class RealSyncPortDisasterRestoreTest {
         )
         rig.carePlans.seed(
             CarePlanEntity(
-                clientUuid = "plan-fulfilled-by-excluded",
+                clientUuid = "9e2aa3ef-22ec-548d-a706-0c8583bb1278",
                 babyId = babyId,
                 type = "custom",
                 customItemId = liveItemId,
@@ -564,7 +599,7 @@ class RealSyncPortDisasterRestoreTest {
                 scheduledZoneId = "Asia/Shanghai",
                 payloadJson = """{"title":"抚触","custom_item_id":$liveItemId,"icon_slot":1}""",
                 status = "completed",
-                fulfilledRecordClientUuid = "record-dangling-item",
+                fulfilledRecordClientUuid = "b46313ad-e771-5364-be87-13ad9859f6d5",
                 fulfilledAt = 1_000,
                 updatedAt = 1_000,
             ),
@@ -582,23 +617,28 @@ class RealSyncPortDisasterRestoreTest {
         // A custom record cannot ride the wire without its definition; the
         // record is excluded (export still succeeds) rather than failing the
         // whole family backup.
-        assertThat(entities.map { it.clientUuid }).doesNotContain("record-dangling-item")
+        assertThat(entities.map { it.clientUuid }).doesNotContain("b46313ad-e771-5364-be87-13ad9859f6d5")
         val planPayload = Json.parseToJsonElement(
-            entities.single { it.clientUuid == "plan-fulfilled-by-excluded" }.payloadJson,
+            entities.single { it.clientUuid == "9e2aa3ef-22ec-548d-a706-0c8583bb1278" }.payloadJson,
         ).jsonObject
         assertThat(planPayload.getValue("status").jsonPrimitive.content).isEqualTo("missed")
         assertThat(planPayload.getValue("fulfilled_record_client_uuid")).isEqualTo(JsonNull)
         assertThat(planPayload.getValue("fulfilled_at")).isEqualTo(JsonNull)
         // Excluded live rows must not claim publication in the retirement
         // receipts; the included plan does.
-        val versions = rig.preferences.disasterRestoreCheckpoint.first()!!.entityVersions
+        val checkpoint = requireNotNull(rig.preferences.disasterRestoreCheckpoint.first())
+        assertThat(checkpoint.entityVersions).isEmpty() // Full evidence belongs to the immutable file.
+        val versions = com.lezi.babylog.sync.disasterrecovery.RestoreSnapshotJournal(
+            rig.conflictDetails, rig.immutableMediaSpool, rig.transactions,
+            com.lezi.babylog.sync.disasterrecovery.RestoreFileSnapshotStore(java.io.File(rig.appUpdateCacheDir, "restore-snapshots")),
+        ).load(checkpoint.startRequestId).use { it.retirementVersions }
         assertThat(
-            versions.single { it.type == "record" && it.clientUuid == "record-dangling-item" }
+            versions.single { it.type == "record" && it.clientUuid == "b46313ad-e771-5364-be87-13ad9859f6d5" }
                 .restored,
         ).isFalse()
         assertThat(
             versions.single {
-                it.type == "care_plan" && it.clientUuid == "plan-fulfilled-by-excluded"
+                it.type == "care_plan" && it.clientUuid == "9e2aa3ef-22ec-548d-a706-0c8583bb1278"
             }.restored,
         ).isTrue()
     }
@@ -609,14 +649,14 @@ class RealSyncPortDisasterRestoreTest {
         val rig = SyncRig(
             session = joinedSession("family-a"),
             setupProbe = SetupProbe { _, trusted ->
-                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Empty)
+                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Empty, setOf("nursing_plan_intent_v1", "restore_authority_v1"))
             },
         )
         rig.awaitStartupRecovery()
-        val babyId = rig.babies.seed(localBaby())
+        val babyId = rig.babies.seed(restoreBaby())
         rig.records.seed(
-            localRecord(babyId).copy(
-                clientUuid = "sleep-local",
+            restoreRecord(babyId).copy(
+                clientUuid = "d1067da9-3a1f-5acc-a3b3-1547f61874f7",
                 type = "sleep",
                 timestamp = 1_000,
                 payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
@@ -626,8 +666,8 @@ class RealSyncPortDisasterRestoreTest {
         )
         rig.wakeObservations.seed(
             WakeObservationEntity(
-                clientUuid = "wake-live",
-                sleepRecordClientUuid = "sleep-local",
+                clientUuid = "c65fa5ee-3b53-5feb-ae81-f9db4abc8589",
+                sleepRecordClientUuid = "d1067da9-3a1f-5acc-a3b3-1547f61874f7",
                 wakeTimestamp = 1_500,
                 observerMembershipId = "member-local",
                 updatedAt = 1_500,
@@ -636,8 +676,8 @@ class RealSyncPortDisasterRestoreTest {
         )
         rig.wakeObservations.seed(
             WakeObservationEntity(
-                clientUuid = "wake-during-upload",
-                sleepRecordClientUuid = "sleep-local",
+                clientUuid = "04d88fff-a45e-50ba-99dd-830cfeccde84",
+                sleepRecordClientUuid = "d1067da9-3a1f-5acc-a3b3-1547f61874f7",
                 wakeTimestamp = 1_600,
                 observerMembershipId = "member-local",
                 updatedAt = 1_600,
@@ -652,7 +692,7 @@ class RealSyncPortDisasterRestoreTest {
             rootPassword = "start-root-secret",
         ).getOrThrow()
         val duringUpload = requireNotNull(
-            rig.wakeObservations.getByClientUuid("wake-during-upload"),
+            rig.wakeObservations.getByClientUuid("04d88fff-a45e-50ba-99dd-830cfeccde84"),
         )
         rig.wakeObservations.update(
             duringUpload.copy(
@@ -663,14 +703,14 @@ class RealSyncPortDisasterRestoreTest {
 
         val committed = rig.port.commitDisasterRecovery("commit-root-secret").getOrThrow()
 
-        assertThat(committed.session.membershipId).isEqualTo("restored-owner-membership")
-        with(requireNotNull(rig.wakeObservations.getByClientUuid("wake-live"))) {
+        assertThat(committed.sessionPresentation.membershipId).isEqualTo("restored-owner-membership")
+        with(requireNotNull(rig.wakeObservations.getByClientUuid("c65fa5ee-3b53-5feb-ae81-f9db4abc8589"))) {
             assertThat(syncDirty).isFalse()
             assertThat(observerMembershipId).isEqualTo("restored-owner-membership")
             assertThat(familyPublishedUpdatedAt).isEqualTo(1_500)
             assertThat(updatedAt).isEqualTo(1_500)
         }
-        with(requireNotNull(rig.wakeObservations.getByClientUuid("wake-during-upload"))) {
+        with(requireNotNull(rig.wakeObservations.getByClientUuid("04d88fff-a45e-50ba-99dd-830cfeccde84"))) {
             assertThat(syncDirty).isTrue()
             assertThat(observerMembershipId).isEqualTo("restored-owner-membership")
             assertThat(updatedAt).isEqualTo(1_640)
@@ -683,20 +723,22 @@ class RealSyncPortDisasterRestoreTest {
         val rig = SyncRig(
             session = joinedSession("family-a"),
             setupProbe = SetupProbe { _, trusted ->
-                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Empty)
+                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Empty, setOf("nursing_plan_intent_v1", "restore_authority_v1"))
             },
         )
         rig.awaitStartupRecovery()
-        val babyId = rig.babies.seed(localBaby())
+        val babyId = rig.babies.seed(restoreBaby())
         val recordId = rig.records.seed(
-            localRecord(babyId).copy(createdByMembershipId = rig.preferences.current().membershipId),
+            restoreRecord(babyId).copy(createdByMembershipId = rig.preferences.current().membershipId),
         )
+        rig.mediaFiles.seedReadableSource("records/media-local.jpg", byteArrayOf(1))
         rig.media.seed(
             MediaAssetEntity(
                 recordId = recordId,
-                clientUuid = "media-local",
+                clientUuid = "dea9e1e4-6f2c-56fe-9eeb-69d394a414b9",
                 kind = "log",
                 localUri = "records/media-local.jpg",
+                mime = "image/jpeg",
                 createdAt = 120,
                 updatedAt = 120,
             ),
@@ -704,4 +746,7 @@ class RealSyncPortDisasterRestoreTest {
         return rig
     }
 
+    private fun restoreBaby() = localBaby().copy(clientUuid = "7e4ec4b9-91a1-5794-84bd-33613bcf9189")
+    private fun restoreRecord(babyId: Long) = localRecord(babyId).copy(clientUuid = "2f4f4d56-8341-564f-98fa-35ee35d1953d")
+    private fun restorePlan(babyId: Long) = localCarePlan(babyId).copy(clientUuid = "34adcf3a-2557-5e24-9343-262efd166122")
 }

@@ -93,6 +93,8 @@ class FamilyNetworkSettingsActions(
         deviceName: String,
     ) = sync.requestReconnectMember(endpoint, displayName, deviceName)
 
+    suspend fun recoverPendingReconnectMember() = sync.recoverPendingReconnectMember()
+
     suspend fun checkReconnectMember() = sync.checkReconnectMember()
 
     suspend fun cancelReconnectMember() = sync.cancelReconnectMember()
@@ -112,6 +114,7 @@ class FamilyNetworkSettingsActions(
     )
 
     suspend fun resumeDisasterRecovery() = sync.resumeDisasterRecovery()
+    suspend fun retryDisasterRecoveryStart(password: String) = sync.retryDisasterRecoveryStart(password)
 
     suspend fun commitDisasterRecovery(rootPassword: String) =
         sync.commitDisasterRecovery(rootPassword)
@@ -136,6 +139,8 @@ private data class FamilyNetworkActionState(
     val pendingMember: PendingMemberLogin? = null,
     val recoverySummary: DisasterRecoverySummary? = null,
     val recoveryStatus: String? = null,
+    val recoveryLocalActivationReady: Boolean = false,
+    val recoveryRetainedStart: com.lezi.babylog.sync.DisasterRecoveryStartPreview? = null,
     val recoveryExpiresAtEpochSeconds: Long? = null,
     val failureKind: FailureKind? = null,
 )
@@ -155,15 +160,22 @@ data class FamilyNetworkSettingsUi(
     val pendingMember: PendingMemberLogin? = null,
     val recoverySummary: DisasterRecoverySummary? = null,
     val recoveryStatus: String? = null,
+    val recoveryLocalActivationReady: Boolean = false,
+    val recoveryRetainedStart: com.lezi.babylog.sync.DisasterRecoveryStartPreview? = null,
     val recoveryExpiresAtEpochSeconds: Long? = null,
     val trustRecoveryRequired: Boolean = false,
     val failureKind: FailureKind? = null,
 )
 
+internal fun canCheckPendingReconnect(ui: FamilyNetworkSettingsUi): Boolean =
+    !ui.busy && ui.pendingMember != null && !ui.pendingMember.remoteOutcomeUnknown
+
 internal fun canCancelDisasterRecovery(ui: FamilyNetworkSettingsUi): Boolean =
-    ui.recoveryStatus != null &&
-        ui.recoveryStatus != "committed" &&
-        (ui.recoveryStatus != "summary_ready" || ui.disasterRecoveryBusy)
+    ui.recoveryStatus != null && ui.recoveryStatus != "committed"
+
+internal fun canCommitDisasterRecovery(ui: FamilyNetworkSettingsUi, password: String): Boolean =
+    !ui.busy && (ui.recoveryLocalActivationReady ||
+        (ui.recoveryStatus in setOf("ready_to_commit", "committed") && password.isNotBlank()))
 
 @HiltViewModel
 class FamilyNetworkSettingsHost @Inject constructor(
@@ -184,7 +196,7 @@ class FamilyNetworkSettingsHost @Inject constructor(
     }
 
     val ui: StateFlow<FamilyNetworkSettingsUi> = combine(
-        sync.session(),
+        sync.sessionPresentation(),
         sync.verifiedEndpoint(),
         availabilitySurface,
         actionState,
@@ -204,6 +216,8 @@ class FamilyNetworkSettingsHost @Inject constructor(
             pendingMember = action.pendingMember,
             recoverySummary = action.recoverySummary,
             recoveryStatus = action.recoveryStatus,
+            recoveryLocalActivationReady = action.recoveryLocalActivationReady,
+            recoveryRetainedStart = action.recoveryRetainedStart,
             recoveryExpiresAtEpochSeconds = action.recoveryExpiresAtEpochSeconds,
             trustRecoveryRequired = availability.trustRecoveryRequired,
             failureKind = action.failureKind,
@@ -220,10 +234,31 @@ class FamilyNetworkSettingsHost @Inject constructor(
         }
         refreshAvailability()
         launchBusy {
-            actions.resumeDisasterRecovery().getOrNull()?.let { progress ->
+            actions.recoverPendingReconnectMember().getOrNull()?.let { pending ->
+                actionState.value = actionState.value.copy(
+                    pendingMember = pending,
+                    endpointDraft = pending.endpointOrigin,
+                    feedback = if (pending.remoteOutcomeUnknown) {
+                        com.lezi.babylog.sync.MemberLoginOutcomeUnknownException(pending).message
+                    } else "已恢复原候选服务器申请，等待管理员确认",
+                )
+            }
+            val recovery = actions.resumeDisasterRecovery()
+            recovery.exceptionOrNull()?.let { failure ->
+                if (failure !is com.lezi.babylog.sync.NoPendingDisasterRecoveryException &&
+                    failure !is com.lezi.babylog.sync.SyncNotEnabledException) {
+                    return@launchBusy actionState.value.withNetworkFailure(failure).copy(
+                        recoveryStatus = "repair_required", recoveryLocalActivationReady = false,
+                        feedback = "原快照已保留，请按恢复状态说明处理后重试；不要清除原数据",
+                    )
+                }
+            }
+            recovery.getOrNull()?.let { progress ->
                 return@launchBusy actionState.value.copy(
                     recoverySummary = progress.summary,
                     recoveryStatus = progress.status,
+                    recoveryLocalActivationReady = progress.localActivationReady,
+                    recoveryRetainedStart = progress.retainedStart,
                     recoveryExpiresAtEpochSeconds = progress.expiresAtEpochSeconds,
                     feedback = "已找到可继续的家庭恢复批次",
                 )
@@ -237,7 +272,6 @@ class FamilyNetworkSettingsHost @Inject constructor(
             endpointDraft = value,
             candidate = null,
             feedback = null,
-            pendingMember = null,
             failureKind = null,
         )
     }
@@ -265,7 +299,7 @@ class FamilyNetworkSettingsHost @Inject constructor(
             onSuccess = {
                 actionState.value.copy(
                     candidate = null,
-                    endpointDraft = it.session.baseUrl,
+                    endpointDraft = it.sessionPresentation.baseUrl,
                     feedback = "家庭服务器地址已更新",
                 )
             },
@@ -280,7 +314,8 @@ class FamilyNetworkSettingsHost @Inject constructor(
             onSuccess = {
                 actionState.value.copy(
                     pendingMember = it,
-                    feedback = "加入申请已提交，等待管理员确认",
+                    feedback = if (it.remoteOutcomeUnknown) com.lezi.babylog.sync.MemberLoginOutcomeUnknownException(it).message
+                    else "加入申请已提交，等待管理员确认",
                 )
             },
             onFailure = { actionState.value.withNetworkFailure(it) },
@@ -299,7 +334,7 @@ class FamilyNetworkSettingsHost @Inject constructor(
                     is MemberLoginCheckResult.Joined -> actionState.value.copy(
                         candidate = null,
                         pendingMember = null,
-                        endpointDraft = result.session.baseUrl,
+                        endpointDraft = result.sessionPresentation.baseUrl,
                         feedback = "家庭服务器地址已更新",
                     )
                     is MemberLoginCheckResult.Terminal -> actionState.value.copy(
@@ -315,18 +350,22 @@ class FamilyNetworkSettingsHost @Inject constructor(
     fun cancelReconnectMember() = launchBusy {
         actions.cancelReconnectMember().fold(
             onSuccess = {
-                actionState.value.copy(pendingMember = null, feedback = "已取消候选服务器申请")
+                actionState.value.copy(pendingMember = null, feedback = "已在这台设备放弃等待；不代表服务器申请已取消")
             },
             onFailure = { actionState.value.withNetworkFailure(it) },
         )
     }
 
     fun prepareDisasterRecovery() = launchBusy {
+        if (actionState.value.recoveryStatus in setOf("start_unknown", "repair_required", "committed", "ready_to_commit", "started", "manifest_received")) {
+            return@launchBusy actionState.value.copy(feedback = "请先继续或处理原恢复批次；原快照不会被新的摘要替换")
+        }
         actions.prepareDisasterRecovery().fold(
             onSuccess = { summary ->
                 actionState.value.copy(
                     recoverySummary = summary,
                     recoveryStatus = "summary_ready",
+                    recoveryLocalActivationReady = false,
                     feedback = "请核对恢复摘要，再输入新服务器根密码",
                 )
             },
@@ -341,18 +380,20 @@ class FamilyNetworkSettingsHost @Inject constructor(
     ) = launchBusy(
         disasterRecovery = true,
     ) {
-        val endpoint = (actionState.value.candidate as? FamilyNetworkCandidate.Ready)?.endpoint
-            ?: return@launchBusy actionState.value.copy(feedback = "请先检查空服务器地址")
-        actions.startDisasterRecovery(
-            endpoint,
-            ownerDisplayName,
-            deviceName,
-            rootPassword,
-        ).fold(
+        val result = if (actionState.value.recoveryStatus == "start_unknown") {
+            actions.retryDisasterRecoveryStart(rootPassword)
+        } else {
+            val endpoint = (actionState.value.candidate as? FamilyNetworkCandidate.Ready)?.endpoint
+                ?: return@launchBusy actionState.value.copy(feedback = "请先检查空服务器地址；已有快照会继续保留")
+            actions.startDisasterRecovery(endpoint, ownerDisplayName, deviceName, rootPassword)
+        }
+        result.fold(
             onSuccess = { progress ->
                 actionState.value.copy(
                     recoverySummary = progress.summary ?: actionState.value.recoverySummary,
                     recoveryStatus = progress.status,
+                    recoveryLocalActivationReady = progress.localActivationReady,
+                    recoveryRetainedStart = progress.retainedStart,
                     recoveryExpiresAtEpochSeconds = progress.expiresAtEpochSeconds,
                     feedback = "本机数据和照片已完整暂存，等待最终确认",
                 )
@@ -368,9 +409,10 @@ class FamilyNetworkSettingsHost @Inject constructor(
             onSuccess = { result ->
                 actionState.value.copy(
                     candidate = null,
-                    endpointDraft = result.session.baseUrl,
+                    endpointDraft = result.sessionPresentation.baseUrl,
                     recoverySummary = null,
                     recoveryStatus = null,
+                    recoveryLocalActivationReady = false,
                     recoveryExpiresAtEpochSeconds = null,
                     feedback = "家庭已从本机恢复，当前设备成为新管理员",
                 )
@@ -389,6 +431,7 @@ class FamilyNetworkSettingsHost @Inject constructor(
                 actionState.value.copy(
                     recoverySummary = null,
                     recoveryStatus = null,
+                    recoveryLocalActivationReady = false,
                     recoveryExpiresAtEpochSeconds = null,
                     feedback = "已取消家庭恢复批次",
                     failureKind = null,

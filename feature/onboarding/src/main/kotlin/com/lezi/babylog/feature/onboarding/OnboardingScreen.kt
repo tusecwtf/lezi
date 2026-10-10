@@ -111,6 +111,7 @@ private val FamilyEndpointDraftSaver = listSaver<FamilyEndpointDraft, String>(
 fun OnboardingRoute(
     onFinished: () -> Unit,
     vm: OnboardingViewModel = hiltViewModel(),
+    recoveryOnly: Boolean = false,
 ) {
     val context = LocalContext.current
     var step by rememberSaveable { mutableStateOf(OnboardingStep.ChooseFamily) }
@@ -371,7 +372,9 @@ fun OnboardingRoute(
                     },
                 )
             }
-            OnboardingStep.CreateFamily -> {
+            OnboardingStep.CreateFamily -> if (recoveryOnly) {
+                Text("请先完成更新，再创建家庭")
+            } else {
                 OnboardingCreateFamilyStep(
                     verifiedOrigin = verifiedEndpoint?.origin,
                     createFamilyName = createFamilyName,
@@ -415,7 +418,9 @@ fun OnboardingRoute(
                     },
                 )
             }
-            OnboardingStep.CreateBaby -> {
+            OnboardingStep.CreateBaby -> if (recoveryOnly) {
+                Text("请先完成更新，再添加宝宝")
+            } else {
                 val createBabySource = onboardingCreateBabySource(familyWizardState)
                 OnboardingCreateBabyStep(
                     createBabySource = createBabySource,

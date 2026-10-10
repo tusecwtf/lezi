@@ -1,4 +1,5 @@
 package com.lezi.babylog.domain
+import com.lezi.babylog.sync.session.toPresentation
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.BabyEntity
@@ -288,11 +289,11 @@ internal class Fakes(
     val carePlans = FakeCarePlanDao()
     val customItems = FakeCustomItemDao()
     val media = FakeMediaAssetDao()
-    val timelineWindow = FakeCareReadProjectionDao(records, media, wakeObservations)
     val conflictSummaries = FakeConflictSummaryDao()
     val conflictSnapshotCache = FakeConflictSnapshotCacheDao()
     val suspectedDuplicates = FakeSuspectedDuplicateGroupDao()
     val sourceRelations = FakeSourceRelationDao()
+    val timelineWindow = FakeCareReadProjectionDao(records, media, wakeObservations, sourceRelations)
     val mediaReferences = FakeMediaReferenceDao()
     val pendingReminderCleanup = FakePendingReminderCleanupStore()
     val settings = FakeSettingsStore()
@@ -320,6 +321,7 @@ internal class Fakes(
     fun wireTransactionalSnapshots() {
         transactions.onBegin += {
             records.beginTx()
+            wakeObservations.beginTx()
             media.beginTx()
             carePlans.beginTx()
             fulfillmentCandidates.beginTx()
@@ -327,6 +329,7 @@ internal class Fakes(
         }
         transactions.onCommit += {
             records.commitTx()
+            wakeObservations.commitTx()
             media.commitTx()
             carePlans.commitTx()
             fulfillmentCandidates.commitTx()
@@ -334,6 +337,7 @@ internal class Fakes(
         }
         transactions.onRollback += {
             records.rollbackTx()
+            wakeObservations.rollbackTx()
             media.rollbackTx()
             carePlans.rollbackTx()
             fulfillmentCandidates.rollbackTx()
@@ -425,7 +429,24 @@ internal class FakeCareReadProjectionDao(
     private val records: FakeRecordDao,
     private val media: FakeMediaAssetDao,
     private val wakes: FakeWakeObservationDao,
+    private val sourceRelations: FakeSourceRelationDao,
 ) : TimelineWindowDao {
+    override suspend fun listWindowSourceRelations(
+        babyId: Long, startInclusive: Long, endExclusive: Long,
+    ): List<com.lezi.babylog.core.database.TimelineSourceRelation> {
+        val roots = listRecordRoots(babyId, startInclusive, endExclusive).mapTo(hashSetOf()) { it.clientUuid }
+        val relations = sourceRelations.listAll().associateBy { it.relationId }
+        val auto = sourceRelations.listAutoAlignedDisplayClientUuids().toSet()
+        return sourceRelations.listAllMembers().mapNotNull { member ->
+            val relation = relations[member.relationId] ?: return@mapNotNull null
+            if (member.recordClientUuid !in roots) return@mapNotNull null
+            com.lezi.babylog.core.database.TimelineSourceRelation(
+                member.recordClientUuid, relation.displayClientUuid, member.role,
+                member.role == "display" && member.recordClientUuid in auto,
+            )
+        }
+    }
+
     private val invalidations = MutableStateFlow(0L)
 
     override fun observeInvalidations(): Flow<Long> = invalidations
@@ -541,8 +562,8 @@ internal class FakeCareReadProjectionDao(
 
     override suspend fun listActiveLogMedia(
         babyId: Long,
-        recordStartInclusive: Long,
-        recordEndExclusive: Long,
+        startInclusive: Long,
+        endExclusive: Long,
         planDayStart: Long,
         planDayEnd: Long,
         nowMillis: Long,
@@ -827,6 +848,9 @@ internal class RecordingSyncPort(
         ),
     )
 
+    override fun sessionPresentation() = sessionState.map { it.toPresentation() }
+
+    @Deprecated("Use sessionPresentation() outside sync internals")
     override fun session(): Flow<com.lezi.babylog.sync.session.SyncSession> = sessionState
 
     fun currentSession(): com.lezi.babylog.sync.session.SyncSession = sessionState.value
@@ -1282,6 +1306,7 @@ internal class FakeCustomItemDao : CustomItemDao {
 }
 
 internal class FakeSettingsStore : SettingsStore {
+    var currentBabyWriteFailure: Throwable? = null
     private val babyId = MutableStateFlow<Long?>(null)
     private val timer = MutableStateFlow<String?>(null)
     private val dark = MutableStateFlow("system")
@@ -1328,6 +1353,7 @@ internal class FakeSettingsStore : SettingsStore {
     override val nursingTimerJson: Flow<String?> = timer
 
     override suspend fun setCurrentBabyId(id: Long?) {
+        currentBabyWriteFailure?.let { throw it }
         babyId.value = id
     }
 

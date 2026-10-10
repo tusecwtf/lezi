@@ -28,6 +28,129 @@ class FamilyNetworkSettingsHostTest {
     val mainDispatcherRule = FamilyMainDispatcherRule()
 
     @Test
+    fun recreatedHostCanCheckAKnownLiveReceiptWithoutReprobingOrSubmitting() = runTest {
+        val known = com.lezi.babylog.sync.PendingMemberLogin("server-r", "妈妈", "Phone", 20,
+            "operation-a", "https://candidate.example.com", false)
+        var checks = 0
+        val sync = object : SyncPort by NoOpSyncPort() {
+            override suspend fun recoverPendingReconnectMember() = Result.success(known)
+            override suspend fun checkReconnectMember(): Result<com.lezi.babylog.sync.MemberLoginCheckResult> {
+                checks++
+                return Result.success(com.lezi.babylog.sync.MemberLoginCheckResult.Waiting(known))
+            }
+            override suspend fun probeReconnectEndpoint(endpointDraft: String): SetupProbeResult = error("No probe needed")
+            override suspend fun requestReconnectMember(endpoint: TrustedEndpointProfile, displayName: String, deviceName: String): Result<com.lezi.babylog.sync.PendingMemberLogin> = error("Do not submit again")
+        }
+        repeat(2) {
+            val host = FamilyNetworkSettingsHost(sync)
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { host.ui.collect() }
+            host.entered()
+            advanceUntilIdle()
+            assertThat(host.ui.value.candidate).isNull()
+            assertThat(canCheckPendingReconnect(host.ui.value)).isTrue()
+            host.checkReconnectMember()
+            advanceUntilIdle()
+            assertThat(host.ui.value.pendingMember).isEqualTo(known)
+        }
+        assertThat(checks).isEqualTo(2)
+    }
+
+    @Test
+    fun recreatedHostRestoresUnknownCandidateAndKeepsLocalAbandonAvailableWithoutAProbe() = runTest {
+        val pending = com.lezi.babylog.sync.PendingMemberLogin("", "妈妈", "Phone", 0,
+            "original-operation", "https://old-candidate.example.com", true)
+        var retained: com.lezi.babylog.sync.PendingMemberLogin? = pending
+        var writes = 0
+        val sync = object : SyncPort by NoOpSyncPort() {
+            override suspend fun recoverPendingReconnectMember() = Result.success(retained)
+            override suspend fun cancelReconnectMember(): Result<Unit> { retained = null; return Result.success(Unit) }
+            override suspend fun requestReconnectMember(endpoint: TrustedEndpointProfile, displayName: String, deviceName: String): Result<com.lezi.babylog.sync.PendingMemberLogin> {
+                writes++
+                error("Recovery must not submit")
+            }
+        }
+        val first = FamilyNetworkSettingsHost(sync)
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { first.ui.collect() }
+        first.entered()
+        advanceUntilIdle()
+        assertThat(first.ui.value.pendingMember).isEqualTo(pending)
+        assertThat(canCheckPendingReconnect(first.ui.value)).isFalse()
+        val recreated = FamilyNetworkSettingsHost(sync)
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { recreated.ui.collect() }
+        recreated.entered()
+        advanceUntilIdle()
+        recreated.updateEndpointDraft("https://different.example.com")
+        runCurrent()
+        assertThat(recreated.ui.value.pendingMember?.endpointOrigin).isEqualTo(pending.endpointOrigin)
+        recreated.cancelReconnectMember()
+        advanceUntilIdle()
+        assertThat(recreated.ui.value.pendingMember).isNull()
+        assertThat(writes).isEqualTo(0)
+    }
+
+    @Test
+    fun committedLocalActivationAndUnboundCancellationRemainReachableWithoutPassword() = runTest {
+        val progress = DisasterRecoveryProgress(null, "local_capture_pending", 0)
+        var cancelled = false
+        val sync = object : SyncPort by NoOpSyncPort() {
+            override suspend fun resumeDisasterRecovery() = Result.success(progress)
+            override suspend fun cancelDisasterRecovery(): Result<Unit> { cancelled = true; return Result.success(Unit) }
+        }
+        val host = FamilyNetworkSettingsHost(sync)
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { host.ui.collect() }
+        host.entered()
+        advanceUntilIdle()
+        assertThat(host.ui.value.recoveryStatus).isEqualTo("local_capture_pending")
+        assertThat(canCancelDisasterRecovery(host.ui.value)).isTrue()
+        host.cancelDisasterRecovery()
+        advanceUntilIdle()
+        assertThat(cancelled).isTrue()
+        assertThat(canCommitDisasterRecovery(FamilyNetworkSettingsUi(recoveryStatus = "committed", recoveryLocalActivationReady = true), "")).isTrue()
+        assertThat(canCommitDisasterRecovery(FamilyNetworkSettingsUi(recoveryStatus = "committed"), "")).isFalse()
+        assertThat(canCommitDisasterRecovery(FamilyNetworkSettingsUi(recoveryStatus = "committed"), "root")).isTrue()
+        assertThat(canCommitDisasterRecovery(FamilyNetworkSettingsUi(recoveryStatus = "ready_to_commit"), "")).isFalse()
+    }
+
+    @Test
+    fun unknownStartRetriesStoredArgumentsWithoutCandidateOrFreshPreparation() = runTest {
+        val retained = com.lezi.babylog.sync.DisasterRecoveryStartPreview("https://original.example.test", "Original Owner", "Original Phone")
+        var retries = 0
+        val sync = object : SyncPort by NoOpSyncPort() {
+            override suspend fun resumeDisasterRecovery() = Result.success(DisasterRecoveryProgress(null, "start_unknown", 0, retainedStart = retained))
+            override suspend fun prepareDisasterRecovery(): Result<DisasterRecoverySummary> = error("must not recapture")
+            override suspend fun retryDisasterRecoveryStart(rootPassword: String): Result<DisasterRecoveryProgress> {
+                assertThat(rootPassword).isEqualTo("root")
+                retries++
+                return Result.success(DisasterRecoveryProgress(sampleSummary(), "ready_to_commit", 99))
+            }
+        }
+        val host = FamilyNetworkSettingsHost(sync)
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { host.ui.collect() }
+        host.entered(); advanceUntilIdle()
+        assertThat(host.ui.value.recoveryRetainedStart).isEqualTo(retained)
+        host.prepareDisasterRecovery(); advanceUntilIdle()
+        assertThat(host.ui.value.recoveryStatus).isEqualTo("start_unknown")
+        host.startDisasterRecovery("ignored", "ignored", "root"); advanceUntilIdle()
+        assertThat(retries).isEqualTo(1)
+        assertThat(host.ui.value.recoveryStatus).isEqualTo("ready_to_commit")
+    }
+
+    @Test
+    fun legacyResumeErrorRemainsVisibleAndCannotBeOverwrittenByFreshPreparation() = runTest {
+        val sync = object : SyncPort by NoOpSyncPort() {
+            override suspend fun resumeDisasterRecovery() = Result.failure<DisasterRecoveryProgress>(IllegalStateException("原快照已保留，需要受控修复"))
+            override suspend fun prepareDisasterRecovery(): Result<DisasterRecoverySummary> = error("must preserve original")
+        }
+        val host = FamilyNetworkSettingsHost(sync)
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { host.ui.collect() }
+        host.entered(); advanceUntilIdle()
+        assertThat(host.ui.value.recoveryStatus).isEqualTo("repair_required")
+        assertThat(host.ui.value.feedback).contains("原快照已保留")
+        host.prepareDisasterRecovery(); advanceUntilIdle()
+        assertThat(host.ui.value.recoveryStatus).isEqualTo("repair_required")
+    }
+
+    @Test
     fun candidateProbeKeepsTheTransportKindInsteadOfASecondUiClock() = runTest {
         val sync = object : SyncPort by NoOpSyncPort() {
             override suspend fun probeReconnectEndpoint(endpointDraft: String): SetupProbeResult =

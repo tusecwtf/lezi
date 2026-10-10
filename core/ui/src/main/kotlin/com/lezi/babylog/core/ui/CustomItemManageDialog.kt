@@ -20,6 +20,7 @@ import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -172,6 +173,8 @@ fun CustomItemManageDialog(
     onDelete: (Long, (String?) -> Unit) -> Unit,
     hiddenItems: Set<String> = emptySet(),
     saveBusyLabel: String? = null,
+    saveCommand: CustomItemSaveCommandState? = null,
+    onConsumeSaveResult: () -> Unit = {},
     layoutBusy: Boolean = false,
     onMove: (Long, Int) -> Unit = { _, _ -> },
     onToggleLocalHidden: (Long) -> Unit = {},
@@ -184,7 +187,8 @@ fun CustomItemManageDialog(
     var iconSlot by rememberSaveable { mutableIntStateOf(0) }
     var error by rememberSaveable { mutableStateOf<String?>(null) }
     var deleteState by remember { mutableStateOf(CustomItemDeleteState()) }
-    val externalBusy = saveBusyLabel != null || layoutBusy
+    var callbackSaving by remember { mutableStateOf(false) }
+    val externalBusy = saveBusyLabel != null || layoutBusy || callbackSaving || saveCommand?.saving == true
     val showLocalHide = mode == CustomItemManageMode.Settings
     val showReorder = mode == CustomItemManageMode.Settings
     val nameFieldTag = when (mode) {
@@ -201,6 +205,16 @@ fun CustomItemManageDialog(
         name = ""
         iconSlot = 0
         error = null
+    }
+
+    LaunchedEffect(saveCommand) {
+        if (saveCommand?.completed == true) {
+            val currentDraft = CustomItemSaveDraft(editingId, name.trim(), iconSlot)
+            if (saveCommand.draft == currentDraft) {
+                if (saveCommand.error == null) reset() else error = saveCommand.error
+            }
+            onConsumeSaveResult()
+        }
     }
 
     fun dispatchDelete(action: CustomItemDeleteAction) {
@@ -375,9 +389,9 @@ fun CustomItemManageDialog(
                     label = {
                         Text(
                             when {
-                                editing == null && mode == CustomItemManageMode.LayoutEdit ->
+                                editingId == null && mode == CustomItemManageMode.LayoutEdit ->
                                     "新项目名称"
-                                editing == null -> "新项目名称"
+                                editingId == null -> "新项目名称"
                                 mode == CustomItemManageMode.LayoutEdit -> "名称"
                                 else -> "修改名称"
                             },
@@ -406,37 +420,46 @@ fun CustomItemManageDialog(
                 LeziTextButton(
                     label = when {
                         saveBusyLabel != null -> saveBusyLabel
-                        editing == null && mode == CustomItemManageMode.LayoutEdit -> "新增"
-                        editing == null -> "添加项目"
+                        externalBusy -> "保存中…"
+                        editingId == null && mode == CustomItemManageMode.LayoutEdit -> "新增"
+                        editingId == null -> "添加项目"
                         mode == CustomItemManageMode.LayoutEdit -> "保存改名"
                         else -> "保存修改"
                     },
                     enabled = !externalBusy &&
                         name.isNotBlank() &&
-                        (editing != null || items.size < 10),
+                        (editingId != null || items.size < 10),
                     onClick = {
                         val trimmed = name.trim()
                         if (trimmed.isEmpty()) {
                             error = "请输入名称"
                         } else {
                             val current = editing
+                            if (editingId != null && current == null) {
+                                error = "项目已不存在，请保留草稿并重新选择"
+                                return@LeziTextButton
+                            }
+                            val submitted = CustomItemSaveDraft(editingId, trimmed, iconSlot)
+                            if (saveCommand == null) callbackSaving = true
+                            val done: (String?) -> Unit = { message ->
+                                if (saveCommand == null) {
+                                    callbackSaving = false
+                                    if (submitted == CustomItemSaveDraft(editingId, name.trim(), iconSlot)) {
+                                        if (message == null) reset() else error = message
+                                    }
+                                }
+                            }
                             if (current == null) {
-                                onAdd(trimmed, iconSlot) { message ->
-                                    if (message == null) reset() else error = message
-                                }
+                                onAdd(trimmed, iconSlot, done)
                             } else {
-                                onUpdate(
-                                    current.copy(name = trimmed, iconSlot = iconSlot),
-                                ) { message ->
-                                    if (message == null) reset() else error = message
-                                }
+                                onUpdate(current.copy(name = trimmed, iconSlot = iconSlot), done)
                             }
                         }
                     },
                     modifier = Modifier.testTag(saveFieldTag),
                     tone = LeziTextButtonTone.Primary,
                 )
-                if (editing != null && mode == CustomItemManageMode.Settings) {
+                if (editingId != null) {
                     LeziTextButton(
                         label = "取消修改",
                         enabled = !externalBusy,

@@ -18,6 +18,46 @@ import com.lezi.babylog.sync.MemorySyncPreferences
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class RefreshingSyncBackendTest {
     @Test
+    fun lateRefreshCannotOverwriteAnExternalSessionWriterInProductionPreferences() = runTest {
+        val file = java.io.File.createTempFile("lezi-auth-cas-", ".preferences_pb").also { it.delete() }
+        val storeScope = kotlinx.coroutines.CoroutineScope(
+            kotlinx.coroutines.test.UnconfinedTestDispatcher(testScheduler) + kotlinx.coroutines.SupervisorJob(),
+        )
+        try {
+            val preferences = com.lezi.babylog.sync.session.DataStoreSyncPreferences(
+                androidx.datastore.preferences.core.PreferenceDataStoreFactory.create(scope = storeScope) { file },
+                com.lezi.babylog.sync.session.InMemorySecureRefreshTokenStore(),
+            )
+            val original = joinedSession(accessToken = "", expiresAt = 0)
+            preferences.saveSession(original)
+            val entered = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            val recording = RefreshRecordingBackend()
+            val delegate = object : SyncBackend by recording {
+                override suspend fun refresh(baseUrl: String, refreshToken: String, requestId: String): SessionRefreshResult {
+                    entered.complete(Unit)
+                    release.await()
+                    return recording.refresh(baseUrl, refreshToken, requestId)
+                }
+            }
+            val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
+            val pull = async { backend.pull(original, testPullPage()) }
+            entered.await()
+            preferences.saveSession(original.copy(
+                accessToken = "external-access", refreshToken = "external-refresh",
+                accessExpiresAtEpochSeconds = 2_000_900,
+            ))
+            release.complete(Unit)
+            assertThat(pull.await().cursor).isEqualTo(7)
+            assertThat(preferences.session.first().refreshToken).isEqualTo("external-refresh")
+            assertThat(recording.pullTokens).containsExactly("external-access")
+        } finally {
+            storeScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+            file.delete()
+        }
+    }
+
+    @Test
     fun appUpdateDownloadDoesNotBlockOtherAuthenticatedRequests() = runTest {
         val preferences = MemorySyncPreferences(joinedSession())
         val delegate = RefreshRecordingBackend().apply {
@@ -113,6 +153,157 @@ class RefreshingSyncBackendTest {
 
         assertThat(delegate.refreshTokens).containsExactly("refresh-old")
         assertThat(delegate.pullTokens).containsExactly("access-old", "access-new").inOrder()
+    }
+
+    @Test
+    fun concurrentLateUnauthorizedResponseReusesTheAlreadyRefreshedCredentials() = runTest {
+        val preferences = MemorySyncPreferences(joinedSession())
+        val bothOldRequestsStarted = CompletableDeferred<Unit>()
+        val refreshedRequestStarted = CompletableDeferred<Unit>()
+        var oldRequests = 0
+        var rotations = 0
+        val delegate = object : SyncBackend by RefreshRecordingBackend() {
+            override suspend fun refresh(baseUrl: String, token: String, requestId: String): SessionRefreshResult {
+                rotations += 1
+                return RefreshRecordingBackend().refresh(baseUrl, token).copy(
+                    accessToken = "access-$rotations",
+                    refreshToken = "refresh-$rotations",
+                )
+            }
+
+            override suspend fun pull(session: SyncSession, page: PullPageRequest): PullResult {
+                if (session.accessToken == "access-old") {
+                    oldRequests += 1
+                    if (oldRequests == 1) {
+                        bothOldRequestsStarted.await()
+                    } else {
+                        bothOldRequestsStarted.complete(Unit)
+                        refreshedRequestStarted.await()
+                    }
+                    throw SyncHttpException(401)
+                }
+                refreshedRequestStarted.complete(Unit)
+                return PullResult(emptyList(), 7, "generation", false, familyName = "乐乐一家")
+            }
+        }
+        val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
+        val first = async { backend.pull(preferences.current(), testPullPage()) }
+        val second = async { backend.pull(preferences.current(), testPullPage()) }
+
+        assertThat(first.await().cursor).isEqualTo(7)
+        assertThat(second.await().cursor).isEqualTo(7)
+        assertThat(rotations).isEqualTo(1)
+        assertThat(preferences.current().accessToken).isEqualTo("access-1")
+        assertThat(preferences.current().refreshToken).isEqualTo("refresh-1")
+        assertThat(preferences.current().reauthRequired).isFalse()
+    }
+
+    @Test
+    fun aLateRetryFailureCannotClearNewerDeviceCredentials() = runTest {
+        val preferences = MemorySyncPreferences(joinedSession())
+        val retryStarted = CompletableDeferred<Unit>()
+        val releaseRetry = CompletableDeferred<Unit>()
+        val delegate = object : SyncBackend by RefreshRecordingBackend() {
+            override suspend fun pull(session: SyncSession, page: PullPageRequest): PullResult {
+                if (session.accessToken != "access-old") {
+                    retryStarted.complete(Unit)
+                    releaseRetry.await()
+                }
+                throw SyncHttpException(401)
+            }
+        }
+        val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
+        val request = async { runCatching { backend.pull(preferences.current(), testPullPage()) } }
+        retryStarted.await()
+        preferences.saveRefreshedSession(preferences.current().copy(
+            accessToken = "newer-access", refreshToken = "newer-refresh",
+        ))
+        releaseRetry.complete(Unit)
+        assertThat(request.await().isFailure).isTrue()
+        assertThat(preferences.current().accessToken).isEqualTo("newer-access")
+        assertThat(preferences.current().refreshToken).isEqualTo("newer-refresh")
+        assertThat(preferences.current().reauthRequired).isFalse()
+    }
+
+    @Test
+    fun threeLate401RequestsReuseOneRotationInEveryArrivalOrder() = runTest {
+        // Request identity is independent of launch order; enumerate all six 401 orders.
+        listOf(listOf(0, 1, 2), listOf(0, 2, 1), listOf(1, 0, 2),
+            listOf(1, 2, 0), listOf(2, 0, 1), listOf(2, 1, 0)).forEach { order ->
+            val original = joinedSession()
+            val preferences = MemorySyncPreferences(original)
+            val entered = List(3) { CompletableDeferred<Unit>() }
+            val release = List(3) { CompletableDeferred<Unit>() }
+            val attempts = List(3) { mutableListOf<String>() }
+            val recording = RefreshRecordingBackend()
+            val delegate = object : SyncBackend by recording {
+                override suspend fun pull(session: SyncSession, page: PullPageRequest): PullResult {
+                    val id = page.pageIndex
+                    attempts[id] += session.accessToken
+                    if (session.accessToken == original.accessToken) {
+                        entered[id].complete(Unit)
+                        release[id].await()
+                        throw SyncHttpException(401)
+                    }
+                    return PullResult(emptyList(), 7, "generation", false)
+                }
+            }
+            val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
+            val requests = (0..2).map { id ->
+                async { backend.pull(original, testPullPage().copy(pageIndex = id)) }
+            }
+            entered.forEach { it.await() }
+            order.forEach { id ->
+                release[id].complete(Unit)
+                assertThat(requests[id].await().cursor).isEqualTo(7)
+                assertThat(preferences.current().accessToken).isEqualTo("access-new")
+                assertThat(preferences.current().refreshToken).isEqualTo("refresh-new")
+                assertThat(preferences.current().reauthRequired).isFalse()
+            }
+            assertThat(recording.refreshTokens).containsExactly("refresh-old")
+            attempts.forEach { assertThat(it).containsExactly("access-old", "access-new").inOrder() }
+            backend.pull(original, testPullPage().copy(pageIndex = 0))
+            assertThat(recording.refreshTokens).containsExactly("refresh-old")
+        }
+    }
+
+    @Test
+    fun threeRetryFailuresCannotClearAnExternalCredentialGeneration() = runTest {
+        val original = joinedSession()
+        val preferences = MemorySyncPreferences(original)
+        val entered = List(3) { CompletableDeferred<Unit>() }
+        val release = List(3) { CompletableDeferred<Unit>() }
+        val allOldEntered = List(3) { CompletableDeferred<Unit>() }
+        val releaseOld = CompletableDeferred<Unit>()
+        val recording = RefreshRecordingBackend()
+        val delegate = object : SyncBackend by recording {
+            override suspend fun pull(session: SyncSession, page: PullPageRequest): PullResult {
+                val id = page.pageIndex
+                if (session.accessToken == "access-old") {
+                    allOldEntered[id].complete(Unit)
+                    releaseOld.await()
+                    throw SyncHttpException(401)
+                }
+                entered[id].complete(Unit)
+                release[id].await()
+                throw SyncHttpException(401)
+            }
+        }
+        val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
+        val requests = (0..2).map { id -> async {
+            runCatching { backend.pull(original, testPullPage().copy(pageIndex = id)) }
+        } }
+        allOldEntered.forEach { it.await() }
+        releaseOld.complete(Unit)
+        entered.forEach { it.await() }
+        val winner = preferences.current().copy(accessToken = "winner-access", refreshToken = "winner-refresh")
+        preferences.saveRefreshedSession(winner)
+        listOf(2, 0, 1).forEach { id ->
+            release[id].complete(Unit)
+            assertThat(requests[id].await().exceptionOrNull()).isInstanceOf(IllegalStateException::class.java)
+            assertThat(preferences.current()).isEqualTo(winner)
+        }
+        assertThat(recording.refreshTokens).containsExactly("refresh-old")
     }
 
     @Test

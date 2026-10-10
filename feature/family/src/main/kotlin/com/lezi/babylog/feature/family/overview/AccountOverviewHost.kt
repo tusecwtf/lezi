@@ -9,6 +9,8 @@ import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.domain.BabyMergePreview
 import com.lezi.babylog.domain.CareLog
+import com.lezi.babylog.domain.BabyCreationCommittedException
+import com.lezi.babylog.domain.BabyCreationCommittedCancellationException
 import com.lezi.babylog.domain.CreateBabyInput
 import com.lezi.babylog.domain.family.BabyLocalLayoutCommands
 import com.lezi.babylog.feature.family.FamilyIdentityUi
@@ -25,13 +27,14 @@ import com.lezi.babylog.sync.session.ShallowSyncLine
 import com.lezi.babylog.sync.session.ShallowSyncState
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
-import com.lezi.babylog.sync.session.SyncSession
+import com.lezi.babylog.sync.session.SyncSessionPresentation
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -88,7 +91,7 @@ data class AccountOverviewUi(
 }
 
 private data class AccountSyncProjection(
-    val session: SyncSession,
+    val session: SyncSessionPresentation,
     val pendingMemberLogin: PendingMemberLogin?,
     val shallowSyncLine: ShallowSyncLine,
 )
@@ -102,6 +105,15 @@ private data class OverviewInputs(
 )
 
 
+data class BabyCreationReceipt(
+    val commandId: Long,
+    val clientUuid: String = java.util.UUID.randomUUID().toString(),
+    val pending: Boolean = true,
+    val createdBabyId: Long? = null,
+    val warning: String? = null,
+    val error: String? = null,
+)
+
 @HiltViewModel
 class AccountOverviewHost @Inject constructor(
     private val sync: SyncPort,
@@ -111,11 +123,20 @@ class AccountOverviewHost @Inject constructor(
 ) : ViewModel() {
     private val profileSaveMutex = Mutex()
     private val destructiveAction = FamilyDestructiveActionGate()
-    private val addBabyAction = SingleFlightAction()
+    private val mutableBabyCreation = MutableStateFlow<BabyCreationReceipt?>(null)
+    val babyCreation: StateFlow<BabyCreationReceipt?> = mutableBabyCreation
+    private var nextBabyCommand = 0L
     private val reconcileAction = SingleFlightAction()
     private val appUpdate = AppUpdateOutcomeMachine(sync)
 
-    val addingBaby: StateFlow<Boolean> = addBabyAction.busy
+    val addingBaby: StateFlow<Boolean> = babyCreation.map { it?.pending == true }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    fun consumeBabyCreation(commandId: Long) {
+        if (mutableBabyCreation.value?.let { it.commandId == commandId && !it.pending } == true) {
+            mutableBabyCreation.value = null
+        }
+    }
 
     private val babySurfaces = combine(
         careLog.observeBabies(),
@@ -123,7 +144,7 @@ class AccountOverviewHost @Inject constructor(
     ) { babies, orphans -> babies to orphans }
 
     private val syncIdentity = combine(
-        sync.session(),
+        sync.sessionPresentation(),
         sync.pendingMemberLogin(),
         sync.shallowStatus(),
     ) { session, pending, shallowSyncLine ->
@@ -131,7 +152,7 @@ class AccountOverviewHost @Inject constructor(
     }
 
     private val localIdentity = combine(
-        sync.session().map(::localFamilyIdentityReloadKey).distinctUntilChanged(),
+        sync.sessionPresentation().map(::localFamilyIdentityReloadKey).distinctUntilChanged(),
         LocalFamilyIdentityInvalidations.epoch,
     ) { _, _ ->
         careLog.localFamilyIdentity()
@@ -261,49 +282,63 @@ class AccountOverviewHost @Inject constructor(
         birthWeightGrams: Int?,
         themeColorArgb: Int,
         avatarJpeg: ByteArray?,
-        onDone: (String?) -> Unit,
+        onDone: (String?) -> Unit = {},
     ) {
+        val prior = mutableBabyCreation.value
+        if (prior?.pending == true || prior?.createdBabyId != null) return
+        val command = BabyCreationReceipt(++nextBabyCommand)
+        mutableBabyCreation.value = command
         viewModelScope.launch {
-            var failure: String? = null
-            val accepted = addBabyAction.run {
-                failure = try {
-                    profileSaveMutex.withLock {
-                        val id = careLog.addBaby(
-                            CreateBabyInput(
-                                nickname = nickname,
-                                sex = sex,
-                                birthdayEpochDay = birthdayEpochDay,
-                                birthWeightGrams = birthWeightGrams,
-                                themeColorArgb = themeColorArgb,
-                            ),
-                        )
-                        if (avatarJpeg != null) {
-                            val created = careLog.listBabies().firstOrNull { it.id == id }
-                            if (created != null) {
-                                val avatarError = saveBabyProfileWithAvatar(
-                                    careLog = careLog,
-                                    avatarFileStore = avatarFileStore,
-                                    existing = created,
-                                    nickname = nickname,
-                                    sex = sex,
-                                    birthdayEpochDay = birthdayEpochDay,
-                                    birthWeightGrams = birthWeightGrams,
-                                    avatarJpeg = avatarJpeg,
-                                    removeAvatar = false,
-                                    mayEditAvatar = true,
-                                )
-                                if (avatarError != null) return@withLock avatarError
-                            }
+            var committedId: Long? = null
+            try {
+                profileSaveMutex.withLock {
+                    val id = careLog.addBaby(
+                        CreateBabyInput(nickname, sex, birthdayEpochDay, birthWeightGrams,
+                            themeColorArgb = themeColorArgb),
+                        clientUuid = command.clientUuid,
+                    )
+                    committedId = id
+                    // Publish the durable identity before any fallible attachment/readback work.
+                    mutableBabyCreation.value = command.copy(createdBabyId = id)
+                    val warning = if (avatarJpeg != null) {
+                        val created = careLog.listBabies().firstOrNull { it.id == id }
+                        if (created == null) "宝宝已添加，头像尚未保存，请在宝宝档案中重试" else {
+                            saveBabyProfileWithAvatar(
+                                careLog, avatarFileStore, created, nickname, sex, birthdayEpochDay,
+                                birthWeightGrams, avatarJpeg, false, true,
+                            )?.let { "宝宝已添加，头像尚未保存，请在宝宝档案中重试" }
                         }
-                        null
-                    }
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (error: Throwable) {
-                    productUiError(error, "添加失败")
+                    } else null
+                    mutableBabyCreation.value = command.copy(
+                        pending = false, createdBabyId = id, warning = warning,
+                    )
+                    onDone(null)
+                }
+            } catch (cancelled: CancellationException) {
+                if (cancelled is BabyCreationCommittedCancellationException) {
+                    committedId = cancelled.babyId
+                }
+                mutableBabyCreation.value = committedId?.let { id ->
+                    command.copy(pending = false, createdBabyId = id,
+                        warning = "宝宝已添加，请检查头像是否已保存")
+                }
+                throw cancelled
+            } catch (error: Throwable) {
+                val id = (error as? BabyCreationCommittedException)?.babyId ?: committedId
+                if (id != null) {
+                    mutableBabyCreation.value = command.copy(
+                        pending = false, createdBabyId = id,
+                        warning = if (error is BabyCreationCommittedException) {
+                            "宝宝已添加，当前宝宝切换尚未完成，请在宝宝列表中选择"
+                        } else "宝宝已添加，头像尚未保存，请在宝宝档案中重试",
+                    )
+                    onDone(null)
+                } else {
+                    val message = productUiError(error, "添加失败")
+                    mutableBabyCreation.value = command.copy(pending = false, error = message)
+                    onDone(message)
                 }
             }
-            if (accepted) onDone(failure)
         }
     }
 

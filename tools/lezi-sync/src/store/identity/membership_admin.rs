@@ -4,14 +4,13 @@ use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use uuid::Uuid;
 
 use super::super::bundles::anonymize_membership_bundle_references;
-use super::super::{PendingMemberRenameRequest, Store, StoreError};
-use super::anonymize::anonymize_membership_entity_references;
+use super::super::{PendingMemberRenameRequest, Principal, Store, StoreError};
+use super::anonymize::{anonymize_membership_entity_references, anonymize_membership_history};
 
 impl Store {
     pub fn create_member_rename_request(
         &self,
-        family_id: &str,
-        membership_id: &str,
+        principal: &Principal,
         requested_display_name: &str,
         requested_display_name_key: &str,
         now: i64,
@@ -19,6 +18,9 @@ impl Store {
     ) -> Result<PendingMemberRenameRequest, StoreError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let family_id = principal.family_id.as_str();
+        let membership_id = principal.membership_id.as_str();
+        super::require_identity_role(&transaction, principal, "member")?;
         transaction.execute(
         "UPDATE member_rename_requests SET status = 'expired', decided_at = ?1 WHERE family_id = ?2 AND status = 'pending' AND expires_at <= ?1",
         params![now, family_id],
@@ -78,11 +80,13 @@ impl Store {
 
     pub fn pending_member_rename_requests(
         &self,
-        family_id: &str,
+        principal: &Principal,
         now: i64,
     ) -> Result<Vec<PendingMemberRenameRequest>, StoreError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let family_id = principal.family_id.as_str();
+        super::require_identity_role(&transaction, principal, "owner")?;
         transaction.execute(
         "UPDATE member_rename_requests SET status = 'expired', decided_at = ?1 WHERE family_id = ?2 AND status = 'pending' AND expires_at <= ?1",
         params![now, family_id],
@@ -124,12 +128,14 @@ impl Store {
 
     pub fn approve_member_rename_request(
         &self,
-        family_id: &str,
+        principal: &Principal,
         request_id: &str,
         now: i64,
     ) -> Result<String, StoreError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let family_id = principal.family_id.as_str();
+        super::require_identity_role(&transaction, principal, "owner")?;
         let request = transaction
             .query_row(
                 "
@@ -200,12 +206,14 @@ impl Store {
 
     pub fn reject_member_rename_request(
         &self,
-        family_id: &str,
+        principal: &Principal,
         request_id: &str,
         now: i64,
     ) -> Result<(), StoreError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let family_id = principal.family_id.as_str();
+        super::require_identity_role(&transaction, principal, "owner")?;
         let request = transaction
         .query_row(
             "SELECT status, expires_at FROM member_rename_requests WHERE family_id = ?1 AND request_id = ?2",
@@ -235,29 +243,35 @@ impl Store {
 
     pub fn cancel_own_member_rename_request(
         &self,
-        family_id: &str,
-        membership_id: &str,
+        principal: &Principal,
         now: i64,
     ) -> Result<(), StoreError> {
-        let connection = self.connect()?;
-        let changed = connection.execute(
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let family_id = principal.family_id.as_str();
+        let membership_id = principal.membership_id.as_str();
+        super::require_identity_role(&transaction, principal, "member")?;
+        let changed = transaction.execute(
         "UPDATE member_rename_requests SET status = 'cancelled', decided_at = ?1 WHERE family_id = ?2 AND membership_id = ?3 AND status = 'pending'",
         params![now, family_id, membership_id],
     )?;
         if changed == 0 {
             return Err(StoreError::RenameRequestNotFound);
         }
+        transaction.commit()?;
         Ok(())
     }
 
     pub fn add_device_less_member(
         &self,
-        family_id: &str,
+        principal: &Principal,
         display_name: &str,
         display_name_key: &str,
     ) -> Result<String, StoreError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let family_id = principal.family_id.as_str();
+        super::require_identity_role(&transaction, principal, "owner")?;
         let conflict = transaction
         .query_row(
             "SELECT 1 FROM memberships WHERE family_id = ?1 AND display_name_key = ?2 AND left_at IS NULL LIMIT 1",
@@ -280,7 +294,7 @@ impl Store {
 
     pub fn rename_active_membership(
         &self,
-        family_id: &str,
+        principal: &Principal,
         membership_id: &str,
         display_name: &str,
         display_name_key: &str,
@@ -288,6 +302,8 @@ impl Store {
     ) -> Result<(), StoreError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let family_id = principal.family_id.as_str();
+        super::require_identity_role(&transaction, principal, "owner")?;
         let exists = transaction
         .query_row(
             "SELECT 1 FROM memberships WHERE family_id = ?1 AND membership_id = ?2 AND left_at IS NULL",
@@ -324,15 +340,15 @@ impl Store {
 
     pub fn rename_active_device(
         &self,
-        family_id: &str,
-        actor_membership_id: &str,
-        actor_is_owner: bool,
+        principal: &Principal,
         device_id: &str,
         device_name: &str,
         device_name_key: &str,
     ) -> Result<(), StoreError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let family_id = principal.family_id.as_str();
+        super::super::causal::require_current_principal(&transaction, principal)?;
         let target_membership_id = transaction
             .query_row(
                 "
@@ -348,9 +364,14 @@ impl Store {
                 |row| row.get::<_, String>(0),
             )
             .optional()?
-            .ok_or(StoreError::DeviceNotFound)?;
-        if !actor_is_owner && target_membership_id != actor_membership_id {
-            return Err(StoreError::DeviceNotFound);
+            .ok_or(if principal.role == "owner" {
+                StoreError::DeviceNotFound
+            } else {
+                // Preserve the member-facing denial for every invisible target.
+                StoreError::ForbiddenIdentityAdministration
+            })?;
+        if principal.role != "owner" && target_membership_id != principal.membership_id {
+            return Err(StoreError::ForbiddenIdentityAdministration);
         }
         let conflict = transaction
         .query_row(
@@ -377,12 +398,19 @@ impl Store {
     /// learn the stable protocol reason without a recoverable member tombstone.
     pub fn hard_delete_membership(
         &self,
-        family_id: &str,
+        principal: &Principal,
         membership_id: &str,
         now: i64,
     ) -> Result<(), StoreError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let family_id = principal.family_id.as_str();
+        super::super::causal::require_current_principal(&transaction, principal)?;
+        if principal.role != "owner"
+            && !(principal.role == "member" && principal.membership_id == membership_id)
+        {
+            return Err(StoreError::ForbiddenIdentityAdministration);
+        }
         let role = transaction
             .query_row(
                 "
@@ -431,6 +459,13 @@ impl Store {
             params![membership_id],
         )?;
 
+        anonymize_membership_history(
+            &transaction,
+            &self.database_path,
+            &self.snapshot_receipt_key,
+            family_id,
+            membership_id,
+        )?;
         anonymize_membership_entity_references(&transaction, family_id, membership_id, now)?;
         anonymize_membership_bundle_references(&transaction, family_id, membership_id)?;
 
@@ -461,11 +496,13 @@ impl Store {
 
     pub fn delete_family(
         &self,
-        family_id: &str,
+        principal: &Principal,
         confirmed_family_name: &str,
     ) -> Result<(), StoreError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let family_id = principal.family_id.as_str();
+        super::require_identity_role(&transaction, principal, "owner")?;
         let stored_family_name = transaction
             .query_row(
                 "SELECT name FROM families WHERE id = ?1",

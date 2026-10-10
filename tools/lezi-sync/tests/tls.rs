@@ -53,6 +53,9 @@ fn public_endpoint_is_https_only_and_keeps_the_same_certificate_across_restart()
                 "validated_deferred_fulfillment_v1",
                 "causal_sync_v2",
                 "sync_heartbeat_v1",
+                "causal_media_identity_v1",
+                "nursing_plan_intent_v1",
+                "restore_authority_v1",
             ],
             "family_state": "empty",
             })
@@ -107,12 +110,13 @@ fn authenticated_sync_handshake_succeeds_over_isolated_tls() {
         "/v1/sync/handshake",
         &[
             authorization.as_str(),
-            "X-Lezi-Client-Version-Code: 21",
+            "X-Lezi-Client-Version-Code: 35",
+            "X-Lezi-Sync-Capabilities: nursing_plan_intent_v1",
             "Content-Type: application/json",
         ],
         json!({
             "protocol_version": 1,
-            "required_capabilities": ["causal_sync_v2"],
+            "required_capabilities": ["causal_sync_v2", "nursing_plan_intent_v1"],
         }),
     );
 
@@ -137,9 +141,9 @@ fn write_protocol_cutover_release(data_root: &Path) {
         data_root.join("app-update.json"),
         json!({
             "package_name": "com.lezi.babylog",
-            "version_code": 21,
-            "version_name": "0.4.0",
-            "min_supported_version_code": 21,
+            "version_code": 35,
+            "version_name": "0.5.5",
+            "min_supported_version_code": 35,
             "sha256": hex::encode(Sha256::digest(apk_bytes)),
         })
         .to_string(),
@@ -451,4 +455,57 @@ fn free_port() -> u16 {
         .local_addr()
         .unwrap()
         .port()
+}
+
+#[test]
+fn occupied_required_listener_never_leaves_a_partially_healthy_process() {
+    for occupied_public in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let certificate = directory.path().join("server.crt");
+        let private_key = directory.path().join("server.key");
+        generate_certificate(&certificate, &private_key);
+        write_protocol_cutover_release(directory.path());
+        let occupied = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let occupied_port = occupied.local_addr().unwrap().port();
+        let (public_port, internal_port) = if occupied_public {
+            (occupied_port, free_port())
+        } else {
+            (free_port(), occupied_port)
+        };
+        let mut server = spawn_server(
+            directory.path(),
+            &certificate,
+            &private_key,
+            public_port,
+            internal_port,
+        );
+        let mut became_ready = false;
+        let mut exited = false;
+        for _ in 0..40 {
+            if occupied_public {
+                became_ready |= internal_ready(internal_port);
+            }
+            if let Some(status) = server.try_wait().unwrap() {
+                assert!(!status.success());
+                assert!(!became_ready, "required public listener never existed");
+                let sibling = if occupied_public {
+                    internal_port
+                } else {
+                    public_port
+                };
+                assert!(
+                    TcpStream::connect(("127.0.0.1", sibling)).is_err(),
+                    "sibling listener survived required bind failure"
+                );
+                exited = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        if !exited {
+            server.kill().unwrap();
+            server.wait().unwrap();
+            panic!("required bind failed but process continued; public={occupied_public}, internal ready={became_ready}");
+        }
+    }
 }

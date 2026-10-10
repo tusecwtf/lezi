@@ -22,6 +22,78 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class FamilySessionCoordinatorBarrierTest {
     @Test
+    fun cancellationAfterChildAcquiresButBeforeCallerResumesDoesNotLeakBarrier() = runTest {
+        val backend = RecordingSyncBackend()
+        val barrier = Mutex(locked = true)
+        var holdFirstEnteredOperation = true
+        val coordinator = coordinator(
+            preferences = MemorySyncPreferences(joinedFamilySession(FamilyRole.Owner)),
+            backend = backend,
+            barrier = barrier,
+            requireRemoteAllowed = {
+                if (holdFirstEnteredOperation) {
+                    holdFirstEnteredOperation = false
+                    kotlinx.coroutines.awaitCancellation()
+                }
+            },
+        )
+        val dispatcher = StepDispatcher()
+        val waiting = async(dispatcher) {
+            coordinator.execute(FamilySessionCommand.ApproveNewMemberLogin("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"))
+        }
+        dispatcher.drain() // all runnable work reaches the held barrier
+        barrier.unlock()
+        dispatcher.runNext() // handoff implementation queues caller; direct owner parks at its first gate
+        assertThat(barrier.isLocked).isTrue()
+        assertThat(backend.approvedMemberLoginRequestIds).isEmpty()
+
+        waiting.cancel()
+        dispatcher.drain()
+        holdFirstEnteredOperation = false // The probe applies only to the cancelled command.
+
+        val next = coordinator.execute(
+            FamilySessionCommand.ApproveNewMemberLogin("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+        )
+        assertThat(next.exceptionOrNull()).isNull()
+        assertThat(backend.approvedMemberLoginRequestIds)
+            .containsExactly("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+    }
+
+    @Test
+    fun failedPreOperationRecoveryReleasesBarrierForNextCommand() = runTest {
+        val backend = RecordingSyncBackend()
+        var failRecovery = true
+        val coordinator = coordinator(
+            preferences = MemorySyncPreferences(joinedFamilySession(FamilyRole.Owner)),
+            backend = backend,
+            beforeOperation = {
+                if (failRecovery) {
+                    failRecovery = false
+                    error("local recovery unavailable")
+                }
+            },
+        )
+        assertThat(coordinator.execute(FamilySessionCommand.ApproveNewMemberLogin(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        )).isFailure).isTrue()
+        coordinator.execute(FamilySessionCommand.ApproveNewMemberLogin(
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        )).getOrThrow()
+        assertThat(backend.approvedMemberLoginRequestIds)
+            .containsExactly("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+    }
+
+    /** Controls only dispatch at the public command boundary, never coordinator internals. */
+    private class StepDispatcher : kotlinx.coroutines.CoroutineDispatcher() {
+        private val pending = ArrayDeque<Runnable>()
+        override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) {
+            pending.addLast(block)
+        }
+        fun runNext() { check(pending.isNotEmpty()); pending.removeFirst().run() }
+        fun drain() { while (pending.isNotEmpty()) runNext() }
+    }
+
+    @Test
     fun checkMemberLoginFailsFastWhenReplicaBarrierIsHeld() = runTest {
         val preferences = pendingMemberPreferences()
         val backend = RecordingSyncBackend().apply {
@@ -250,10 +322,8 @@ class FamilySessionCoordinatorBarrierTest {
         assertThat(preferences.pendingMemberLogin.first()).isNull()
 
         releaseStatus.complete(Unit)
-        val checked = check.await().getOrThrow() as FamilySessionOutcome.MemberLoginChecked
-        assertThat(checked.result).isEqualTo(
-            MemberLoginCheckResult.Terminal(MemberLoginStatus.Cancelled),
-        )
+        assertThat(check.await().exceptionOrNull())
+            .isInstanceOf(com.lezi.babylog.sync.MemberLoginAttemptRetiredException::class.java)
         assertThat(preferences.current().isJoined).isFalse()
         assertThat(backend.memberLoginClaimCalls).isEqualTo(0)
     }

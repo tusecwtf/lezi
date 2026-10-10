@@ -27,6 +27,13 @@ fun isNextFeedPlanNote(note: String?): Boolean =
     note?.startsWith(NEXT_FEED_PLAN_MARKER) == true
 
 /**
+ * Plans may express an ordinary nursing intent before any actual duration exists.
+ * Zero milk amounts remain exclusive to marked next-feed plans. Facts never use this policy.
+ */
+fun carePlanAllowsIntentOnlyFeed(type: RecordType, note: String?): Boolean =
+    type == RecordType.NURSING || isNextFeedPlanNote(note)
+
+/**
  * Visible remainder after stripping the next-feed marker.
  * Only meaningful when [isNextFeedPlanNote] is true (non-marker notes are not stripped).
  */
@@ -64,7 +71,7 @@ val NURSING_ORDER_CHOICES: List<Pair<String, String>> = listOf(
     "R" to "仅右",
 )
 
-sealed interface RecordPayload {
+sealed interface RecordPayload : java.io.Serializable {
     val type: RecordType
 }
 

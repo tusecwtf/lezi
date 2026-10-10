@@ -219,7 +219,9 @@ class ReplicaSyncEngineCausalSettlementTest {
                     syncDirty = true,
                 ),
             )
+            var capturedMutation: String? = null
             rig.mediaFiles.afterPrepareUpload = {
+                capturedMutation = rig.records.getByClientUuid("record-media-race-$mutation")?.mutationId
                 when (mutation) {
                     "add" -> rig.media.seed(
                         MediaAssetEntity(
@@ -268,7 +270,13 @@ class ReplicaSyncEngineCausalSettlementTest {
 
             rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
+            assertThat(rig.backend.causalCommittedUnits).isEmpty()
+            assertThat(rig.immutableMediaSpool.recoverGroup(requireNotNull(capturedMutation))).isNotNull()
+            assertThat(rig.records.getByClientUuid("record-media-race-$mutation")!!.syncDirty).isTrue()
             if (mutation == "add") {
+                // A real attachment edit queues another local-write signal; the first
+                // captured set must never publish a mixed old/new attachment group.
+                rig.engine.synchronize(session, SyncTrigger.LocalWrite)
                 val expectedMedia = setOf(
                     originalMediaUuid,
                     "00000000-0000-4000-8000-000000000003",
@@ -281,10 +289,13 @@ class ReplicaSyncEngineCausalSettlementTest {
                 assertThat(rig.records.getByClientUuid("record-media-race-add")!!.syncDirty)
                     .isFalse()
                 assertThat(rig.media.listPendingSync()).isEmpty()
+                assertThat(rig.mediaFiles.prepareUploadCounts["/private/original-$mutation.jpg"]).isEqualTo(1)
+                assertThat(rig.mediaFiles.prepareUploadCounts["/private/concurrent-add.jpg"]).isEqualTo(1)
             } else {
                 assertThat(rig.records.getByClientUuid("record-media-race-delete")!!.syncDirty)
                     .isTrue()
                 assertThat(rig.media.listPendingSync()).isNotEmpty()
+                assertThat(rig.media.getByClientUuid(originalMediaUuid)?.deletedAt).isEqualTo(101)
             }
         }
     }
@@ -752,6 +763,9 @@ class ReplicaSyncEngineCausalSettlementTest {
         rig.media.update(
             settledMedia.copy(
                 clientUuid = replacementMediaUuid,
+                localUri = mediaUri,
+                remoteUri = null,
+                sha256 = null,
                 updatedAt = 200,
                 syncDirty = true,
             ),
@@ -3169,7 +3183,9 @@ class ReplicaSyncEngineCausalRootTypesTest(
             conflictSummaryDao = rig.conflictSummaries,
             conflictSnapshotCacheDao = rig.conflictDetails,
             immutableMediaSpool = rig.immutableMediaSpool,
+            mediaFiles = rig.mediaFiles,
             transactionRunner = rig.transactions,
+            cleanupUnownedMediaPaths = rig.mediaFileCleanup::cleanupUnreferencedPaths,
             requireRemoteAllowed = {},
         )
         when (entityType) {

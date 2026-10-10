@@ -127,6 +127,7 @@ internal fun LayoutEditCanvas(
     prefs: DeviceLayoutPrefs,
     customItems: List<CustomRecordItem>,
     onIntent: (LayoutEditIntent) -> Unit,
+    modifier: Modifier = Modifier,
     onTouchDragIntent: ((LayoutEditIntent) -> Unit)? = null,
     onDone: () -> Unit,
     onOpenCustomManage: () -> Unit,
@@ -150,7 +151,6 @@ internal fun LayoutEditCanvas(
     ),
     onDragGuidanceHelp: () -> Unit = {},
     onDragGuidanceClose: () -> Unit = {},
-    modifier: Modifier = Modifier,
 ) {
     val known = remember(customItems) {
         knownCatalogKeys(customItems.map { it.clientUuid })

@@ -1,4 +1,6 @@
 package com.lezi.babylog.domain.localdata
+import kotlinx.coroutines.flow.map
+import com.lezi.babylog.sync.session.toPresentation
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.PendingReminderCleanup
 import com.lezi.babylog.core.database.PendingReminderCleanupStore
@@ -348,6 +350,9 @@ internal class RecordingClearSyncPort(
     var beforeLocalClear: suspend () -> Unit = {}
     var afterLocalClear: suspend () -> Unit = {}
 
+    override fun sessionPresentation() = session().map { it.toPresentation() }
+
+    @Deprecated("Use sessionPresentation() outside sync internals")
     override fun session(): Flow<SyncSession> = session
 
     override suspend fun clearLocalData(

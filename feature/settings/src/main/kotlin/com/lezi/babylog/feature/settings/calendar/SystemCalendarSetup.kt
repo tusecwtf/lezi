@@ -21,6 +21,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
+import com.lezi.babylog.core.common.productUiError
+import kotlinx.coroutines.CancellationException
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -132,6 +136,7 @@ fun SystemCalendarSetupDialog(
     onConfirm: (SystemCalendarSetupSelection) -> Unit,
     onDisable: () -> Unit,
     onDismiss: () -> Unit,
+    commandState: SystemCalendarSetupCommandState = SystemCalendarSetupCommandState(),
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -144,10 +149,18 @@ fun SystemCalendarSetupDialog(
     var targets by remember { mutableStateOf<List<SystemCalendarTarget>>(emptyList()) }
     var targetsLoaded by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
-    var draft by remember(currentCalendarId, currentDisclosureLevel) {
-        mutableStateOf(
-            SystemCalendarSetupDraft.from(currentCalendarId, currentDisclosureLevel),
-        )
+    var draft by rememberSaveable(stateSaver = listSaver(
+        save = { listOf(it.selectedCalendarId.orEmpty(), it.disclosureLevel.toString()) },
+        restore = { SystemCalendarSetupDraft.from(it[0].ifBlank { null }, it[1].toInt()) },
+    )) {
+        val pending = commandState.selection
+        mutableStateOf(SystemCalendarSetupDraft.from(
+            pending?.calendarId ?: currentCalendarId,
+            pending?.disclosureLevel ?: currentDisclosureLevel,
+        ))
+    }
+    LaunchedEffect(commandState.completed) {
+        if (commandState.completed) onDismiss()
     }
     var hasPermission by remember {
         mutableStateOf(
@@ -169,16 +182,23 @@ fun SystemCalendarSetupDialog(
 
     fun refreshTargets() {
         scope.launch {
-            targets = port.listWritableCalendars()
-            targetsLoaded = true
-            draft = draft.reconcileWritableCalendars(
-                targets.mapTo(linkedSetOf(), SystemCalendarTarget::calendarId),
-            )
-            status = when {
-                targets.isEmpty() -> "未找到可写日历"
-                currentCalendarId != null && draft.selectedCalendarId == null ->
-                    "原日历不可用，请重新选择"
-                else -> null
+            try {
+                targets = port.listWritableCalendars()
+                targetsLoaded = true
+                draft = draft.reconcileWritableCalendars(
+                    targets.mapTo(linkedSetOf(), SystemCalendarTarget::calendarId),
+                )
+                status = when {
+                    targets.isEmpty() -> "未找到可写日历"
+                    currentCalendarId != null && draft.selectedCalendarId == null ->
+                        "原日历不可用，请重新选择"
+                    else -> null
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                targetsLoaded = true
+                status = productUiError(error, "暂时无法读取日历，请重试")
             }
         }
     }
@@ -188,7 +208,7 @@ fun SystemCalendarSetupDialog(
     }
 
     LeziAlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!commandState.busy) onDismiss() },
         title = { Text("系统日历") },
         text = {
             Column(
@@ -212,6 +232,7 @@ fun SystemCalendarSetupDialog(
                             .heightIn(min = LeziSpacing.Touch)
                             .selectable(
                                 selected = selected,
+                                enabled = !commandState.busy,
                                 role = Role.RadioButton,
                                 onClick = {
                                     draft = draft.selectDisclosureLevel(level)
@@ -273,6 +294,7 @@ fun SystemCalendarSetupDialog(
                                 .heightIn(min = LeziSpacing.Touch)
                                 .selectable(
                                     selected = selected,
+                                    enabled = !commandState.busy,
                                     role = Role.RadioButton,
                                     onClick = {
                                         draft = draft.selectCalendar(target.calendarId)
@@ -295,6 +317,10 @@ fun SystemCalendarSetupDialog(
                         }
                     }
                 }
+                if (hasPermission && targetsLoaded) {
+                    LeziTextButton(label = "重新读取日历", onClick = ::refreshTargets, enabled = !commandState.busy)
+                }
+                commandState.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 status?.let {
                     Text(
                         it,
@@ -307,14 +333,17 @@ fun SystemCalendarSetupDialog(
         },
         confirmButton = {
             val selection = draft.confirmedOrNull()
-            LeziTextButton(label = "保存", onClick = { selection?.let(onConfirm) }, enabled = selection != null,)
+            LeziTextButton(label = if (commandState.busy) "保存中…" else "保存",
+                onClick = { selection?.let(onConfirm) },
+                enabled = selection != null && hasPermission && targetsLoaded &&
+                    targets.any { it.calendarId == selection.calendarId } && !commandState.busy)
         },
         dismissButton = {
             Row {
                 if (currentCalendarId != null) {
-                    LeziTextButton(label = "关闭同步", onClick = onDisable)
+                    LeziTextButton(label = "关闭同步", onClick = onDisable, enabled = !commandState.busy)
                 }
-                LeziTextButton(label = "取消", onClick = onDismiss)
+                LeziTextButton(label = "取消", onClick = onDismiss, enabled = !commandState.busy)
             }
         },
     )

@@ -1,4 +1,14 @@
 package com.lezi.babylog.domain.timeline
+import com.lezi.babylog.core.database.TimelineSourceRelation
+import com.lezi.babylog.domain.carelog.SuspectedDuplicateProjection
+import com.lezi.babylog.domain.carelog.SuspectedDuplicatePresentation
+import com.lezi.babylog.domain.carelog.LongBound
+import com.lezi.babylog.domain.toModel
+import com.lezi.babylog.domain.carelog.toProjectedSleepRecord
+import com.lezi.babylog.sync.session.FamilyReadSnapshot
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.map
+import com.lezi.babylog.sync.session.toPresentation
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.CarePlanEntity
 import com.lezi.babylog.core.database.MediaAssetEntity
@@ -14,6 +24,9 @@ import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.session.SyncSession
 import java.time.LocalDate
 import java.time.ZoneOffset
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
@@ -40,6 +53,198 @@ import com.lezi.babylog.domain.canManageCreatorOwnedFamilyEntity
 @OptIn(ExperimentalCoroutinesApi::class)
 class TimelineWindowRepositoryTest {
     @Test
+    fun completedSnapshotPreservesTheLegacyWakeSourceAndUncertaintyRecipe() = runTest {
+        val day = LocalDate.of(2026, 7, 30)
+        val start = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
+        val roots = listOf(
+            record(1, start + 3_600_000, 100, 100, creator = "source"),
+            record(2, start + 3_660_000, 100, 100, creator = "display"),
+            record(3, start + 3_720_000, 100, 100, creator = "other"),
+            record(4, start - 3_600_000, 100, 100, type = "sleep"),
+            record(5, start - 60_000, 100, 100, creator = "halo"),
+            record(6, start + 60_000, 100, 100, creator = "today"),
+        )
+        val db = FakeTimelineWindowDao(
+            records = roots, plans = emptyList(), media = emptyList(),
+            wakes = listOf(wake(40, "wake", "record-4", start + 3_600_000)),
+            sourceRelations = listOf(
+                TimelineSourceRelation("record-1", "record-2", "source", false),
+                TimelineSourceRelation("record-2", "record-2", "display", true),
+            ),
+        )
+        val request = request(day, start + 7_200_000)
+        val completed = timelineRepository(db, TimelineSyncPort()).observe(request).first()
+        // Same public semantic implementation used by the legacy CareLog read adapters.
+        val rawRail = db.loadRecordProjection(1, request.railStartMillis, request.railEndMillis).map {
+            it.sleepInterval?.let { interval -> it.root.toProjectedSleepRecord(interval) } ?: it.root.toModel()
+        }
+        val rawSelected = rawRail.filter { recordOverlapsWindow(it, start, request.dayEndMillis) }
+        val legacy = SuspectedDuplicateProjection.project(
+            rawRail, day, 1, ZoneOffset.UTC, request.nowMillis, setOf("record-1"),
+        )
+        val groupMembers = legacy.openGroups.flatMapTo(linkedSetOf()) { it.memberClientUuids }
+        val legacyRows = SuspectedDuplicatePresentation.timelineRows(
+            (rawSelected + rawRail.filter { it.clientUuid in groupMembers }).distinctBy { it.clientUuid },
+            legacy.openGroups, setOf("record-1"), timelineIndex = legacy.timelineIndex,
+        )
+        assertThat(completed.recordRows.map { it.record })
+            .containsExactlyElementsIn(rawSelected.filterNot { it.clientUuid == "record-1" }).inOrder()
+        assertThat(completed.summaryBounds).isEqualTo(legacy.bounds.days.single())
+        assertThat(completed.summaryBounds.hasUncertainty).isTrue()
+        assertThat(completed.duplicateRows).containsExactlyElementsIn(legacyRows).inOrder()
+        assertThat(completed.autoAlignedDisplayClientUuids).containsExactly("record-2")
+        assertThat(completed.sourceRecordsByDisplay.getValue("record-2").map { it.clientUuid })
+            .containsExactly("record-1")
+        assertThat(completed.recordRows.single { it.record.id == 4L }.record.endTimestamp)
+            .isEqualTo(start + 3_600_000)
+    }
+
+    @Test
+    fun foregroundMinuteUpdatesCompleteCachedSemanticsWithoutAnyRead() = runTest {
+        val day = LocalDate.of(2026, 7, 30)
+        val start = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
+        val db = FakeTimelineWindowDao(
+            listOf(record(1, start, 100, null, type = "sleep")), emptyList(), emptyList(),
+        )
+        val sync = TimelineSyncPort()
+        val now = MutableStateFlow(start + 60_000)
+        val seen = mutableListOf<TimelineWindowSnapshot>()
+        val collection = launch {
+            timelineRepository(db, sync).observe(request(day, start), now).collect { seen += it }
+        }
+        runCurrent()
+        val reads = db.totalQueryCount
+        assertThat(seen.last().summaryBounds.sleepMinutes).isEqualTo(LongBound(1, 1))
+        now.value = start + 120_000
+        runCurrent()
+        assertThat(seen.last().summaryBounds.sleepMinutes).isEqualTo(LongBound(2, 2))
+        assertThat(seen.last().evaluatedAtMillis).isEqualTo(now.value)
+        assertThat(db.totalQueryCount).isEqualTo(reads)
+        assertThat(db.loadSnapshotCount).isEqualTo(1)
+        assertThat(sync.memberQueryCount).isEqualTo(0)
+        collection.cancelAndJoin()
+    }
+
+    @Test
+    fun sourceRelationInvalidationUpdatesEveryCompletedSurfaceTogether() = runTest {
+        val day = LocalDate.of(2026, 7, 30)
+        val at = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli() + 60_000
+        val db = FakeTimelineWindowDao(
+            listOf(record(1, at, 100, 100, "a"), record(2, at + 1, 100, 100, "b")),
+            emptyList(), emptyList(),
+        )
+        val now = MutableStateFlow(at)
+        val seen = mutableListOf<TimelineWindowSnapshot>()
+        val collection = launch {
+            timelineRepository(db, TimelineSyncPort()).observe(request(day, at), now).collect { seen += it }
+        }
+        runCurrent()
+        assertThat(seen.last().summaryBounds.hasUncertainty).isTrue()
+        db.sourceRelations = listOf(
+            TimelineSourceRelation("record-1", "record-2", "source", false),
+            TimelineSourceRelation("record-2", "record-2", "display", true),
+        )
+        db.invalidate()
+        runCurrent()
+        val resolved = seen.last()
+        assertThat(resolved.recordRows.map { it.record.id }).containsExactly(2L)
+        assertThat(resolved.summaryBounds.hasUncertainty).isFalse()
+        // The display fact is visible but remains outside the cumulative cutoff until at + 1.
+        assertThat(resolved.summaryBounds.formulaMl.max).isEqualTo(0)
+        assertThat(resolved.openDuplicateGroups).isEmpty()
+        assertThat(resolved.sourceRecordsByDisplay.getValue("record-2").single().id).isEqualTo(1L)
+        assertThat(resolved.autoAlignedDisplayClientUuids).containsExactly("record-2")
+        val readsBeforeClockAdvance = db.totalQueryCount
+        now.value = at + 1L
+        runCurrent()
+        assertThat(seen.last().summaryBounds.formulaMl.max).isEqualTo(90)
+        assertThat(seen.last().summaryBounds.hasUncertainty).isFalse()
+        assertThat(db.totalQueryCount).isEqualTo(readsBeforeClockAdvance)
+        collection.cancelAndJoin()
+    }
+
+    @Test
+    fun nonCooperativeOldFamilyWindowCannotPublishAfterItsIdentityIsRetired() = runTest {
+        val day = LocalDate.of(2026, 7, 30)
+        val at = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli() + 60_000
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val db = FakeTimelineWindowDao(listOf(record(1, at, 100, 100)), emptyList(), emptyList())
+        var first = true
+        db.beforeRecordQuery = {
+            if (first) {
+                first = false
+                started.complete(Unit)
+                withContext(NonCancellable) { release.await() }
+            }
+        }
+        val sync = TimelineSyncPort(joinedSession(FamilyRole.Member, "self-a", familyId = "a"))
+        val seen = mutableListOf<TimelineWindowSnapshot>()
+        val collection = launch {
+            timelineRepository(db, sync).observe(request(day, at)).collect { seen += it }
+        }
+        started.await()
+        sync.setSession(joinedSession(FamilyRole.Member, "self-b", familyId = "b"))
+        runCurrent()
+        release.complete(Unit)
+        runCurrent()
+        assertThat(seen.map { it.audience.familyId }).containsExactly("b")
+        collection.cancelAndJoin()
+    }
+
+    @Test
+    fun directoryAndCheckpointChangesReuseRoomRowsAndNeverRetagOldFamilyMembers() = runTest {
+        val day = LocalDate.of(2026, 7, 30)
+        val at = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli() + 60_000
+        val db = FakeTimelineWindowDao(listOf(record(1, at, 100, 100, "author")), emptyList(), emptyList())
+        val session = joinedSession(FamilyRole.Member, "self", familyId = "a")
+        val sync = TimelineSyncPort(session, Result.success(listOf(FamilyMember("A", FamilyRole.Member, false, "author"))))
+        val seen = mutableListOf<TimelineWindowSnapshot>()
+        val collection = launch {
+            timelineRepository(db, sync).observe(request(day, at)).collect { seen += it }
+        }
+        runCurrent()
+        val firstEpoch = seen.last().audience.identityEpoch
+        val reads = db.totalQueryCount
+        sync.replaceMembers(Result.success(listOf(FamilyMember("A2", FamilyRole.Member, false, "author"))))
+        sync.setSession(session.copy(lastSuccessAt = at, accessToken = "rotated"))
+        runCurrent()
+        assertThat(db.totalQueryCount).isEqualTo(reads)
+        assertThat(seen.last().recordRows.single().uploaderLabel).isEqualTo("A2")
+        assertThat(seen.last().lastSuccessAtMillis).isEqualTo(at)
+        sync.setSession(session.copy(familyId = "b", membershipId = "self-b"))
+        runCurrent()
+        assertThat(seen.last().audience.members).isEmpty()
+        sync.setSession(session)
+        runCurrent()
+        assertThat(seen.last().audience.identityEpoch).isGreaterThan(firstEpoch!!)
+        assertThat(seen.last().audience.members).isEmpty()
+        collection.cancelAndJoin()
+    }
+
+    @Test
+    fun cancellingProjectionStopsConsumingTheLargeSnapshotBeforeFinishingEveryRow() = runTest {
+        var reads = 0
+        val operation = Job()
+        val rows = object : AbstractList<RecordEntity>() {
+            override val size = 10_000
+            override fun get(index: Int): RecordEntity {
+                if (++reads == 50) operation.cancel()
+                return RecordEntity(
+                    id = index.toLong(), clientUuid = "record-$index", babyId = 1,
+                    type = "formula", timestamp = index.toLong(), updatedAt = 1,
+                )
+            }
+        }
+        val database = FakeTimelineWindowDao(rows, emptyList(), emptyList())
+        val failure = runCatching {
+            withContext(operation) { database.loadRecordProjection(1, 0, 20_000) }
+        }.exceptionOrNull()
+        assertThat(failure).isInstanceOf(CancellationException::class.java)
+        assertThat(reads).isLessThan(1_000)
+    }
+
+    @Test
     fun hangingRemoteMemberRequestCannotDelayTheFirstRoomSnapshot() = runTest {
         val day = LocalDate.of(2026, 8, 2)
         val at = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli() + 60_000
@@ -51,7 +256,7 @@ class TimelineWindowRepositoryTest {
         ).apply {
             blockMemberQuery = true
         }
-        val repository = TimelineWindowRepository(
+        val repository = timelineRepository(
             timelineWindowDao = FakeTimelineWindowDao(
                 records = listOf(record(1, at, 100, null, creator = "self")),
                 plans = emptyList(),
@@ -86,7 +291,7 @@ class TimelineWindowRepositoryTest {
                 media(id = 11, carePlanId = 3, localUri = "", remoteUri = "receipt"),
             ),
         )
-        val repository = TimelineWindowRepository(
+        val repository = timelineRepository(
             timelineWindowDao = database,
             syncPort = TimelineSyncPort(),
         )
@@ -136,7 +341,7 @@ class TimelineWindowRepositoryTest {
             ),
             media = emptyList(),
         )
-        val repository = TimelineWindowRepository(
+        val repository = timelineRepository(
             timelineWindowDao = database,
             syncPort = TimelineSyncPort(
                 session = joinedSession(
@@ -194,7 +399,7 @@ class TimelineWindowRepositoryTest {
         assertThat(pendingPlan.canDelete).isTrue()
         assertThat(pendingPlan.canSkip).isTrue()
 
-        val owner = TimelineWindowRepository(
+        val owner = timelineRepository(
             timelineWindowDao = database,
             syncPort = TimelineSyncPort(joinedSession(FamilyRole.Owner, "owner")),
         ).observe(request(day, at)).first()
@@ -202,7 +407,7 @@ class TimelineWindowRepositoryTest {
         assertThat(owner.recordRows.single { it.record.id == 2L }.capabilities.canEdit).isTrue()
         assertThat(owner.recordRows.single { it.record.id == 2L }.capabilities.canDelete).isTrue()
 
-        val offline = TimelineWindowRepository(
+        val offline = timelineRepository(
             timelineWindowDao = database.copy(
                 records = listOf(record(7, at, 100, null, creator = "")),
                 plans = listOf(plan(6, at, 100, null, creator = "")),
@@ -215,7 +420,7 @@ class TimelineWindowRepositoryTest {
     }
 
     @Test
-    fun oneAndFiveHundredRootsUseTheSameSixRoomQueries() = runTest {
+    fun oneAndFiveHundredRootsUseTheSameBoundedRoomQueries() = runTest {
         val day = LocalDate.of(2026, 7, 30)
         val at = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli() + 60_000
 
@@ -246,7 +451,7 @@ class TimelineWindowRepositoryTest {
                     listOf(FamilyMember("妈妈", FamilyRole.Member, true, "self")),
                 ),
             )
-            val snapshot = TimelineWindowRepository(database, sync)
+            val snapshot = timelineRepository(database, sync)
                 .observe(request(day, at))
                 .first()
             assertThat(snapshot.recordRows).hasSize(rootCount)
@@ -259,8 +464,8 @@ class TimelineWindowRepositoryTest {
         val (singleDatabase, singleSync) = load(1)
         val (largeDatabase, largeSync) = load(500)
 
-        assertThat(singleDatabase.totalQueryCount).isEqualTo(6)
-        assertThat(largeDatabase.totalQueryCount).isEqualTo(6)
+        assertThat(singleDatabase.totalQueryCount).isEqualTo(7)
+        assertThat(largeDatabase.totalQueryCount).isEqualTo(7)
         assertThat(singleSync.memberQueryCount).isEqualTo(0)
         assertThat(largeSync.memberQueryCount).isEqualTo(0)
     }
@@ -281,15 +486,32 @@ class TimelineWindowRepositoryTest {
                 )
             }
             val database = FakeTimelineWindowDao(records, emptyList(), emptyList())
-            TimelineWindowRepository(
+            timelineRepository(
                 timelineWindowDao = database,
                 syncPort = TimelineSyncPort(),
             ).observe(request(day, at)).first()
             return database.totalQueryCount
         }
 
-        assertThat(projectionReads(1)).isEqualTo(6)
-        assertThat(projectionReads(100)).isEqualTo(6)
+        assertThat(projectionReads(1)).isEqualTo(7)
+        assertThat(projectionReads(100)).isEqualTo(7)
+    }
+
+    @Test
+    fun offlineDirtyWakeKeepsItsEditActionVisible() = runTest {
+        val day = LocalDate.of(2026, 7, 30)
+        val start = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli() + 60_000
+        val sleep = record(1L, start, 100L, 100L, type = "sleep")
+        val ownWake = wake(10L, "local-wake", sleep.clientUuid, start + 60_000L)
+            .copy(observerMembershipId = "", syncDirty = true)
+        val snapshot = timelineRepository(
+            FakeTimelineWindowDao(
+                records = listOf(sleep), plans = emptyList(), media = emptyList(),
+                wakes = listOf(ownWake),
+            ),
+            TimelineSyncPort(),
+        ).observe(request(day, start + 180_000L)).first()
+        assertThat(snapshot.recordRows.single().wakeObservations.single().canEdit).isTrue()
     }
 
     @Test
@@ -313,7 +535,7 @@ class TimelineWindowRepositoryTest {
             localUri = "record-media/later.jpg",
             remoteUri = "receipt",
         )
-        val snapshot = TimelineWindowRepository(
+        val snapshot = timelineRepository(
             timelineWindowDao = FakeTimelineWindowDao(
                 records = listOf(sleep),
                 plans = emptyList(),
@@ -338,7 +560,7 @@ class TimelineWindowRepositoryTest {
         val start = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli() + 60_000
         val sleep = record(1L, start, 100L, 100L, type = "sleep")
         val database = FakeTimelineWindowDao(listOf(sleep), emptyList(), emptyList())
-        val repository = TimelineWindowRepository(database, TimelineSyncPort())
+        val repository = timelineRepository(database, TimelineSyncPort())
 
         suspend fun awaitEnd(expected: Long, mutate: () -> Unit) {
             val reemitted = async(start = CoroutineStart.UNDISPATCHED) {
@@ -456,7 +678,7 @@ class TimelineWindowRepositoryTest {
             plans = listOf(plan(2, at, 100, 100, creator = "self")),
             media = listOf(media(3, recordId = 1, localUri = "photos/one.jpg", remoteUri = null)),
         )
-        val snapshot = TimelineWindowRepository(
+        val snapshot = timelineRepository(
             database,
             TimelineSyncPort(joinedSession(FamilyRole.Member, "self")),
         ).observe(request(day, at)).first()
@@ -488,7 +710,7 @@ class TimelineWindowRepositoryTest {
             media = listOf(media(3, recordId = 1, localUri = "photos/old.jpg", remoteUri = null)),
         )
         val snapshots = async {
-            TimelineWindowRepository(database, TimelineSyncPort())
+            timelineRepository(database, TimelineSyncPort())
                 .observe(request(day, at))
                 .take(2)
                 .toList()
@@ -527,7 +749,7 @@ class TimelineWindowRepositoryTest {
         }
         val requests = MutableSharedFlow<TimelineWindowRequest>(extraBufferCapacity = 2)
         val result = async(start = CoroutineStart.UNDISPATCHED) {
-            TimelineWindowRepository(database, TimelineSyncPort())
+            timelineRepository(database, TimelineSyncPort())
                 .observe(requests)
                 .first()
         }
@@ -556,7 +778,7 @@ class TimelineWindowRepositoryTest {
             session = joinedSession(FamilyRole.Member, "self-a", familyId = "family-a"),
         )
         val result = async(start = CoroutineStart.UNDISPATCHED) {
-            TimelineWindowRepository(database, sync)
+            timelineRepository(database, sync)
                 .observe(request(day, at))
                 .first { it.audience.familyId == "family-b" }
         }
@@ -579,7 +801,7 @@ class TimelineWindowRepositoryTest {
             session = joinedSession(FamilyRole.Member, "self"),
             members = Result.success(listOf(oldMember)),
         )
-        val repository = TimelineWindowRepository(
+        val repository = timelineRepository(
             timelineWindowDao = FakeTimelineWindowDao(
                 records = listOf(record(1, at, 100, 100, creator = "author")),
                 plans = emptyList(),
@@ -615,7 +837,7 @@ class TimelineWindowRepositoryTest {
         }
         var publishedCount = 0
         val collection = launch(start = CoroutineStart.UNDISPATCHED) {
-            TimelineWindowRepository(database, TimelineSyncPort())
+            timelineRepository(database, TimelineSyncPort())
                 .observe(request(day, at))
                 .collect { publishedCount += 1 }
         }
@@ -638,7 +860,7 @@ class TimelineWindowRepositoryTest {
         )
         val requests = MutableSharedFlow<TimelineWindowRequest>(extraBufferCapacity = 4)
         val snapshots = async(start = CoroutineStart.UNDISPATCHED) {
-            TimelineWindowRepository(database, TimelineSyncPort())
+            timelineRepository(database, TimelineSyncPort())
                 .observe(requests)
                 .take(2)
                 .toList()
@@ -694,7 +916,7 @@ class TimelineWindowRepositoryTest {
         )
         val requests = MutableSharedFlow<TimelineWindowRequest>(extraBufferCapacity = 4)
         val snapshots = async(start = CoroutineStart.UNDISPATCHED) {
-            TimelineWindowRepository(database, TimelineSyncPort())
+            timelineRepository(database, TimelineSyncPort())
                 .observe(requests)
                 .take(2)
                 .toList()
@@ -725,17 +947,29 @@ private class FakeTimelineWindowDao(
     private var media: List<MediaAssetEntity>,
     private var wakes: List<WakeObservationEntity> = emptyList(),
     private var wakeMedia: List<MediaAssetEntity> = emptyList(),
+    var sourceRelations: List<TimelineSourceRelation> = emptyList(),
 ) : TimelineWindowDao {
+    override suspend fun listWindowSourceRelations(
+        babyId: Long, startInclusive: Long, endExclusive: Long,
+    ): List<TimelineSourceRelation> {
+        totalQueryCount += 1
+        return sourceRelations
+    }
+
     private val invalidations = MutableStateFlow(0L)
     var totalQueryCount: Int = 0
         private set
     var loadSnapshotCount: Int = 0
         private set
+    var beforeRecordQuery: (suspend () -> Unit)? = null
     var blockRecordQueryForBaby: Long? = null
     val recordQueryStarted = CompletableDeferred<Unit>()
     var cancelledRecordQueryCount: Int = 0
         private set
-    override suspend fun listTerminalReceiptKeyAndEpochs(): List<com.lezi.babylog.core.database.TerminalReceiptKeyAndEpoch> = emptyList()
+    override suspend fun listTerminalReceiptKeyAndEpochs(): List<com.lezi.babylog.core.database.TerminalReceiptKeyAndEpoch> {
+        totalQueryCount += 1
+        return emptyList()
+    }
 
     override suspend fun loadSnapshot(
         babyId: Long,
@@ -758,10 +992,7 @@ private class FakeTimelineWindowDao(
         )
     }
 
-    override fun observeInvalidations(): Flow<Long> = flow {
-        totalQueryCount += 1
-        emitAll(invalidations)
-    }
+    override fun observeInvalidations(): Flow<Long> = invalidations
 
     override fun observeRecordWakeInvalidations(): Flow<Long> = observeInvalidations()
 
@@ -771,6 +1002,7 @@ private class FakeTimelineWindowDao(
         endExclusive: Long,
     ): List<RecordEntity> {
         totalQueryCount += 1
+        beforeRecordQuery?.invoke()
         if (babyId == blockRecordQueryForBaby) {
             recordQueryStarted.complete(Unit)
             try {
@@ -860,8 +1092,8 @@ private class FakeTimelineWindowDao(
 
     override suspend fun listActiveLogMedia(
         babyId: Long,
-        recordStartInclusive: Long,
-        recordEndExclusive: Long,
+        startInclusive: Long,
+        endExclusive: Long,
         planDayStart: Long,
         planDayEnd: Long,
         nowMillis: Long,
@@ -902,6 +1134,10 @@ private class TimelineSyncPort(
 ) : SyncPort by NoOpSyncPort() {
     private val sessionFlow = MutableStateFlow(session)
     private val memberDirectoryFlow = MutableStateFlow(members.getOrDefault(emptyList()))
+    private val familyReadFlow = MutableStateFlow(
+        FamilyReadSnapshot(session.toPresentation(), 1L, members.getOrDefault(emptyList())),
+    )
+    override fun familyReadSnapshot(): Flow<FamilyReadSnapshot> = familyReadFlow
     var memberQueryCount: Int = 0
         private set
     var blockMemberQueryForFamily: String? = null
@@ -912,6 +1148,9 @@ private class TimelineSyncPort(
     var memberDirectoryRefreshCount: Int = 0
         private set
 
+    override fun sessionPresentation() = session().map { it.toPresentation() }
+
+    @Deprecated("Use sessionPresentation() outside sync internals")
     override fun session(): Flow<SyncSession> = sessionFlow
     override fun familyMemberDirectory(): Flow<List<FamilyMember>> = memberDirectoryFlow
 
@@ -934,12 +1173,23 @@ private class TimelineSyncPort(
     }
 
     fun setSession(session: SyncSession) {
+        val old = sessionFlow.value
+        val switched = old.familyId != session.familyId || old.membershipId != session.membershipId ||
+            old.deviceId != session.deviceId || old.baseUrl != session.baseUrl
         sessionFlow.value = session
+        familyReadFlow.value = FamilyReadSnapshot(
+            session.toPresentation(),
+            familyReadFlow.value.identityEpoch!! + if (switched) 1 else 0,
+            if (switched) emptyList() else familyReadFlow.value.members,
+        )
     }
 
     fun replaceMembers(members: Result<List<FamilyMember>>) {
         this.members = members
-        members.getOrNull()?.let { memberDirectoryFlow.value = it }
+        members.getOrNull()?.let {
+            memberDirectoryFlow.value = it
+            familyReadFlow.value = familyReadFlow.value.copy(members = it)
+        }
     }
 }
 
@@ -1051,3 +1301,9 @@ private fun wake(
     observerMembershipId = "member",
     updatedAt = at,
 )
+
+/** Keep deterministic flow scheduling while production projects on Dispatchers.Default. */
+private fun timelineRepository(
+    timelineWindowDao: TimelineWindowDao,
+    syncPort: SyncPort,
+): TimelineWindowRepository = TimelineWindowRepository(timelineWindowDao, syncPort, Dispatchers.Unconfined)

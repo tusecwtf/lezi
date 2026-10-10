@@ -53,7 +53,7 @@ class HttpSyncBackendAppUpdateStreamSeamTest {
             }
         }
 
-        val cacheDir = createTempDir(prefix = "lezi-apk-stream-ok")
+        val cacheDir = kotlin.io.path.createTempDirectory(prefix = "lezi-apk-stream-ok").toFile()
         try {
             val stagingFile = appUpdateStagingApk(cacheDir)
             appUpdateStagingDir(cacheDir).mkdirs()
@@ -111,7 +111,7 @@ class HttpSyncBackendAppUpdateStreamSeamTest {
             }
         }
 
-        val cacheDir = createTempDir(prefix = "lezi-apk-over-cap")
+        val cacheDir = kotlin.io.path.createTempDirectory(prefix = "lezi-apk-over-cap").toFile()
         try {
             val stagingFile = appUpdateStagingApk(cacheDir)
             appUpdateStagingDir(cacheDir).mkdirs()

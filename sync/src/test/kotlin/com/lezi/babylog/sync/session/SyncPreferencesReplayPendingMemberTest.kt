@@ -12,6 +12,8 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -27,6 +29,282 @@ import com.lezi.babylog.sync.backend.MemberLoginReceipt
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class SyncPreferencesReplayPendingMemberTest {
+    @Test
+    fun qrOwnershipCreatesNoTemporaryTrustAndLateCleanupCannotRetireAnotherClaim() = runTest {
+        val file = File.createTempFile("lezi-qr-owner-", ".preferences_pb").also { it.delete() }
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val prefs = preferences(PreferenceDataStoreFactory.create(scope = scope) { file })
+        val endpoint = TrustedEndpointProfile.systemPki("https://family.example.com")
+        try {
+            val owner = prefs.memberReconnectOwner()
+            assertThat(prefs.beginMemberQrClaim("qr-a", owner)).isTrue()
+            assertThat(prefs.verifiedEndpoint.first()).isNull()
+            assertThat(prefs.beginMemberQrClaim("qr-b", owner)).isTrue()
+            prefs.endMemberQrClaim("qr-a")
+            val joined = SyncSession(familyId = "family", membershipId = "member", deviceId = "device", role = FamilyRole.Member,
+                serverHost = "family.example.com", serverPort = 443, refreshToken = "session-secret")
+            assertThat(prefs.activateMemberQrClaimIfCurrent("qr-a", owner, joined, endpoint, null)).isFalse()
+            assertThat(prefs.activateMemberQrClaimIfCurrent("qr-b", owner, joined, endpoint, null)).isTrue()
+            prefs.endMemberQrClaim("qr-a")
+            assertThat(prefs.verifiedEndpoint.first()).isEqualTo(endpoint)
+            assertThat(prefs.session.first().deviceId).isEqualTo("device")
+        } finally { scope.cancel(); file.delete() }
+    }
+
+    @Test
+    fun explicitForgetInvalidatesQrEvenWhenNoTrustHadBeenPersisted() = runTest {
+        val file = File.createTempFile("lezi-qr-forget-", ".preferences_pb").also { it.delete() }
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val prefs = preferences(PreferenceDataStoreFactory.create(scope = scope) { file })
+        try {
+            val owner = prefs.memberReconnectOwner()
+            prefs.beginMemberQrClaim("qr-a", owner)
+            prefs.forgetEndpoint()
+            val endpoint = TrustedEndpointProfile.systemPki("https://family.example.com")
+            assertThat(prefs.activateMemberQrClaimIfCurrent("qr-a", owner,
+                SyncSession(familyId = "family", deviceId = "device", role = FamilyRole.Member), endpoint, null)).isFalse()
+            assertThat(prefs.verifiedEndpoint.first()).isNull()
+        } finally { scope.cancel(); file.delete() }
+    }
+
+    @Test
+    fun readyEndpointAndCertificateEditsCannotImplicitlyAbandonAnUnknownWrite() = runTest {
+        val file = File.createTempFile("lezi-member-trust-fence-", ".preferences_pb").also { it.delete() }
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val prefs = preferences(PreferenceDataStoreFactory.create(scope = scope) { file })
+        val original = TrustedEndpointProfile.systemPki("https://family.example.com")
+        val other = TrustedEndpointProfile.systemPki("https://other.example.com")
+        val changedCertificate = TrustedEndpointProfile.tofuSpki(original.origin,
+            Base64.getEncoder().encodeToString(ByteArray(32) { 1 }))
+        val attempt = PendingMemberLogin("", "妈妈", "Phone", 0, "operation-a", original.origin, true)
+        try {
+            prefs.rememberEndpoint(original)
+            prefs.saveMemberLoginAttempt(attempt)
+            prefs.rememberEndpoint(original)
+            for (candidate in listOf(other, changedCertificate)) {
+                assertThat(runCatching { prefs.rememberEndpoint(candidate) }.isFailure).isTrue()
+                assertThat(prefs.memberLoginAttempt()).isEqualTo(attempt)
+                assertThat(prefs.verifiedEndpoint.first()).isEqualTo(original)
+            }
+            // Automatic trust invalidation is not the user's explicit abandon command.
+            prefs.forgetEndpoint(retainMemberAttempts = true)
+            assertThat(prefs.memberLoginAttempt()).isEqualTo(attempt)
+            assertThat(runCatching { prefs.rememberEndpoint(other) }.isFailure).isTrue()
+            prefs.forgetEndpoint()
+            prefs.rememberEndpoint(other)
+            assertThat(prefs.memberLoginAttempt()).isNull()
+            assertThat(prefs.verifiedEndpoint.first()).isEqualTo(other)
+        } finally { scope.cancel(); file.delete() }
+    }
+
+    @Test
+    fun capturedUnknownOperationCanAbandonItsReceiptWhileTheSecureHandoffIsBlocked() = runTest {
+        val file = File.createTempFile("lezi-member-lineage-", ".preferences_pb").also { it.delete() }
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val base = InMemorySecureRefreshTokenStore()
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val release = java.util.concurrent.CountDownLatch(1)
+        val tokens = object : SecureRefreshTokenStore by base {
+            override fun setPendingMemberSecret(secret: String) {
+                entered.complete(Unit)
+                check(release.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                base.setPendingMemberSecret(secret)
+            }
+        }
+        val prefs = preferences(PreferenceDataStoreFactory.create(scope = scope) { file }, tokens)
+        val attempt = PendingMemberLogin("", "妈妈", "Phone", 0, "operation-a", "https://family.example.com", true)
+        prefs.saveMemberLoginAttempt(attempt)
+        try {
+            val handoff = async { prefs.savePendingMemberLogin(MemberLoginReceipt("server-r", "secret-r", 20), "妈妈", "Phone", attempt.operationId) }
+            entered.await()
+            val captured = requireNotNull(prefs.pendingMemberLogin.first())
+            val abandon = async { prefs.clearPendingMemberLogin(expectedOperationId = captured.operationId) }
+            runCurrent()
+            release.countDown()
+            handoff.await()
+            abandon.await()
+            assertThat(prefs.pendingMemberLogin.first()).isNull()
+            assertThat(prefs.pendingMemberSecret()).isEmpty()
+        } finally { release.countDown(); scope.cancel(); file.delete() }
+    }
+
+    @Test
+    fun knownReceiptRetainsItsLocalOperationIdentityAfterRestart() = runTest {
+        val file = File.createTempFile("lezi-member-lineage-restart-", ".preferences_pb").also { it.delete() }
+        val firstScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val tokens = InMemorySecureRefreshTokenStore()
+        val first = preferences(PreferenceDataStoreFactory.create(scope = firstScope) { file }, tokens)
+        val attempt = PendingMemberLogin("", "妈妈", "Phone", 0, "operation-a", "https://family.example.com", true)
+        first.saveMemberLoginAttempt(attempt)
+        first.savePendingMemberLogin(MemberLoginReceipt("server-r", "secret-r", 20), "妈妈", "Phone", attempt.operationId)
+        firstScope.cancel()
+        advanceUntilIdle()
+        val secondScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val restored = preferences(PreferenceDataStoreFactory.create(scope = secondScope) { file }, tokens)
+        try {
+            val known = requireNotNull(restored.pendingMemberLogin.first())
+            assertThat(known.operationId).isEqualTo(attempt.operationId)
+            assertThat(known.requestId).isEqualTo("server-r")
+            assertThat(known.remoteOutcomeUnknown).isFalse()
+            restored.clearPendingMemberLogin(expectedOperationId = attempt.operationId)
+            assertThat(restored.pendingMemberLogin.first()).isNull()
+        } finally { secondScope.cancel(); file.delete() }
+    }
+
+    @Test
+    fun oldNormalClaimCannotReadOrActivateAfterItsPendingSlotWasReplaced() = runTest {
+        val file = File.createTempFile("lezi-normal-claim-cas-", ".preferences_pb").also { it.delete() }
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val prefs = preferences(PreferenceDataStoreFactory.create(scope = scope) { file })
+        try {
+            prefs.saveEndpointConfig(FamilyEndpointConfig(host = "family.example.com"))
+            prefs.savePendingMemberLogin(MemberLoginReceipt("old-request", "old-secret", 10), "爸爸", "Phone")
+            val owner = prefs.memberReconnectOwner()
+            prefs.clearPendingMemberLogin(expectedOperationId = "old-request")
+            prefs.savePendingMemberLogin(MemberLoginReceipt("new-request", "new-secret", 20), "妈妈", "Tablet")
+            assertThat(prefs.pendingMemberSecretIfCurrent("old-request", owner)).isNull()
+            assertThat(prefs.activatePendingMemberIfCurrent("old-request", owner,
+                SyncSession(familyId = "family", deviceId = "old-device", membershipId = "old-member",
+                    role = FamilyRole.Member, serverHost = "family.example.com", refreshToken = "old-claimed-secret"),
+                prefs.session.first())).isFalse()
+            prefs.clearPendingMemberLogin(expectedOperationId = "old-request")
+            assertThat(prefs.pendingMemberLogin.first()?.requestId).isEqualTo("new-request")
+            assertThat(prefs.pendingMemberSecret()).isEqualTo("new-secret")
+            assertThat(prefs.session.first().isJoined).isFalse()
+        } finally { scope.cancel(); file.delete() }
+    }
+
+    @Test
+    fun candidateActivationRequiresItsOriginalDurableOperationAndIdentity() = runTest {
+        for (transition in listOf("forget", "replace-device", "owner-reconnect")) {
+            val file = File.createTempFile("lezi-candidate-cas-", ".preferences_pb").also { it.delete() }
+            val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+            val prefs = preferences(PreferenceDataStoreFactory.create(scope = scope) { file })
+            try {
+                val old = SyncSession(familyId = "family", membershipId = "member", deviceId = "device",
+                    role = FamilyRole.Member, serverHost = "old.example.com", refreshToken = "old-secret")
+                prefs.saveSession(old)
+                prefs.rememberEndpoint(TrustedEndpointProfile.systemPki(old.baseUrl))
+                val owner = prefs.memberReconnectOwner()
+                val target = TrustedEndpointProfile.systemPki("https://candidate.example.com")
+                val attempt = PendingMemberLogin("", "妈妈", "Phone", 0, "operation", target.origin, true)
+                assertThat(prefs.beginReconnectMemberAttempt(attempt, owner)).isTrue()
+                when (transition) {
+                    "forget" -> prefs.forgetEndpoint()
+                    "replace-device" -> prefs.saveSession(old.copy(deviceId = "new-device", membershipId = "new-member"))
+                    else -> prefs.saveReconnectedSession(old.copy(role = FamilyRole.Owner), TrustedEndpointProfile.systemPki("https://owner.example.com"))
+                }
+                val retained = prefs.session.first()
+                assertThat(prefs.isReconnectMemberAttemptCurrent(attempt.operationId, owner)).isFalse()
+                assertThat(prefs.activateReconnectMemberIfCurrent(attempt.operationId, owner,
+                    old.copy(serverHost = "candidate.example.com"), target)).isFalse()
+                assertThat(prefs.session.first()).isEqualTo(retained)
+                assertThat(prefs.verifiedEndpoint.first()?.origin).isNotEqualTo(target.origin)
+            } finally { scope.cancel(); file.delete() }
+        }
+    }
+
+    @Test
+    fun delayedSecretCleanupCannotEraseANewerReceipt() = runTest {
+        val file = File.createTempFile("lezi-member-secret-race-", ".preferences_pb").also { it.delete() }
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val base = InMemorySecureRefreshTokenStore()
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val release = java.util.concurrent.CountDownLatch(1)
+        val tokens = object : SecureRefreshTokenStore by base {
+            override fun clearPendingMemberSecret() {
+                entered.complete(Unit)
+                check(release.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                base.clearPendingMemberSecret()
+            }
+        }
+        val prefs = preferences(PreferenceDataStoreFactory.create(scope = scope) { file }, tokens)
+        prefs.savePendingMemberLogin(MemberLoginReceipt("request-a", "secret-a", 10), "爸爸", "Phone")
+        try {
+            val clear = async { prefs.clearPendingMemberLogin() }
+            entered.await()
+            val newer = async {
+                prefs.savePendingMemberLogin(MemberLoginReceipt("request-b", "secret-b", 20), "妈妈", "Tablet")
+            }
+            runCurrent()
+            assertThat(newer.isCompleted).isFalse()
+            release.countDown()
+            clear.await()
+            newer.await()
+            assertThat(prefs.pendingMemberLogin.first()?.requestId).isEqualTo("request-b")
+            assertThat(prefs.pendingMemberSecret()).isEqualTo("secret-b")
+        } finally {
+            release.countDown()
+            scope.cancel()
+            file.delete()
+        }
+    }
+
+    @Test
+    fun oldAttemptFailureCleanupCannotRetireANewerOperation() = runTest {
+        val file = File.createTempFile("lezi-member-attempt-cas-", ".preferences_pb").also { it.delete() }
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val prefs = preferences(PreferenceDataStoreFactory.create(scope = scope) { file })
+        val newer = PendingMemberLogin("", "妈妈", "Phone", 0, "new-operation", "https://family.example.com", true)
+        try {
+            prefs.saveMemberLoginAttempt(newer)
+            prefs.clearMemberLoginAttempt(expectedOperationId = "old-operation")
+            assertThat(prefs.memberLoginAttempt()).isEqualTo(newer)
+        } finally { scope.cancel(); file.delete() }
+    }
+
+    @Test
+    fun rejectedLateReceiptDoesNotOverwriteTheCurrentSecureSlot() = runTest {
+        val file = File.createTempFile("lezi-member-late-secret-", ".preferences_pb").also { it.delete() }
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val prefs = preferences(PreferenceDataStoreFactory.create(scope = scope) { file })
+        try {
+            prefs.savePendingMemberLogin(MemberLoginReceipt("current", "current-secret", 20), "妈妈", "Tablet")
+            val late = runCatching {
+                prefs.savePendingMemberLogin(MemberLoginReceipt("old", "old-secret", 10), "爸爸", "Phone", "retired-operation")
+            }
+            assertThat(late.isFailure).isTrue()
+            assertThat(prefs.pendingMemberLogin.first()?.requestId).isEqualTo("current")
+            assertThat(prefs.pendingMemberSecret()).isEqualTo("current-secret")
+        } finally {
+            scope.cancel()
+            file.delete()
+        }
+    }
+
+    @Test
+    fun unknownMemberAttemptSurvivesRestartWithoutASecretAndIsRetiredByEndpointForget() = runTest {
+        val file = File.createTempFile("lezi-member-unknown-", ".preferences_pb").also { it.delete() }
+        val firstScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val first = preferences(PreferenceDataStoreFactory.create(scope = firstScope) { file })
+        val attempt = PendingMemberLogin(
+            requestId = "", displayName = "爸爸", deviceName = "Phone", expiresAtEpochSeconds = 0,
+            operationId = "local-operation-1", endpointOrigin = "https://family.example.com",
+            remoteOutcomeUnknown = true,
+        )
+        first.saveMemberLoginAttempt(attempt)
+        first.saveMemberLoginAttempt(attempt, reconnect = true)
+        firstScope.cancel()
+        advanceUntilIdle()
+        val secondScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val restored = preferences(PreferenceDataStoreFactory.create(scope = secondScope) { file })
+        try {
+            assertThat(restored.pendingMemberLogin.first()).isEqualTo(attempt)
+            assertThat(restored.memberLoginAttempt(reconnect = true)).isEqualTo(attempt)
+            assertThat(restored.pendingMemberSecret()).isEmpty()
+            assertThat(runCatching {
+                restored.saveEndpointConfig(FamilyEndpointConfig(host = "different.example.com"))
+            }.isFailure).isTrue()
+            assertThat(restored.memberLoginAttempt()).isEqualTo(attempt)
+            restored.forgetEndpoint()
+            assertThat(restored.pendingMemberLogin.first()).isNull()
+            assertThat(restored.memberLoginAttempt(reconnect = true)).isNull()
+        } finally {
+            secondScope.cancel()
+            file.delete()
+        }
+    }
+
     @Test
     fun createRequestIdSurvivesRetryUntilOwnerSessionIsPersisted() = runTest {
         val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }

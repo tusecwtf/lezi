@@ -15,10 +15,112 @@ import java.net.URL
 import java.security.cert.Certificate
 import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.HttpsURLConnection
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
 
 class HttpSyncBackendKeepAliveTest {
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun quietHeartbeatsRetireCompletedConnectionsWithoutADataRound() = runTest {
+        val completed = java.util.concurrent.CopyOnWriteArrayList<RecordingHttpsConnection>()
+        val paths = java.util.concurrent.CopyOnWriteArrayList<String>()
+        var elapsedMillis = 0L
+        val http = testBackend(
+            connectionFactory = SyncHttpConnectionFactory { url ->
+                paths += url.path
+                RecordingHttpsConnection(200, HEARTBEAT_JSON).also(completed::add)
+            },
+            familyHttpClock = SyncRetryClock { SyncRetryTime(0, elapsedMillis) },
+        )
+        val recording = com.lezi.babylog.sync.RecordingSyncBackend()
+        val delegate = object : SyncBackend by recording {
+            override suspend fun heartbeat(session: SyncSession) = http.heartbeat(session)
+        }
+        val session = keepAliveSession()
+        val rig = com.lezi.babylog.sync.SyncRig(session.copy(familyId = ""), syncBackend = delegate)
+        rig.port.heartbeatLoopScopeOverride = backgroundScope
+        rig.port.heartbeatJitterOverride = com.lezi.babylog.sync.heartbeat.HeartbeatJitterSource { 0 }
+        rig.awaitStartupRecovery()
+        rig.preferences.saveSession(session)
+        rig.preferences.seedFamilyMemberDirectory(generation = "directory-quiet", members = emptyList())
+        fun pumpUntil(condition: () -> Boolean) {
+            val limit = System.nanoTime() + 5_000_000_000L
+            while (true) {
+                Thread.sleep(1)
+                testScheduler.runCurrent()
+                if (condition()) return
+                check(System.nanoTime() < limit) { "quiet loop did not settle" }
+            }
+        }
+        pumpUntil { rig.port.heartbeatLoopActive }
+        repeat(1_000) { index ->
+            // The production facade waits on its deadline and invokes the actual
+            // HTTP heartbeat parser. Equal three-key snapshots must stay NoAction.
+            elapsedMillis += 300_000L
+            rig.clock.now += 300_000L
+            testScheduler.advanceTimeBy(300_000L)
+            testScheduler.runCurrent()
+            pumpUntil { completed.size == index + 1 && rig.port.heartbeatNextBeatAtMillis.value!! > rig.clock.now }
+            assertThat(completed.count { it.disconnectCount.get() == 0 }).isAtMost(1)
+            assertThat(recording.handshakeCalls).isEqualTo(0)
+            assertThat(recording.pullCount).isEqualTo(0)
+        }
+        assertThat(paths).hasSize(1_000)
+        assertThat(paths.toSet()).containsExactly("/v1/sync/heartbeat")
+        rig.foreground.setForeground(false)
+        pumpUntil { !rig.port.heartbeatLoopActive }
+        http.releaseForegroundKeepAlive()
+        assertThat(completed.all { it.disconnectCount.get() > 0 }).isTrue()
+    }
+
+    @Test
+    fun quietHeartbeatEvictionDoesNotDisconnectAnActiveMediaRequest() = kotlinx.coroutines.runBlocking {
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val active = RecordingHttpsConnection(200, "media", beforeResponse = {
+            entered.countDown()
+            check(release.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        })
+        var elapsedMillis = 0L
+        val backend = testBackend(
+            connectionFactory = SyncHttpConnectionFactory { url ->
+                if (url.path.startsWith("/v1/media/")) active else RecordingHttpsConnection(200, HEARTBEAT_JSON)
+            },
+            familyHttpClock = SyncRetryClock { SyncRetryTime(0, elapsedMillis) },
+        )
+        val request = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).async {
+            backend.getMedia(keepAliveSession(), "synthetic-media")
+        }
+        try {
+            assertThat(entered.await(2, java.util.concurrent.TimeUnit.SECONDS)).isTrue()
+            repeat(20) {
+                elapsedMillis += 1L
+                val beat = backend.heartbeat(keepAliveSession())
+                assertThat(beat.headRev).isEqualTo(0)
+                assertThat(active.disconnectCount.get()).isEqualTo(0)
+            }
+            release.countDown()
+            assertThat(request.await().toString(Charsets.UTF_8)).isEqualTo("media")
+        } finally {
+            release.countDown()
+            request.cancel()
+            backend.releaseForegroundKeepAlive()
+        }
+    }
+
+    @Test
+    fun rapidCompletedRequestsKeepOnlyABoundedNumberOfReusableHandles() = runTest {
+        val completed = mutableListOf<RecordingHttpsConnection>()
+        val backend = testBackend(SyncHttpConnectionFactory {
+            RecordingHttpsConnection(200, HANDSHAKE_JSON).also(completed::add)
+        })
+        repeat(1_000) { backend.authenticatedHandshake(keepAliveSession()) }
+        assertThat(completed.count { it.disconnectCount.get() == 0 }).isAtMost(16)
+        backend.releaseForegroundKeepAlive()
+        assertThat(completed.all { it.disconnectCount.get() == 1 }).isTrue()
+    }
+
     @Test
     fun handshakeThenPullOnTheSamePinDoesNotDisconnectAfterEach2xx() = runTest {
         val handshake = RecordingHttpsConnection(200, HANDSHAKE_JSON)
@@ -569,12 +671,14 @@ private class RecordingHttpsConnection(
     private val responseFailure: Throwable? = null,
     private val inFlight: AtomicInteger? = null,
     private val maxInFlight: AtomicInteger? = null,
+    private val beforeResponse: () -> Unit = {},
 ) : HttpsURLConnection(url) {
     private val bytes = body.toByteArray(Charsets.UTF_8)
     private val requestBytes = ByteArrayOutputStream()
     val disconnectCount = AtomicInteger(0)
 
     override fun getResponseCode(): Int {
+        beforeResponse()
         responseFailure?.let { throw it }
         inFlight?.let { current ->
             val now = current.incrementAndGet()
@@ -615,7 +719,7 @@ private class RecordingHttpsConnection(
 }
 
 private val HANDSHAKE_JSON =
-    """{"protocol_version":1,"server_version":"0.4.0","ready":true,"capabilities":["causal_sync_v2"],"principal":{"membership_id":"membership-self","device_id":"device","role":"owner"},"directory_generation":"${"a".repeat(64)}","limits":{"pull_page_max_entities":200,"pull_page_max_encoded_bytes":9437184,"pull_page_max_decoded_bytes":8388608,"pull_max_pages":500,"commit_batch_max_units":64,"media_max_bytes":10485760},"compression":{"pull_response":["gzip","identity"]},"retry_hints":{"retry_after":true}}"""
+    """{"protocol_version":1,"server_version":"0.5.5","ready":true,"capabilities":["causal_sync_v2","nursing_plan_intent_v1"],"principal":{"membership_id":"membership-self","device_id":"device","role":"owner"},"directory_generation":"${"a".repeat(64)}","limits":{"pull_page_max_entities":200,"pull_page_max_encoded_bytes":9437184,"pull_page_max_decoded_bytes":8388608,"pull_max_pages":500,"commit_batch_max_units":64,"media_max_bytes":10485760},"compression":{"pull_response":["gzip","identity"]},"retry_hints":{"retry_after":true}}"""
 
 private const val EMPTY_PULL_JSON =
     """{"entities":[],"cursor":0,"generation":"generation-a","page_index":0,"has_more":false,"family_name":null}"""
@@ -639,3 +743,6 @@ private const val HEALTH_JSON =
 
 private const val READY_JSON =
     """{"ok":true,"status":"ready","version":"0.3.3"}"""
+
+private const val HEARTBEAT_JSON =
+    """{"generation":"generation-a","head_rev":0,"directory_generation":"directory-quiet"}"""

@@ -25,9 +25,12 @@ internal data class FamilyHttpBudget(
     }
 }
 
+internal enum class FamilyHttpReplay { ReadOnly, ExactReceipt, Never }
+
 internal enum class FamilyHttpOperation(
     val budget: FamilyHttpBudget,
     val elapsedKind: FamilyHttpFailureKind,
+    val replay: FamilyHttpReplay = FamilyHttpReplay.ReadOnly,
 ) {
     Probe(
         FamilyHttpBudget(
@@ -39,6 +42,17 @@ internal enum class FamilyHttpOperation(
         ),
         elapsedKind = FamilyHttpFailureKind.ResponseTimedOut,
     ),
+    SessionRead(
+        FamilyHttpBudget(
+            connectTimeoutMillis = 3_000,
+            responseTimeoutMillis = 8_000,
+            maxAttempts = 2,
+            maxElapsedMillis = 12_000,
+            writeStallTimeoutMillis = 5_000,
+        ),
+        elapsedKind = FamilyHttpFailureKind.ResponseTimedOut,
+        replay = FamilyHttpReplay.ReadOnly,
+    ),
     Session(
         FamilyHttpBudget(
             connectTimeoutMillis = 3_000,
@@ -48,6 +62,7 @@ internal enum class FamilyHttpOperation(
             writeStallTimeoutMillis = 5_000,
         ),
         elapsedKind = FamilyHttpFailureKind.ResponseTimedOut,
+        replay = FamilyHttpReplay.ExactReceipt,
     ),
     SessionWrite(
         FamilyHttpBudget(
@@ -58,6 +73,7 @@ internal enum class FamilyHttpOperation(
             writeStallTimeoutMillis = 5_000,
         ),
         elapsedKind = FamilyHttpFailureKind.ResponseTimedOut,
+        replay = FamilyHttpReplay.Never,
     ),
     AppUpdateMetadata(
         FamilyHttpBudget(

@@ -70,6 +70,8 @@ fun familyFailureKind(error: Throwable): FailureKind? {
             is SyncRetryBudgetExceededException -> return FailureKind.ResponseTimedOut
             is TimeoutCancellationException -> return FailureKind.ResponseTimedOut
             is ClientUpdateRequiredException -> return FailureKind.AppUpdateRequired
+            is ServerUpdateRequiredException -> return FailureKind.ServerUpdateRequired
+            is MediaIdentityProtocolException -> return FailureKind.UnexpectedError
             is ReauthRequiredException -> return FailureKind.SessionExpired
             is MemberLoginQrUnavailableException -> return FailureKind.QrExpired
             is MemberLoginQrTrustChangedException -> return FailureKind.CertificateChanged
@@ -220,6 +222,7 @@ internal fun isUnrecoverableForegroundStop(error: Throwable): Boolean {
         FailureKind.SessionExpired,
         FailureKind.CertificateChanged,
         FailureKind.AppUpdateRequired,
+        FailureKind.ServerUpdateRequired,
         FailureKind.QrExpired,
         FailureKind.QrWrongHousehold,
         FailureKind.ServerHasNoFamily,

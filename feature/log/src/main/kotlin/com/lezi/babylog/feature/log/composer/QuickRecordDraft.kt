@@ -117,9 +117,20 @@ internal data class QuickRecordSaveCommand(
     val timestamp: Long,
     val endTimestamp: Long?,
     val note: String?,
-    val payloadJson: String,
-    val schemaVersion: Int,
-) : java.io.Serializable
+    // Retained only to read pending commands saved by the pre-typed app.
+    val payloadJson: String? = null,
+    val schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+    val typedPayload: RecordPayload? = null,
+) : java.io.Serializable {
+    fun payload(): RecordPayload = typedPayload ?: RecordPayloadCodec.decode(
+        type, requireNotNull(payloadJson) { "待保存护理内容已失效" }, schemaVersion,
+    ).payload.also { require(it !is UnknownPayload) { "待保存护理内容格式已失效" } }
+
+    companion object {
+        // Measured from the pre-typed QuickRecordSaveCommand validation bytecode.
+        private const val serialVersionUID: Long = 2536218585422911679L
+    }
+}
 
 /**
  * One draft model shared by every quick-record sheet.
@@ -522,8 +533,7 @@ internal data class QuickRecordDraft(
         endTimestamp = endTimestampForWrite().takeUnless { type == RecordType.WALK },
 
         note = note.trim().ifBlank { null },
-        payloadJson = payloadDocument().let(RecordPayloadCodec::encode),
-        schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+        typedPayload = payloadDocument().payload,
     )
 
     fun confirmLabel(nowMillis: Long = RecordTime.currentTimeMillis()): String = when {

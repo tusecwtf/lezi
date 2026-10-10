@@ -330,7 +330,7 @@ resolution 只提交每条冲突路径恰一个 choice ID，label 只用于展�
 _Avoid_: 提交裸值或 rebuilt root、按 label 选择、把旧 token 的 ID 猜配到新快照、漏选/重复选路径
 
 **来源关系**：
-显式确认「不同 UUID 实为同一事件」后，把未选为展示版的原根与媒体永久保留的关系；**不是** 普通 record tombstone，也不进入墓碑复活/禁复活语义。
+按 [ADR-0023](docs/adr/0023-auto-near-neighbor-source-relations.md) 自动近邻归组或授权用户显式声明后形成的关系；未选为展示版的原根与媒体永久保留，不自动揉合 payload。**不是** 普通 record tombstone，也不进入墓碑复活/禁复活语义。
 _Avoid_: 把来源写成 deleted_at tombstone、丢弃非展示源照片、用近邻落选墓碑冒充来源关系
 
 **WakeObservation**：
@@ -339,8 +339,8 @@ _Avoid_: 把来源写成 deleted_at tombstone、丢弃非展示源照片、用�
 _Avoid_: 把醒来压回 Sleep `end_timestamp` 竞争、整行 LWW 选醒来、设备自报观察者、自动改写重叠开放睡眠、另造 `wake_time`/`sleep_start` 等字段方言
 
 **疑似重复组**：
-客户端按精确类型白名单、跨 membership 与含边界 30 分钟近邻时间窗生成的 **软提示** 连通分量；默认展开并保留全部原记录。服务器不因组存在而 tombstone 任一条。作者仅可声明自己的记录与另一来源相同；家庭管理员可解决整组。确认后选一展示版本，其它根/媒体以 **来源关系** 永久保留。
-_Avoid_: 服务器自动落选、同 membership 连记进组、未确认就改写源记录、把组当成家庭权威裁决
+同一宝宝、精确 Record 类型、含边界 30 分钟近邻时间窗的连通分量；全部 Record 类型参与，同 membership 也连边。用药/疫苗名称、自定义项目分片及展示版确定规则以 [ADR-0023](docs/adr/0023-auto-near-neighbor-source-relations.md) 为准。服务端在家庭写锁与提交事务内自动写来源关系；默认折叠非展示来源但永久保留原始事实与媒体。管理员可显式改选展示版，作者仅可声明自己的记录。
+_Avoid_: 来源 tombstone、自动揉合 payload、把自动关系当真正冲突裁决、WakeObservation 进 Record 组、扩大作者权限
 
 **LocalWrite 因果快速路径**：
 前台、可信 endpoint、健康租约、且后端 advertise `causal_sync_v2` 时，本机写成功后冻结当前 pending mutation，直接 commit-first，**不先 reconcile/pull**，也**不推进**增量 pull cursor。远端变化只能自动无损合并或建分支，不能覆盖本机。回前台、网络恢复、下拉与常规周期仍完整 pull。mixed generation 在 mutation 前 fail closed。

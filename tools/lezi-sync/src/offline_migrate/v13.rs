@@ -14,10 +14,31 @@ use sha2::{Digest, Sha256};
 
 use super::immutable::open_immutable;
 use super::migrator::{MigrateError, MigrateReport};
+use super::private_output::{
+    copy_private, disjoint_paths, private_directories, private_file, publish_directory,
+    OutputLease, PrivateDirectory,
+};
 use super::schema_contract::LEGACY_SCHEMA_V12;
 use super::v11::{migrate_v11_data_dir, SOURCE_V11_USER_VERSION};
 use crate::store::{Store, CURRENT_SCHEMA_SQL, DATABASE_SCHEMA_VERSION};
 use crate::SERVER_SECRET_BYTES;
+
+// Test-only deterministic failures at phase boundaries. No environment variable,
+// command-line switch, or production fault-injection surface is introduced.
+#[cfg(test)]
+std::thread_local! {
+    static FAIL_MIGRATION_PHASE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn fail_migration_phase(phase: &'static str) -> Result<(), MigrateError> {
+    if FAIL_MIGRATION_PHASE.with(|slot| slot.get() == Some(phase)) {
+        return Err(MigrateError::Internal(format!(
+            "synthetic migration failure: {phase}"
+        )));
+    }
+    Ok(())
+}
 
 const SOURCE_V12_USER_VERSION: i64 = 12;
 const DATA_ROOT_ENTRIES: &[&str] = &[
@@ -34,28 +55,29 @@ pub(crate) fn migrate_v11_or_v12_data_dir_to_v13(
     source_data_dir: &Path,
     dest_data_dir: &Path,
 ) -> Result<MigrateReport, MigrateError> {
+    let (source_path, dest_path) = disjoint_paths(source_data_dir, dest_data_dir)?;
+    let source_data_dir = source_path.as_path();
+    let dest_data_dir = dest_path.as_path();
     validate_data_root(source_data_dir)?;
     let source_digest = tree_digest(source_data_dir)?;
     let source_version = read_user_version(&source_data_dir.join("lezi.db"))?;
     let report = match source_version {
         SOURCE_V12_USER_VERSION => migrate_v12_data_dir_to_v13(source_data_dir, dest_data_dir),
         SOURCE_V11_USER_VERSION => {
-            let stage = sibling_v12_stage_dir(dest_data_dir);
-            cleanup_root(&stage);
-            let result = (|| {
-                migrate_v11_data_dir(source_data_dir, &stage)?;
-                copy_tree_exact(&source_data_dir.join("tls"), &stage.join("tls"))?;
-                migrate_v12_data_dir_to_v13(&stage, dest_data_dir)
-            })();
-            cleanup_root(&stage);
-            result
+            let owned_stage =
+                PrivateDirectory::new(dest_data_dir.parent().unwrap(), "schema12-stage")?;
+            let stage = owned_stage.path();
+            migrate_v11_data_dir(source_data_dir, stage)?;
+            #[cfg(test)]
+            fail_migration_phase("v11_rebuilt")?;
+            copy_tree_exact(&source_data_dir.join("tls"), &stage.join("tls"))?;
+            migrate_v12_data_dir_to_v13(stage, dest_data_dir)
         }
         other => Err(MigrateError::Internal(format!(
             "unsupported schema-13 source user_version={other}; expected 11 or 12"
         ))),
     }?;
     if source_digest != tree_digest(source_data_dir)? {
-        cleanup_root(dest_data_dir);
         return Err(MigrateError::Internal(
             "source data root changed while offline migration was running".to_owned(),
         ));
@@ -75,7 +97,11 @@ pub(crate) fn migrate_v12_data_dir_to_v13(
     source_data_dir: &Path,
     dest_data_dir: &Path,
 ) -> Result<MigrateReport, MigrateError> {
+    let (source_path, dest_path) = disjoint_paths(source_data_dir, dest_data_dir)?;
+    let source_data_dir = source_path.as_path();
+    let dest_data_dir = dest_path.as_path();
     validate_source_root(source_data_dir)?;
+    let _lease = OutputLease::acquire(dest_data_dir)?;
     if dest_data_dir.try_exists()? && fs::read_dir(dest_data_dir)?.next().is_some() {
         return Err(MigrateError::Internal(format!(
             "schema-13 destination must be absent or empty: {}",
@@ -84,41 +110,43 @@ pub(crate) fn migrate_v12_data_dir_to_v13(
     }
 
     let source_digest = tree_digest(source_data_dir)?;
-    let temp = sibling_temp_dir(dest_data_dir);
-    cleanup_root(&temp);
-    fs::create_dir_all(&temp)?;
+    let owned_temp = PrivateDirectory::new(dest_data_dir.parent().unwrap(), "schema13-migrating")?;
+    let temp = owned_temp.path();
     let result = (|| {
         rebuild_v12_database(&source_data_dir.join("lezi.db"), &temp.join("lezi.db"))?;
+        #[cfg(test)]
+        fail_migration_phase("database_rebuilt")?;
         copy_required_file(
             &source_data_dir.join("server.secret"),
             &temp.join("server.secret"),
         )?;
+        #[cfg(test)]
+        fail_migration_phase("secret_copied")?;
         copy_tree_exact(&source_data_dir.join("media"), &temp.join("media"))?;
+        #[cfg(test)]
+        fail_migration_phase("media_copied")?;
         copy_tree_exact(&source_data_dir.join("tls"), &temp.join("tls"))?;
-        validate_schema13_data_dir(&temp)?;
+        #[cfg(test)]
+        fail_migration_phase("tls_copied")?;
+        validate_schema13_data_dir(temp)?;
+        #[cfg(test)]
+        fail_migration_phase("authority_validated")?;
         if source_digest != tree_digest(source_data_dir)? {
             return Err(MigrateError::Internal(
                 "source data root changed while offline migration was running".to_owned(),
             ));
         }
-        validate_copied_assets(source_data_dir, &temp)?;
+        validate_copied_assets(source_data_dir, temp)?;
+        #[cfg(test)]
+        fail_migration_phase("assets_validated")?;
         migration_report(&temp.join("lezi.db"))
     })();
 
-    match result {
-        Ok(report) => {
-            if dest_data_dir.try_exists()? {
-                fs::remove_dir(dest_data_dir)?;
-            }
-            fs::rename(&temp, dest_data_dir)?;
-            Ok(report)
-        }
-        Err(error) => {
-            cleanup_root(&temp);
-            cleanup_root(dest_data_dir);
-            Err(error)
-        }
-    }
+    let report = result?;
+    #[cfg(test)]
+    fail_migration_phase("before_publish")?;
+    publish_directory(temp, dest_data_dir)?;
+    Ok(report)
 }
 
 fn validate_source_root(root: &Path) -> Result<(), MigrateError> {
@@ -222,9 +250,7 @@ fn validate_optional_app_update_pair(root: &Path) -> Result<(), MigrateError> {
     let floor = object
         .get("min_supported_version_code")
         .and_then(|value| value.as_u64());
-    if version != Some(crate::PROTOCOL_CUTOVER_CLIENT_VERSION_CODE)
-        || floor != Some(crate::PROTOCOL_CUTOVER_CLIENT_VERSION_CODE)
-    {
+    if version != Some(21) || floor != Some(21) {
         return Err(MigrateError::Internal(
             "schema-13 cutover app-update pair must enforce client version code 21".to_owned(),
         ));
@@ -293,6 +319,7 @@ fn rebuild_v12_database(source_path: &Path, dest_path: &Path) -> Result<(), Migr
     LEGACY_SCHEMA_V12
         .validate(&source)
         .map_err(|error| MigrateError::Internal(error.to_string()))?;
+    private_file(dest_path)?;
     let mut dest = Connection::open(dest_path)?;
     dest.execute_batch("PRAGMA foreign_keys = OFF; PRAGMA journal_mode = DELETE;")?;
     dest.execute_batch(CURRENT_SCHEMA_SQL)?;
@@ -405,6 +432,16 @@ pub(crate) fn validate_schema13_data_dir(root: &Path) -> Result<(), MigrateError
         .map_err(|error| MigrateError::Internal(format!("schema-13 preflight: {error}")))?;
     let connection = open_immutable(&root.join("lezi.db"))?;
     validate_media_inventory(&connection, root)?;
+    crate::store::validate_authority_graph_on(
+        &connection,
+        &root.join("lezi.db"),
+        usize::MAX,
+        |family, media, size| {
+            let metadata = fs::symlink_metadata(root.join("media").join(family).join(media))?;
+            Ok(metadata.file_type().is_file() && metadata.len() == size as u64)
+        },
+    )
+    .map_err(|error| MigrateError::Internal(format!("schema-13 authority preflight: {error}")))?;
     Ok(())
 }
 
@@ -565,7 +602,7 @@ fn validate_media_bytes(
 
 fn copy_tree_exact(source: &Path, dest: &Path) -> Result<(), MigrateError> {
     require_directory(source)?;
-    fs::create_dir_all(dest)?;
+    private_directories(dest)?;
     let mut entries = fs::read_dir(source)?.collect::<Result<Vec<_>, _>>()?;
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
@@ -589,10 +626,9 @@ fn copy_tree_exact(source: &Path, dest: &Path) -> Result<(), MigrateError> {
 fn copy_required_file(source: &Path, dest: &Path) -> Result<(), MigrateError> {
     require_regular_file(source)?;
     if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)?;
+        private_directories(parent)?;
     }
-    fs::copy(source, dest)?;
-    fs::set_permissions(dest, fs::metadata(source)?.permissions())?;
+    copy_private(source, dest)?;
     Ok(())
 }
 
@@ -714,32 +750,6 @@ fn migration_report(database: &Path) -> Result<MigrateReport, MigrateError> {
     })
 }
 
-fn sibling_temp_dir(dest: &Path) -> PathBuf {
-    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
-    let name = dest
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("out");
-    parent.join(format!(".{name}.schema13-migrating"))
-}
-
-fn sibling_v12_stage_dir(dest: &Path) -> PathBuf {
-    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
-    let name = dest
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("out");
-    parent.join(format!(".{name}.schema12-stage"))
-}
-
-fn cleanup_root(path: &Path) {
-    if path.is_dir() {
-        let _ = fs::remove_dir_all(path);
-    } else {
-        let _ = fs::remove_file(path);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -763,7 +773,7 @@ mod tests {
     const CONFLICT: &str = "66666666-6666-6666-6666-666666666666";
     const MEDIA: &str = "77777777-7777-7777-7777-777777777777";
 
-    fn write_v12_fixture(root: &std::path::Path) {
+    pub(super) fn write_v12_fixture(root: &std::path::Path) {
         fs::create_dir_all(root.join("media").join(FAMILY)).unwrap();
         fs::create_dir_all(root.join("tls")).unwrap();
         fs::write(root.join("server.secret"), [9u8; 32]).unwrap();
@@ -833,9 +843,66 @@ mod tests {
                 ],
             )
             .unwrap();
+        // Use real current-domain roots and integrity hashes; the old fixture's
+        // placeholder "feeding" payload never represented a startable authority graph.
+        let baby = "88888888-8888-4888-8888-888888888888";
+        let root = serde_json::json!({"baby_client_uuid":baby,"type":"formula","custom_item_client_uuid":null,"timestamp":1000,"end_timestamp":null,"note":"stable","payload_json":{"amount_ml":100},"schema_version":2,"created_by_membership_id":MEMBER,"updated_at":10});
+        let root = root.as_object().unwrap().clone();
+        let mut projection = root.clone();
+        projection.remove("updated_at");
+        connection
+            .execute(
+                "UPDATE entities SET payload_json=?1 WHERE entity_type='record' AND client_uuid=?2",
+                params![serde_json::to_string(&projection).unwrap(), ROOT],
+            )
+            .unwrap();
+        connection.execute("INSERT INTO entities(family_id,entity_type,client_uuid,updated_at,deleted_at,payload_json,rev) VALUES (?1,'baby',?2,1,NULL,?3,2)",params![FAMILY,baby,serde_json::json!({"nickname":"synthetic","sex":"female","birthday":"2025-01-02","birth_weight_grams":null,"avatar_media_uuid":null}).to_string()]).unwrap();
+        let hash = crate::store::test_mutation_content_hash("_", "_", None, false, &root, &[]);
+        connection
+            .execute(
+                "UPDATE entity_versions SET payload_json=?1,content_hash=?2 WHERE version_id=?3",
+                params![serde_json::to_string(&root).unwrap(), hash, STABLE],
+            )
+            .unwrap();
+        let mut branch = root;
+        branch.insert("updated_at".to_owned(), serde_json::json!(11));
+        branch.insert("note".to_owned(), serde_json::json!("branch"));
+        let item = crate::store::CausalMediaItem {
+            media_uuid: MEDIA.to_owned(),
+            role: "log".to_owned(),
+            sha256: hex::encode(Sha256::digest(b"media-bytes")),
+            byte_size: 11,
+            mime: "image/jpeg".to_owned(),
+            width: Some(1),
+            height: Some(1),
+        };
+        let hash = crate::store::test_mutation_content_hash(
+            "_",
+            "_",
+            None,
+            false,
+            &branch,
+            std::slice::from_ref(&item),
+        );
+        connection
+            .execute(
+                "UPDATE entity_versions SET payload_json=?1,content_hash=?2 WHERE version_id=?3",
+                params![serde_json::to_string(&branch).unwrap(), hash, BRANCH],
+            )
+            .unwrap();
+        let media = item.to_value();
+        let hash = crate::store::test_mutation_content_hash(
+            "media",
+            MEDIA,
+            None,
+            false,
+            media.as_object().unwrap(),
+            &[],
+        );
+        connection.execute("UPDATE entity_version_media SET media_payload_json=?1,content_hash=?2 WHERE version_id=?3",params![media.to_string(),hash,BRANCH]).unwrap();
     }
 
-    fn write_v11_fixture(root: &std::path::Path) {
+    pub(super) fn write_v11_fixture(root: &std::path::Path) {
         fs::create_dir_all(root.join("media")).unwrap();
         fs::create_dir_all(root.join("tls")).unwrap();
         fs::write(root.join("server.secret"), [8u8; 32]).unwrap();
@@ -863,6 +930,77 @@ mod tests {
                  INSERT INTO family_meta(family_id, rev) VALUES ('{FAMILY}', 0);"
             ))
             .unwrap();
+    }
+
+    #[test]
+    fn legacy_staging_names_never_delete_the_input_or_unowned_siblings() {
+        for name in [".out.schema13-migrating", ".out.schema12-stage"] {
+            let temp = tempdir().unwrap();
+            let source = temp.path().join(name);
+            let out = temp.path().join("out");
+            if name.ends_with("schema12-stage") {
+                write_v11_fixture(&source);
+            } else {
+                write_v12_fixture(&source);
+            }
+            let before = super::tree_digest(&source).unwrap();
+            migrate_v11_or_v12_data_dir_to_v13(&source, &out).unwrap();
+            assert_eq!(super::tree_digest(&source).unwrap(), before);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_out_rejects_a_symlink_ancestor_into_the_source() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        write_v12_fixture(&source);
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&source, &alias).unwrap();
+        let before = super::tree_digest(&source).unwrap();
+        assert!(migrate_v11_or_v12_data_dir_to_v13(&source, &alias.join("out")).is_err());
+        assert_eq!(super::tree_digest(&source).unwrap(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_out_outputs_are_private_even_when_source_modes_are_public() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        let out = temp.path().join("out");
+        write_v12_fixture(&source);
+        fs::set_permissions(
+            source.join("server.secret"),
+            fs::Permissions::from_mode(0o666),
+        )
+        .unwrap();
+        migrate_v11_or_v12_data_dir_to_v13(&source, &out).unwrap();
+        fn assert_private(path: &std::path::Path) {
+            let metadata = path.metadata().unwrap();
+            assert_eq!(
+                metadata.permissions().mode() & 0o077,
+                0,
+                "{}",
+                path.display()
+            );
+            if metadata.is_dir() {
+                for entry in fs::read_dir(path).unwrap() {
+                    assert_private(&entry.unwrap().path());
+                }
+            }
+        }
+        assert_private(&out);
+        assert_eq!(
+            source
+                .join("server.secret")
+                .metadata()
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o666
+        );
     }
 
     #[test]
@@ -1149,5 +1287,180 @@ mod tests {
                 .unwrap(),
             2_000,
         );
+    }
+    #[test]
+    fn copy_out_rejects_a_stray_live_media_projection_before_publication() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        let output = temp.path().join("out");
+        write_v12_fixture(&source);
+        let connection = Connection::open(source.join("lezi.db")).unwrap();
+        connection.execute("INSERT INTO entities(family_id,entity_type,client_uuid,updated_at,deleted_at,payload_json,rev) VALUES (?1,'media',?2,10,NULL,?3,3)",params![FAMILY,MEDIA,serde_json::json!({"kind":"log","record_client_uuid":ROOT,"baby_client_uuid":null,"care_plan_client_uuid":null,"byte_size":11,"mime":"image/jpeg","width":1,"height":1}).to_string()]).unwrap();
+        drop(connection);
+        let before = super::tree_digest(&source).unwrap();
+        let error = migrate_v12_data_dir_to_v13(&source, &output).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("stable_media_projection_mismatch"),
+            "{error}"
+        );
+        assert!(!output.exists());
+        assert_eq!(super::tree_digest(&source).unwrap(), before);
+    }
+}
+
+#[cfg(test)]
+mod failure_ownership_matrix {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    fn source(root: &Path, version: u8) {
+        if version == 11 {
+            super::tests::write_v11_fixture(root);
+        } else {
+            super::tests::write_v12_fixture(root);
+        }
+    }
+
+    fn manual_leftovers(parent: &Path) {
+        for name in [
+            ".out.schema13-migrating",
+            ".out.schema12-stage",
+            ".schema13-migrating-11111111-1111-4111-8111-111111111111",
+            ".schema12-stage-22222222-2222-4222-8222-222222222222",
+        ] {
+            fs::create_dir(parent.join(name)).unwrap();
+            fs::write(
+                parent.join(name).join("operator-owned"),
+                b"do not adopt or remove",
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn every_copy_out_phase_failure_preserves_source_and_only_cleans_owned_paths() {
+        for version in [11, 12] {
+            for phase in [
+                "v11_rebuilt",
+                "database_rebuilt",
+                "secret_copied",
+                "media_copied",
+                "tls_copied",
+                "authority_validated",
+                "assets_validated",
+                "before_publish",
+            ] {
+                if version == 12 && phase == "v11_rebuilt" {
+                    continue;
+                }
+                let root = tempfile::tempdir().unwrap();
+                let input = root.path().join("source");
+                source(&input, version);
+                manual_leftovers(root.path());
+                // Digest includes input, both historical names, and UUID-looking
+                // unknown leftovers. No output/lease/private stage may remain.
+                let before = tree_digest(root.path()).unwrap();
+                FAIL_MIGRATION_PHASE.with(|slot| slot.set(Some(phase)));
+                let result = migrate_v11_or_v12_data_dir_to_v13(&input, &root.path().join("out"));
+                FAIL_MIGRATION_PHASE.with(|slot| slot.set(None));
+                let error = result.unwrap_err().to_string();
+                assert!(
+                    error.contains(&format!("synthetic migration failure: {phase}")),
+                    "v{version} {phase} failed before selected phase: {error}"
+                );
+                assert_eq!(
+                    tree_digest(root.path()).unwrap(),
+                    before,
+                    "v{version} {phase}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn real_preflight_errors_preserve_input_and_unknown_output_ownership() {
+        for blocked_by in [
+            "nonempty_output",
+            "unknown_lock",
+            "invalid_schema",
+            "invalid_authority",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let input = root.path().join("source");
+            source(&input, 12);
+            manual_leftovers(root.path());
+            let out = root.path().join("out");
+            match blocked_by {
+                "nonempty_output" => {
+                    fs::create_dir(&out).unwrap();
+                    fs::write(out.join("manual"), b"preserve").unwrap();
+                }
+                "unknown_lock" => {
+                    fs::write(
+                        root.path().join(".out.offline-migrate-lock"),
+                        b"operator lock",
+                    )
+                    .unwrap();
+                }
+                "invalid_schema" => {
+                    Connection::open(input.join("lezi.db"))
+                        .unwrap()
+                        .execute_batch("PRAGMA user_version=99;")
+                        .unwrap();
+                }
+                "invalid_authority" => {
+                    Connection::open(input.join("lezi.db"))
+                        .unwrap()
+                        .execute_batch("DELETE FROM entity_stable_heads;")
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let before = tree_digest(root.path()).unwrap();
+            assert!(
+                migrate_v11_or_v12_data_dir_to_v13(&input, &out).is_err(),
+                "{blocked_by}"
+            );
+            assert_eq!(tree_digest(root.path()).unwrap(), before, "{blocked_by}");
+        }
+    }
+
+    #[test]
+    fn concurrent_same_and_distinct_outputs_preserve_source_and_manual_leftovers() {
+        for same_output in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let input = root.path().join("source");
+            source(&input, 12);
+            manual_leftovers(root.path());
+            let before = tree_digest(root.path()).unwrap();
+            let barrier = Arc::new(Barrier::new(2));
+            let mut workers = Vec::new();
+            for index in 0..2 {
+                let input = input.clone();
+                let out = root.path().join(if same_output || index == 0 {
+                    "out"
+                } else {
+                    "other"
+                });
+                let barrier = barrier.clone();
+                workers.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    migrate_v11_or_v12_data_dir_to_v13(&input, &out).is_ok()
+                }));
+            }
+            let successes = workers
+                .into_iter()
+                .map(|worker| usize::from(worker.join().unwrap()))
+                .sum::<usize>();
+            assert_eq!(successes, if same_output { 1 } else { 2 });
+            // These exact paths are successful outputs owned by this test.
+            fs::remove_dir_all(root.path().join("out")).unwrap();
+            if !same_output {
+                fs::remove_dir_all(root.path().join("other")).unwrap();
+            }
+            assert_eq!(tree_digest(root.path()).unwrap(), before);
+        }
     }
 }

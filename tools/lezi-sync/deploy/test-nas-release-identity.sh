@@ -10,6 +10,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/lezi-nas-release-identity.XXXXXX")"
+# Explicit synthetic operator configuration; never inherit a real deployment target.
+export NAS_SSH=fixture@example.invalid NAS_SSH_PORT=10000
+export LEZI_DATA_HOST_PATH="${test_root}/nas-data"
+export LEZI_TLS_HOST=192.168.77.10 LEZI_LAN_HOST=192.168.77.10
 trap 'rm -rf -- "${test_root}"' EXIT
 fail() { echo "error: $*" >&2; exit 1; }
 

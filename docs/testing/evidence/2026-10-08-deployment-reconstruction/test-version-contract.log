@@ -1,0 +1,4 @@
+error: explicit LEZI_SYNC_VERSION must match Cargo package version
+error: explicit LEZI_SYNC_VERSION must match Cargo package version
+error: explicit LEZI_SYNC_VERSION must match Cargo package version
+Docker explicit version contract fixtures passed

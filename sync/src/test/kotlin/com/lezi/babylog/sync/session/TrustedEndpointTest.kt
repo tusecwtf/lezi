@@ -1,4 +1,6 @@
 package com.lezi.babylog.sync.session
+
+// 192.168.77.10 is a synthetic RFC1918 LAN test endpoint, never a deployment default.
 import com.google.common.truth.Truth.assertThat
 import java.io.ByteArrayInputStream
 import kotlinx.coroutines.test.runTest
@@ -216,13 +218,14 @@ private fun currentSetupCapabilities(): Set<String> = setOf(
     "record_membership_author",
     "device_disaster_restore_v1",
     "validated_deferred_fulfillment_v1",
+    "nursing_plan_intent_v1",
 )
 
 private fun currentSetupStatus(
     familyState: String,
     protocolVersion: Int = SETUP_PROTOCOL_VERSION,
 ): String =
-    """{"protocol_version":$protocolVersion,"capabilities":["trusted_https_endpoint_v1","device_sessions_v1","membership_devices_v1","atomic_bundle","record_membership_author","device_disaster_restore_v1","validated_deferred_fulfillment_v1"],"family_state":"$familyState"}"""
+    """{"protocol_version":$protocolVersion,"capabilities":["trusted_https_endpoint_v1","device_sessions_v1","membership_devices_v1","atomic_bundle","record_membership_author","device_disaster_restore_v1","validated_deferred_fulfillment_v1","nursing_plan_intent_v1"],"family_state":"$familyState"}"""
 
 private class RecordingSetupHttpTransport(
     var response: SetupHttpResponse = SetupHttpResponse(statusCode = 500, body = byteArrayOf()),

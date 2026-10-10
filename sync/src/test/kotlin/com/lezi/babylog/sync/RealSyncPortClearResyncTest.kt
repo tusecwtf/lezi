@@ -122,6 +122,7 @@ import com.lezi.babylog.sync.backend.FakeSyncBackend
 import com.lezi.babylog.sync.backend.testPreparedMedia
 
 // Split from RealSyncPortTest kitchen sink by contract cluster (ticket 05).
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class RealSyncPortClearResyncTest {
     @Test
     fun resumedCommittedClearStillHonorsTheNewExplicitClearRequest() = runTest {
@@ -316,6 +317,8 @@ class RealSyncPortClearResyncTest {
             pullGeneration = "old-generation",
         )
         val rig = SyncRig(session = session)
+        rig.backend.mediaBytes = byteArrayOf(1, 2, 3)
+        rig.mediaFiles.preparedUploadBytes["record-media/existing.jpg"] = byteArrayOf(1, 2, 3)
         val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
         val recordId = rig.records.seed(
             localRecord(babyId).copy(
@@ -411,7 +414,7 @@ class RealSyncPortClearResyncTest {
             ),
         )
 
-        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        rig.port.sync(SyncTrigger.PullToRefresh).getOrThrow()
 
         assertThat(rig.backend.stagedBundles).isEmpty()
         val media = requireNotNull(rig.media.getByClientUuid(mediaUuid))
@@ -579,22 +582,39 @@ class RealSyncPortClearResyncTest {
                 pullGeneration = "old-generation",
             ),
         )
-        rig.babies.seed(
+        val firstBabyId = rig.babies.seed(
             localBaby().copy(
                 clientUuid = "baby-page-one",
-                avatarMediaUuid = "avatar-page-one",
+                avatarMediaUuid = testMediaUuid("avatar-page-one"),
                 avatarPath = "baby_avatars/page-one.jpg",
                 syncDirty = false,
             ),
         )
-        rig.babies.seed(
+        val secondBabyId = rig.babies.seed(
             localBaby().copy(
                 clientUuid = "baby-page-two",
-                avatarMediaUuid = "avatar-page-two",
+                avatarMediaUuid = testMediaUuid("avatar-page-two"),
                 avatarPath = "baby_avatars/page-two.jpg",
                 syncDirty = false,
             ),
         )
+        val avatarBytes = byteArrayOf(1, 2, 3)
+        for ((id, label, path) in listOf(
+            Triple(firstBabyId, "avatar-page-one", "baby_avatars/page-one.jpg"),
+            Triple(secondBabyId, "avatar-page-two", "baby_avatars/page-two.jpg"),
+        )) {
+            val uuid = testMediaUuid(label)
+            val digest = com.lezi.babylog.core.common.MediaContentDigest.ofBytes(avatarBytes)
+            rig.mediaFiles.preparedUploadBytes[path] = avatarBytes
+            rig.mediaFiles.preparePublishedUpload(path, com.lezi.babylog.sync.media.PublishedMediaIdentity(
+                digest, 3, "image/jpeg", null, null,
+            )).close()
+            rig.media.seed(MediaAssetEntity(clientUuid = uuid, kind = "avatar", babyId = id,
+                localUri = path, remoteUri = rig.preferences.current().expectedMediaReceipt(uuid),
+                sha256 = digest, byteSize = 3, mime = "image/jpeg", createdAt = 100,
+                updatedAt = 100, syncDirty = false))
+            rig.conflictDetails.putTransportJournal("canonical-media-bytes-v1:$uuid", path, 100)
+        }
         rig.backend.pullFailures.add(
             SyncHttpException(
                 statusCode = 409,
@@ -645,8 +665,13 @@ class RealSyncPortClearResyncTest {
             .isNotEqualTo(com.lezi.babylog.core.common.failure.FailureKind.InvalidInput)
 
         val unseen = requireNotNull(rig.babies.getByClientUuid("baby-page-two"))
-        assertThat(unseen.avatarMediaUuid).isEqualTo("avatar-page-two")
+        assertThat(unseen.avatarMediaUuid).isEqualTo(testMediaUuid("avatar-page-two"))
         assertThat(unseen.avatarPath).isEqualTo("baby_avatars/page-two.jpg")
+        val unseenMedia = requireNotNull(rig.media.getByClientUuid(testMediaUuid("avatar-page-two")))
+        assertThat(unseenMedia.babyId).isEqualTo(secondBabyId)
+        assertThat(unseenMedia.deletedAt).isNull()
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(unseenMedia.localUri)).readBytes())
+            .isEqualTo(avatarBytes)
         assertThat(rig.preferences.current().pullCursor).isEqualTo(1)
         assertThat(rig.preferences.current().pullGeneration).isEqualTo("new-generation")
     }

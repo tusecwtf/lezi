@@ -1,5 +1,7 @@
 # lezi-sync
 
+隐私说明：本文的 LAN 地址、SSH 账号和个人宿主路径均为虚构示例，不是生产默认值或操作授权。历史验证结果不代表这些示例地址；实际目标和维护窗口须由 owner 单独确认。
+
 乐记家庭局域网同步服务的 Rust 实现。Android 端使用当前 `/v1/*`
 HTTPS interface；服务端以 Axum + Tokio + rustls + rusqlite 运行，NAS 上只需要一个
 Docker 容器和一个持久化目录。
@@ -69,15 +71,26 @@ VPS 部署工具链已按 owner 决定删除（2026-09-06）；脚本只存于 g
 
 ## NAS / Docker Compose（冻结回滚）
 
-NAS 脚本家族的真实目标保存在未跟踪的 `deploy/env.local`（`NAS_SSH` 等，合成示例
-`nas-operator@192.168.77.10:10000`），只作回滚和只读
-copy-out。不能靠改 `NAS_SSH` 把同一套脚本切到 VPS。zdocker 打包 + scp +
+NAS 脚本家族只作已授权目标的回滚和只读 copy-out，不内置私人部署默认值。
+SSH 命令显式提供 `NAS_SSH` / `NAS_SSH_PORT`，数据相关命令显式提供
+`LEZI_DATA_HOST_PATH`，打包 / 部署与 LAN 探测分别显式提供 `LEZI_TLS_HOST` /
+`LEZI_LAN_HOST`。配置须来自 owner 单独确认的目标；不能靠改 `NAS_SSH`
+把同一套脚本切到 VPS。可用 `ZDOCKER_COMPOSE` 显式指定已核验的厂商 Compose 路径；
+未设置或不可用时沿用 `docker run` 回退。打包 + scp +
 仓库外 age（根密码 + NAS 自签 TLS）见
 [`deploy/DEPLOY.md`](deploy/DEPLOY.md)：
+
+普通 Android/Gradle 与 Cargo 构建无需 NAS 参数。隔离 fixture 和 app-update check-only
+检查可显式使用虚构参数；实际 NAS 打包 / 部署须使用明确的已授权目标配置。
+示例不授权网络访问或容器替换，后者仍需单独确认维护窗口。
 
 ```bash
 # 可选：先构建镜像；镜像标识默认读取 Cargo.toml
 ./build-image.sh
+: "${NAS_SSH:?须显式设置已授权的 NAS SSH 目标}"
+: "${NAS_SSH_PORT:?须显式设置已授权的 NAS SSH 端口}"
+: "${LEZI_DATA_HOST_PATH:?须显式设置已授权的 NAS 数据路径}"
+: "${LEZI_TLS_HOST:?须显式设置已授权的 NAS TLS 主机}"
 ./deploy/push-and-deploy.sh
 ```
 
@@ -100,15 +113,17 @@ copy-out。不能靠改 `NAS_SSH` 把同一套脚本切到 VPS。zdocker 打包 
 ```bash
 cd tools/lezi-sync
 release_id="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+export LEZI_SYNC_VERSION="${release_id}"
+sh docker/validate-version.sh Cargo.toml "${LEZI_SYNC_VERSION}"
 ./build-image.sh
 
 # 数据目录需可被 uid 10001 写；示例：
-mkdir -p /volume1/docker/lezi
-sudo chown -R 10001:10001 /volume1/docker/lezi
+mkdir -p /srv/lezi-example/data
+sudo chown -R 10001:10001 /srv/lezi-example/data
 
 # Compose 必填：长随机 bootstrap（≥16 字符）。APK 建家时输入同一一次性口令。
 export LEZI_BOOTSTRAP_SECRET="$(openssl rand -hex 24)"
-export LEZI_DATA_HOST_PATH=/volume1/docker/lezi
+export LEZI_DATA_HOST_PATH=/srv/lezi-example/data
 
 # 仅首次、已确认全新空数据根：显式授权生成；以后不设置该变量，只验证并复用。
 LEZI_ALLOW_TLS_BOOTSTRAP=1 \
@@ -120,16 +135,24 @@ curl --cacert "${LEZI_DATA_HOST_PATH}/tls/server.crt" -fsS https://127.0.0.1:876
 curl --cacert "${LEZI_DATA_HOST_PATH}/tls/server.crt" -fsS https://127.0.0.1:8765/ready
 ```
 
+Compose 的 `LEZI_SYNC_VERSION` 必须显式设置为当前 `Cargo.toml` package version；未设置或
+空值在 Compose 配置解析时拒绝，不能默默使用历史镜像 tag。默认镜像 tag 与 build arg
+共用这一输入；`LEZI_SYNC_IMAGE` 仅覆盖镜像引用，仍不能免除版本输入。直接 Docker build
+也必须传匹配的 `--build-arg LEZI_SYNC_VERSION`，Dockerfile 在编译前检查精确相等。
+`build-image.sh` 可从 Cargo 自动推导。自定义镜像引用须由操作者核实其实际构建身份；
+配置/helper fixture 不等同于真实容器证明。隔离 Docker 验证须另外核对 image version label、
+镜像内版本环境值与实际 `/health.version`，不得使用真实 NAS 或家庭数据根做版本测试。
+
 ### 端口发布覆盖
 
 默认只绑定宿主 loopback。手机要直连时，显式发布 LAN/全接口（仍勿映射公网）：
 
 ```bash
-# 仅示例：192.168.77.10 是这台宿主的 LAN IP。
+# 仅虚构示例：192.168.77.10 不代表实际宿主或生产默认值。
 LEZI_SYNC_PUBLISH=0.0.0.0:8765 \
   LEZI_LAN_APK_DOWNLOAD_PUBLISH=0.0.0.0:8767 \
   LEZI_LAN_APK_DOWNLOAD_ORIGIN=http://192.168.77.10:8767 \
-  LEZI_DATA_HOST_PATH=/volume1/docker/lezi \
+  LEZI_DATA_HOST_PATH=/srv/lezi-example/data \
   LEZI_BOOTSTRAP_SECRET=... \
   docker compose up -d
 ```
@@ -144,7 +167,7 @@ LEZI_SYNC_PUBLISH=0.0.0.0:8765 \
 （与默认 `lezi-sync` 二选一，勿共用同一数据目录同时启动）：
 
 ```bash
-LEZI_DATA_HOST_PATH=/volume1/docker/lezi \
+LEZI_DATA_HOST_PATH=/srv/lezi-example/data \
   LEZI_BOOTSTRAP_SECRET=... \
   docker compose --profile nas-root up -d lezi-sync-nas-root
 ```
@@ -212,7 +235,7 @@ docker buildx build \
 | `LEZI_INTERNAL_PORT` | `8766` | 仅监听 `127.0.0.1` 的容器内 HTTP readiness 端口，不发布到宿主 |
 | `LEZI_TLS_CERTFILE` | 必填 | PEM certificate；NAS 包固定为 `/data/tls/server.crt` |
 | `LEZI_TLS_KEYFILE` | 必填 | PEM private key；NAS 包固定为 `/data/tls/server.key` |
-| `LEZI_SYNC_VERSION` | `Cargo.toml` package version | `/health` 返回的发布标识；生产构建默认自动推导 |
+| `LEZI_SYNC_VERSION` | `build-image.sh` 从 Cargo 推导；Compose / 直接 Docker build 必填 | 必须等于 `Cargo.toml` package version；镜像 label/env 与 `/health` 使用同一构建身份 |
 | `LEZI_LAN_APK_DOWNLOAD_ORIGIN` | 未设置 | 可选 `http://<同一 IPv4 或解析到 IPv4 的 DNS 主机>:8767`；设置后成员登录 QR 包装为邀请安装页 URL，本版不支持 IPv6 分发；不可与 `LEZI_INVITE_INSTALL_ORIGIN` 同时设置 |
 | `LEZI_INVITE_INSTALL_ORIGIN` | 未设置 | 可选且仅接受 `https://invite.example.invalid`（端口空或 443）；设置后 HTTPS public 面提供 `/join` 与 `/download/lezi.apk`，不创建 8767 监听 |
 | `LEZI_LAN_APK_DOWNLOAD_PUBLISH` | `127.0.0.1:8767` | local compose 宿主侧发布地址；NAS 包固定 LAN `0.0.0.0:8767` |
@@ -539,7 +562,7 @@ accepted/merged/branched manifest 标记为 `consumed`；commit 后才 no-replac
 
 ```bash
 docker compose stop
-cp -a /volume1/docker/lezi /volume1/backup/lezi-$(date +%F)
+cp -a /srv/lezi-example/data /volume1/backup/lezi-$(date +%F)
 docker compose start
 ```
 

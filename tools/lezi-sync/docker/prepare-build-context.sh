@@ -30,6 +30,7 @@ cp -R "${SYNC_ROOT}/src/." "${dest}/src/"
 cp "${SCRIPT_DIR}/cargo-config.toml" \
   "${SCRIPT_DIR}/project-cargo-config.toml" \
   "${SCRIPT_DIR}/fetch-and-build.sh" \
+  "${SCRIPT_DIR}/validate-version.sh" \
   "${dest}/docker/"
 cp "${SCRIPT_DIR}/empty-vendor/.keep" "${dest}/docker/empty-vendor/"
 

@@ -1,0 +1,3 @@
+package-nas app-update fail-closed smoke passed
+frozen-wire client-ahead package smoke passed (Android 0.5.4, server/channel 0.5.3)
+package-nas app-update fail-closed smoke passed

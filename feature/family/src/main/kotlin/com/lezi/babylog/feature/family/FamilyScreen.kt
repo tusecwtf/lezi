@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
@@ -240,13 +241,17 @@ fun FamilyRoute(
     val appUpdateOutcome by overviewHost.appUpdateOutcome.collectAsStateWithLifecycle()
     val checkingAppUpdate by overviewHost.checkingAppUpdate.collectAsStateWithLifecycle()
     val installingAppUpdate by overviewHost.installingAppUpdate.collectAsStateWithLifecycle()
-    val memberDestructiveBusy by membersHost.destructiveBusy.collectAsStateWithLifecycle()
+    val memberCommand by membersHost.command.collectAsStateWithLifecycle()
+    val memberDestructiveBusy = memberCommand?.pending == true
     val babyDestructiveBusy by overviewHost.destructiveBusy.collectAsStateWithLifecycle()
-    val addingBaby by overviewHost.addingBaby.collectAsStateWithLifecycle()
+    val babyCreation by overviewHost.babyCreation.collectAsStateWithLifecycle()
+    val addingBaby = babyCreation?.pending == true
     val logoutPendingCount by membersHost.pendingPublishCount.collectAsStateWithLifecycle()
     val logoutSyncChecking by membersHost.logoutSyncChecking.collectAsStateWithLifecycle()
     val logoutSyncFeedback by membersHost.logoutSyncFeedback.collectAsStateWithLifecycle()
+    val logoutSourcePreview by membersHost.logoutSourcePreview.collectAsStateWithLifecycle()
     val deviceRemovedReceipt by membersHost.deviceRemovedReceipt.collectAsStateWithLifecycle()
+    val sourceCommandClearNotice by membersHost.sourceCommandClearNotice.collectAsStateWithLifecycle()
     val endpointSeed by wizardHost.endpointSeed.collectAsStateWithLifecycle()
     val networkSettings by networkSettingsHost.ui.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -295,13 +300,13 @@ fun FamilyRoute(
     // survive recreation; their feedback and busy flags stay transient.
     var editDisplayName by rememberSaveable { mutableStateOf("") }
     var editDisplayNameFeedback by remember { mutableStateOf<String?>(null) }
-    var savingDisplayName by remember { mutableStateOf(false) }
+    val savingDisplayName = memberCommand?.pending == true
     var renameFamilyName by rememberSaveable { mutableStateOf("") }
     var renameFamilyFeedback by remember { mutableStateOf<String?>(null) }
-    var savingFamilyName by remember { mutableStateOf(false) }
+    val savingFamilyName = memberCommand?.pending == true
     var wizardNetworkFeedback by rememberSaveable { mutableStateOf<String?>(null) }
-    var removingMember by remember { mutableStateOf(false) }
-    var decidingMemberRequest by remember { mutableStateOf(false) }
+    val removingMember = memberCommand?.pending == true
+    val decidingMemberRequest = memberCommand?.pending == true
     var endpointDraft by remember { mutableStateOf("") }
     // QR grant and device draft are intentionally process-memory only, never rememberSaveable.
     var memberQrDeviceName by remember { mutableStateOf(defaultAndroidDeviceName(context)) }
@@ -309,7 +314,7 @@ fun FamilyRoute(
     var deleteFamilyName by remember { mutableStateOf("") }
     var deleteFamilyRootPassword by remember { mutableStateOf("") }
     var deleteFamilyFeedback by remember { mutableStateOf<String?>(null) }
-    var deletingFamily by remember { mutableStateOf(false) }
+    val deletingFamily = memberCommand?.pending == true
     var showNetworkSettings by rememberSaveable { mutableStateOf(false) }
 
     val familyWizardState by wizardHost.familyWizardState.collectAsStateWithLifecycle()
@@ -364,6 +369,51 @@ fun FamilyRoute(
             dialog = FamilyDialog.Explanation(kind, resume)
         }
     }
+    LaunchedEffect(babyCreation, dialog, pendingRestoredRoute) {
+        val result = babyCreation?.takeUnless { it.pending } ?: return@LaunchedEffect
+        if (result.createdBabyId == null || pendingRestoredRoute != null) return@LaunchedEffect
+        if (dialog == FamilyDialog.AddBaby) {
+            dialog = FamilyDialog.Message(result.warning ?: "已添加宝宝")
+            overviewHost.consumeBabyCreation(result.commandId)
+        }
+    }
+    // Consume retained outcomes in the current composition, never in a disposed callback.
+    LaunchedEffect(memberCommand, dialog, pendingRestoredRoute) {
+        val result = memberCommand?.takeUnless { it.pending } ?: return@LaunchedEffect
+        if (pendingRestoredRoute != null) return@LaunchedEffect
+        val activeTarget = when (val active = dialog) {
+            is FamilyDialog.RenameFamilyMember -> "rename_member:${active.membershipId}"
+            is FamilyDialog.RenameFamilyDevice -> "rename_device:${active.deviceId}"
+            is FamilyDialog.ConfirmRemoveMember -> "remove_member:${active.membershipId}"
+            is FamilyDialog.ConfirmDeviceRevoke -> "revoke_device:${active.deviceId}"
+            is FamilyDialog.ReviewPendingMember -> "review_member:${active.request.requestId}"
+            is FamilyDialog.DeleteFamily -> "delete_family"
+            else -> familyDialogRoute(active)
+        }
+        if (activeTarget == result.target || (dialog == null && result.target.startsWith("review_member:"))) {
+            if (result.success) {
+                editDisplayName = ""
+                renameFamilyName = ""
+                deleteFamilyRootPassword = ""
+                deleteFamilyName = ""
+                dialog = result.qrCode?.let { FamilyDialog.MemberLoginQrCode(it) }
+                    ?: FamilyDialog.Message(result.message)
+            } else if (result.failureKind?.usesSharedDialog == true) {
+                showFailureKind(result.failureKind, resume = dialog)
+            } else {
+                editDisplayNameFeedback = result.message.ifBlank { "操作失败，请重试" }
+                renameFamilyFeedback = result.message.ifBlank { "操作失败，请重试" }
+                if (dialog !is FamilyDialog.RenameFamilyMember &&
+                    dialog !is FamilyDialog.RenameFamilyDevice &&
+                    dialog != FamilyDialog.RenameFamily &&
+                    dialog != FamilyDialog.EditMyDisplayName && dialog != FamilyDialog.AddFamilyMember
+                ) {
+                    dialog = FamilyDialog.Message(result.message.ifBlank { "操作失败，请重试" }, dialog)
+                }
+            }
+        }
+        membersHost.consumeCommand(result.id)
+    }
     fun showWizard(mode: FamilyWizardMode, step: FamilyWizardStep) {
         retainedWizardMode = mode.name
         retainedWizardStep = step.name
@@ -403,7 +453,7 @@ fun FamilyRoute(
         deleteFamilyName = ""
         deleteFamilyRootPassword = ""
         deleteFamilyFeedback = null
-        deletingFamily = false
+
     }
 
 
@@ -786,6 +836,12 @@ fun FamilyRoute(
     }
 
 
+    sourceCommandClearNotice?.takeIf { deviceRemovedReceipt == null && dialog == null }?.let { notice ->
+        com.lezi.babylog.feature.family.members.SourceCommandClearNoticeDialog(notice) {
+            membersHost.acknowledgeSourceCommandClearNotice(notice)
+        }
+    }
+
     @Composable
     fun ActiveFamilyDialogs() {
         val draftEndpointReady = joinDraft.hasEndpoint()
@@ -861,17 +917,7 @@ fun FamilyRoute(
             onCreateMemberLoginQr = if (overview.role == FamilyRole.Owner) {
                 { membershipId ->
                     
-                    membersHost.createMemberLoginQr(membershipId) { result ->
-                        result.fold(
-                            onSuccess = { dialog = FamilyDialog.MemberLoginQrCode(it) },
-                            onFailure = {
-                                showFailure(
-                                    it,
-                                    resume = FamilyDialog.MembersList,
-                                )
-                            },
-                        )
-                    }
+                    membersHost.createMemberLoginQr(membershipId)
                 
                 }
             } else {
@@ -906,13 +952,7 @@ fun FamilyRoute(
             onReviewRename = if (overview.role == FamilyRole.Owner) {
                 { request, approve ->
                     
-                    membersHost.decideMemberRename(request, approve) { success, copy, kind ->
-                        if (success) {
-                            showMessage(copy, resume = FamilyDialog.MembersList)
-                        } else {
-                            showFailureKind(kind, resume = FamilyDialog.MembersList)
-                        }
-                    }
+                    membersHost.decideMemberRename(request, approve)
                 
                 }
             } else {
@@ -925,33 +965,24 @@ fun FamilyRoute(
             onDismiss = { dialog = FamilyDialog.MembersList },
         )
         is FamilyDialog.ReviewPendingMember -> if (overview.enabled && overview.role == FamilyRole.Owner) {
-            fun finishDecision(kind: FailureKind?) {
-                decidingMemberRequest = false
-                dialog = if (kind != null && kind.usesSharedDialog) {
-                    FamilyDialog.Explanation(kind, resume = active)
-                } else {
-                    FamilyDialog.MembersList
-                }
-            }
             PendingMemberDecisionDialog(
                 request = active.request,
                 members = members.members,
                 busy = decidingMemberRequest,
                 onBindExisting = { membershipId ->
-                    decidingMemberRequest = true
+
                     membersHost.bindExistingMemberLogin(
                         active.request.requestId,
                         membershipId,
-                        ::finishDecision,
                     )
                 },
                 onApproveNew = {
-                    decidingMemberRequest = true
-                    membersHost.approveNewMemberLogin(active.request.requestId, ::finishDecision)
+
+                    membersHost.approveNewMemberLogin(active.request.requestId)
                 },
                 onReject = {
-                    decidingMemberRequest = true
-                    membersHost.rejectMemberLogin(active.request, ::finishDecision)
+
+                    membersHost.rejectMemberLogin(active.request)
                 },
                 onDismiss = {
                     if (!decidingMemberRequest) dialog = FamilyDialog.MembersList
@@ -962,22 +993,11 @@ fun FamilyRoute(
             displayName = active.displayName,
             removing = removingMember,
             onConfirm = {
-                
-                removingMember = true
+
                 membersHost.removeMember(
                     membershipId = active.membershipId,
                     displayName = active.displayName,
-                ) { success, copy, kind ->
-                    removingMember = false
-                    if (success) {
-                        dialog = FamilyDialog.Message(
-                            copy,
-                            resume = FamilyDialog.MembersList,
-                        )
-                    } else {
-                        showFailureKind(kind, resume = FamilyDialog.MembersList)
-                    }
-                }
+                )
             
             },
             onDismiss = {
@@ -1278,16 +1298,7 @@ fun FamilyRoute(
                         return@RenameFamilyDialog
                     }
                     
-                    savingFamilyName = true
-                    membersHost.renameFamily(renameFamilyName) { success, copy, kind ->
-                        savingFamilyName = false
-                        if (success) {
-                            renameFamilyName = ""
-                            dialog = FamilyDialog.Message(copy)
-                        } else {
-                            showFailureKind(kind, resume = FamilyDialog.RenameFamily)
-                        }
-                    }
+                    membersHost.renameFamily(renameFamilyName)
                 
                 },
                 onDismiss = {
@@ -1315,16 +1326,7 @@ fun FamilyRoute(
                     return@EditMyDisplayNameDialog
                 }
                 
-                savingDisplayName = true
-                membersHost.addFamilyMember(editDisplayName) { success, copy, kind ->
-                    savingDisplayName = false
-                    if (success) {
-                        editDisplayName = ""
-                        dialog = FamilyDialog.Message(copy, FamilyDialog.MembersList)
-                    } else {
-                        showFailureKind(kind, resume = FamilyDialog.AddFamilyMember)
-                    }
-                }
+                membersHost.addFamilyMember(editDisplayName)
             
             },
             onDismiss = {
@@ -1350,15 +1352,7 @@ fun FamilyRoute(
                     return@EditMyDisplayNameDialog
                 }
                 
-                savingDisplayName = true
-                membersHost.renameFamilyMember(active.membershipId, editDisplayName) { success, copy, kind ->
-                    savingDisplayName = false
-                    if (success) {
-                        dialog = FamilyDialog.Message(copy, FamilyDialog.MembersList)
-                    } else {
-                        showFailureKind(kind, resume = active)
-                    }
-                }
+                membersHost.renameFamilyMember(active.membershipId, editDisplayName)
             
             },
             onDismiss = {
@@ -1385,15 +1379,7 @@ fun FamilyRoute(
                     return@EditMyDisplayNameDialog
                 }
                 
-                savingDisplayName = true
-                membersHost.renameFamilyDevice(active.deviceId, editDisplayName) { success, copy, kind ->
-                    savingDisplayName = false
-                    if (success) {
-                        dialog = FamilyDialog.Message(copy, FamilyDialog.MembersList)
-                    } else {
-                        showFailureKind(kind, resume = active)
-                    }
-                }
+                membersHost.renameFamilyDevice(active.deviceId, editDisplayName)
             
             },
             onDismiss = {
@@ -1423,15 +1409,7 @@ fun FamilyRoute(
                     return@EditMyDisplayNameDialog
                 }
                 
-                savingDisplayName = true
-                membersHost.updateMyDisplayName(editDisplayName) { success, copy, kind ->
-                    savingDisplayName = false
-                    if (success) {
-                        dialog = FamilyDialog.Message(copy)
-                    } else {
-                        showFailureKind(kind, resume = FamilyDialog.EditMyDisplayName)
-                    }
-                }
+                membersHost.updateMyDisplayName(editDisplayName)
             
             },
             onDismiss = {
@@ -1441,27 +1419,24 @@ fun FamilyRoute(
                 }
             },
         )
-        FamilyDialog.ConfirmDeviceLogout -> LogoutCurrentDeviceDialog(
-            onConfirm = {
-                membersHost.logoutCurrentDevice { success, message, kind ->
-                    if (success) {
-                        showMessage(message)
-                    } else {
-                        showFailureKind(
-                            kind,
-                            resume = FamilyDialog.ConfirmDeviceLogout,
-                        )
-                    }
-                }
-
-            },
-            onDismiss = { dialog = null },
-            busy = memberDestructiveBusy,
-            pendingPublishCount = logoutPendingCount,
-            syncChecking = logoutSyncChecking,
-            syncFeedback = logoutSyncFeedback,
-            onSyncFirst = membersHost::syncBeforeLogoutCheck,
-        )
+        FamilyDialog.ConfirmDeviceLogout -> {
+            // Capture the rendered object, rather than reading a newer flow value on click.
+            val shownPreview = logoutSourcePreview
+            DisposableEffect(membersHost) {
+                membersHost.openLogoutConfirmation()
+                onDispose { membersHost.closeLogoutConfirmation() }
+            }
+            LogoutCurrentDeviceDialog(
+                sourcePreview = shownPreview,
+                onConfirm = { membersHost.logoutCurrentDevice(shownPreview) },
+                onDismiss = { dialog = null },
+                busy = memberDestructiveBusy,
+                pendingPublishCount = logoutPendingCount,
+                syncChecking = logoutSyncChecking,
+                syncFeedback = logoutSyncFeedback,
+                onSyncFirst = membersHost::syncBeforeLogoutCheck,
+            )
+        }
         is FamilyDialog.ConfirmDeviceRevoke -> RevokeFamilyDeviceDialog(
             deviceName = active.deviceName,
             isCurrent = active.isCurrent,
@@ -1470,13 +1445,7 @@ fun FamilyRoute(
                     active.deviceId,
                     active.deviceName,
                     active.isCurrent,
-                ) { success, message, kind ->
-                    if (success) {
-                        showMessage(message)
-                    } else {
-                        showFailureKind(kind, resume = active)
-                    }
-                }
+                )
             
             },
             onDismiss = { dialog = null },
@@ -1484,13 +1453,7 @@ fun FamilyRoute(
         )
         FamilyDialog.ConfirmLeave -> LeaveFamilyDialog(
             onConfirm = {
-                membersHost.leave { success, message, kind ->
-                    if (success) {
-                        showMessage(message)
-                    } else {
-                        showFailureKind(kind, resume = FamilyDialog.ConfirmLeave)
-                    }
-                }
+                membersHost.leave()
             },
             onDismiss = { dialog = null },
             busy = memberDestructiveBusy,
@@ -1512,21 +1475,11 @@ fun FamilyRoute(
             deleting = deletingFamily,
             onContinue = { dialog = FamilyDialog.DeleteFamily(FamilyDialog.DeleteStage.Final) },
             onConfirm = {
-                
-                deletingFamily = true
+
                 membersHost.deleteFamily(
                     deleteFamilyName,
                     deleteFamilyRootPassword,
-                ) { success, message, kind ->
-                    deletingFamily = false
-                    if (success) {
-                        resetDeleteFamilyConfirmation()
-                        dialog = null
-                        showMessage(message)
-                    } else {
-                        showFailureKind(kind, resume = active)
-                    }
-                }
+                )
             
             },
             onRefreshFamilyInfo = {
@@ -1603,7 +1556,7 @@ fun FamilyRoute(
                         }
                     }
                 },
-                onCreate = { nickname, sex, birthday, grams, theme, avatar, onFinished ->
+                onCreate = { nickname, sex, birthday, grams, theme, avatar, _ ->
                     overviewHost.addBaby(
                         nickname = nickname,
                         sex = sex,
@@ -1611,18 +1564,13 @@ fun FamilyRoute(
                         birthWeightGrams = grams,
                         themeColorArgb = theme,
                         avatarJpeg = avatar,
-                    ) { error ->
-                        onFinished(error)
-                        if (error == null) {
-                            dialog = null
-                            showMessage("已添加宝宝")
-                        }
-                    }
+                    )
                 },
                 onLocalTheme = overviewHost::setBabyLocalTheme,
                 onMoveLocal = overviewHost::moveBabyLocal,
                 onSetCurrent = overviewHost::setCurrent,
                 destructiveBusy = babyDestructiveBusy,
+                createError = babyCreation?.error,
             )
         }
         null -> Unit

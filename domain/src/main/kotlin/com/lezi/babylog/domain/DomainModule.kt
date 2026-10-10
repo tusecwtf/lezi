@@ -92,6 +92,6 @@ object CarePlanFamilyProjectionModule {
     fun removedDeviceLocalClearGate(
         coordinator: dagger.Lazy<LocalDataClearCoordinator>,
     ): RemovedDeviceLocalClearGate = RemovedDeviceLocalClearGate {
-        coordinator.get().clear(LocalDataClearScope.AllLocalData)
+        coordinator.get().workflow(LocalDataClearScope.AllLocalData)
     }
 }

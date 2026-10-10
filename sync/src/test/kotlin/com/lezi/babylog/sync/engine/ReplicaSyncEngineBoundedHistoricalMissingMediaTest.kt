@@ -42,7 +42,8 @@ class ReplicaSyncEngineBoundedHistoricalMissingMediaTest {
         rig.engine.synchronize(session, SyncTrigger.Foreground)
 
         assertThat(rig.media.listMissingLocalBytesCalls).isEqualTo(1)
-        assertThat(rig.backend.pullCount).isEqualTo(2)
+        // Two ordinary pages plus one bounded legacy-authority maintenance rewalk.
+        assertThat(rig.backend.pullCount).isEqualTo(3)
     }
 
     @Test
@@ -122,15 +123,16 @@ class ReplicaSyncEngineBoundedHistoricalMissingMediaTest {
             .isEqualTo("downloaded/$HISTORICAL_C")
         assertThat(rig.media.getByClientUuid(HISTORICAL_D)?.localUri).isEmpty()
         assertThat(rig.media.getByClientUuid(HISTORICAL_E)?.localUri).isEmpty()
-        assertThat(rig.backend.pullCount).isEqualTo(2)
+        // Two ordinary pages plus one bounded legacy-authority maintenance rewalk.
+        assertThat(rig.backend.pullCount).isEqualTo(3)
     }
 
     @Test
     fun fullCycleStopsHistoricalGetsOnceDecodedBytesReachEightMebibytes() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 6)
         val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
-        seedHistoricalMissing(rig, HISTORICAL_A, HISTORICAL_B)
         rig.backend.mediaBytesByUuid[HISTORICAL_A] = ByteArray(8 * 1024 * 1024) { 1 }
+        seedHistoricalMissing(rig, HISTORICAL_A, HISTORICAL_B)
         rig.backend.nextPull = PullResult(
             entities = emptyList(),
             cursor = 6,
@@ -148,14 +150,26 @@ class ReplicaSyncEngineBoundedHistoricalMissingMediaTest {
 
     @Test
     fun thisPageRecordAndPlanPackagesStageMediaBeforeApply() = runTest {
+        verifyRecordAndPlanStaging(sharedContent = false)
+    }
+
+    @Test
+    fun sameContentRecordAndPlanShareStagedBytesWithoutSharingOwnerIdentity() = runTest {
+        verifyRecordAndPlanStaging(sharedContent = true)
+    }
+
+    private suspend fun verifyRecordAndPlanStaging(sharedContent: Boolean) {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 1)
         val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        rig.backend.mediaBytes = byteArrayOf(1, 2, 3, 4) // Both page manifests declare four bytes.
         val babyUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee00"
         seedHistoricalMissing(rig, HISTORICAL_A, babyClientUuid = babyUuid)
         val recordUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee01"
         val planUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee02"
         val recordMediaUuid = "11111111-1111-4111-8111-111111111111"
         val planMediaUuid = "22222222-2222-4222-8222-222222222222"
+        val planBytes = if (sharedContent) byteArrayOf(1, 2, 3, 4) else byteArrayOf(4, 3, 2, 1)
+        rig.backend.mediaBytesByUuid[planMediaUuid] = planBytes
         val visibleDuringGets = mutableListOf<Pair<Boolean, Boolean>>()
         rig.backend.onGetMedia = { _ ->
             visibleDuringGets += (
@@ -167,9 +181,9 @@ class ReplicaSyncEngineBoundedHistoricalMissingMediaTest {
         rig.backend.nextPull = PullResult(
             entities = listOf(
                 remoteReplicaRecord(recordUuid, babyClientUuid = babyUuid),
-                remoteReplicaMedia(recordMediaUuid, recordUuid),
+                remoteReplicaMedia(recordMediaUuid, recordUuid).withAuthenticatedMediaBytes(byteArrayOf(1, 2, 3, 4)),
                 remoteReplicaCarePlan(planUuid, babyClientUuid = babyUuid),
-                remoteReplicaPlanMedia(planMediaUuid, planUuid),
+                remoteReplicaPlanMedia(planMediaUuid, planUuid).withAuthenticatedMediaBytes(planBytes, role = "plan"),
             ),
             cursor = 2,
             generation = session.pullGeneration,
@@ -178,20 +192,27 @@ class ReplicaSyncEngineBoundedHistoricalMissingMediaTest {
 
         rig.engine.synchronize(session, SyncTrigger.Foreground)
 
-        assertThat(rig.backend.mediaGets)
-            .containsExactly(recordMediaUuid, planMediaUuid, HISTORICAL_A)
-            .inOrder()
-        assertThat(visibleDuringGets).containsExactly(
-            false to false,
-            false to false,
-            true to true,
-        )
+        val expectedGets = if (sharedContent) listOf(recordMediaUuid, HISTORICAL_A)
+            else listOf(recordMediaUuid, planMediaUuid, HISTORICAL_A)
+        assertThat(rig.backend.mediaGets).containsExactlyElementsIn(expectedGets).inOrder()
+        val expectedVisibility = if (sharedContent) listOf(false to false, true to true)
+            else listOf(false to false, false to false, true to true)
+        assertThat(visibleDuringGets).containsExactlyElementsIn(expectedVisibility).inOrder()
+        val recordMedia = requireNotNull(rig.media.getByClientUuid(recordMediaUuid))
+        val planMedia = requireNotNull(rig.media.getByClientUuid(planMediaUuid))
+        assertThat(recordMedia.recordId).isEqualTo(rig.records.getByClientUuid(recordUuid)?.id)
+        assertThat(recordMedia.carePlanId).isNull()
+        assertThat(planMedia.carePlanId).isEqualTo(rig.carePlans.getByClientUuid(planUuid)?.id)
+        assertThat(planMedia.recordId).isNull()
+        if (sharedContent) assertThat(planMedia.localUri).isEqualTo(recordMedia.localUri)
         assertThat(rig.records.getByClientUuid(recordUuid)).isNotNull()
         assertThat(rig.carePlans.getByClientUuid(planUuid)).isNotNull()
-        assertThat(rig.media.getByClientUuid(recordMediaUuid)?.localUri)
-            .isEqualTo("downloaded/$recordMediaUuid")
-        assertThat(rig.media.getByClientUuid(planMediaUuid)?.localUri)
-            .isEqualTo("downloaded/$planMediaUuid")
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(
+            requireNotNull(rig.media.getByClientUuid(recordMediaUuid)).localUri,
+        )).readBytes()).isEqualTo(byteArrayOf(1, 2, 3, 4))
+        assertThat(requireNotNull(rig.mediaFiles.readableFile(
+            requireNotNull(rig.media.getByClientUuid(planMediaUuid)).localUri,
+        )).readBytes()).isEqualTo(planBytes)
         assertThat(rig.media.getByClientUuid(HISTORICAL_A)?.localUri)
             .isEqualTo("downloaded/$HISTORICAL_A")
     }
@@ -271,7 +292,7 @@ class ReplicaSyncEngineBoundedHistoricalMissingMediaTest {
                     localUri = "",
                     remoteUri = rig.preferences.current().receiptFor(uuid),
                     mime = "image/jpeg",
-                    byteSize = 12,
+                    byteSize = (rig.backend.mediaBytesByUuid[uuid] ?: rig.backend.mediaBytes).size.toLong(),
                     createdAt = 100,
                     updatedAt = 100,
                     syncDirty = false,

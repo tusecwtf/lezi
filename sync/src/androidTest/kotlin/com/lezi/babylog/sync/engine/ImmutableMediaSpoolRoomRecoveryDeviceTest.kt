@@ -42,6 +42,12 @@ import com.lezi.babylog.sync.media.ImmutableMediaSpoolSource
 import com.lezi.babylog.sync.media.SyncMediaUploadSource
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.SyncSession
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import java.io.File
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -366,6 +372,8 @@ class ImmutableMediaSpoolRoomRecoveryDeviceTest {
                 assertThat(uploadedByMediaUuid.getValue(mediaUuid)).isEqualTo(expected)
             }
             assertThat(database.carePlanDao().getByClientUuid(CARE_PLAN_ID)?.syncDirty).isFalse()
+            assertThat(database.carePlanDao().getByClientUuid(CARE_PLAN_ID)?.createdByMembershipId)
+                .isEqualTo(SESSION.membershipId)
             mediaIds.forEach { mediaUuid ->
                 assertThat(database.mediaAssetDao().getByClientUuid(mediaUuid)?.syncDirty)
                     .isFalse()
@@ -449,7 +457,12 @@ class ImmutableMediaSpoolRoomRecoveryDeviceTest {
         conflictSummaryDao = database.conflictSummaryDao(),
         conflictSnapshotCacheDao = database.conflictSnapshotCacheDao(),
         immutableMediaSpool = spool,
+        mediaFiles = AndroidSyncMediaFileStore(context),
         transactionRunner = transactionRunner,
+        cleanupUnownedMediaPaths = { paths -> com.lezi.babylog.sync.media.ReferenceAwareMediaFileCleanup(
+            database.mediaAssetDao(), database.mediaReferenceDao(), AndroidSyncMediaFileStore(context),
+            transactionRunner, com.lezi.babylog.core.database.MediaLocalPathGate(),
+        ).cleanupUnreferencedPaths(paths) },
         requireRemoteAllowed = {},
     )
 
@@ -471,7 +484,7 @@ class ImmutableMediaSpoolRoomRecoveryDeviceTest {
     )
 }
 
-private class DeviceCausalBackend : SyncBackend {
+internal open class DeviceCausalBackend : SyncBackend {
     val uploadedMedia = mutableListOf<Pair<String, ByteArray>>()
 
     override suspend fun putCausalMediaPreimage(
@@ -484,7 +497,8 @@ private class DeviceCausalBackend : SyncBackend {
         return CausalMediaPreimageReceipt(
             mediaUuid = mediaUuid,
             status = "staged",
-            byteSize = source.contentLength,
+            // An empty family-blob bind still acknowledges the original blob size.
+            byteSize = source.declaredByteSize,
             sha256 = sha256,
             expiresAtEpochSeconds = Long.MAX_VALUE,
         )
@@ -508,10 +522,12 @@ private class DeviceCausalBackend : SyncBackend {
                 requestHash = causalMutationContentHash(unit),
                 replay = false,
                 stableVersionId = "v-record-1",
-                stableRootJson = unit.rootJson,
+                stableRootJson = deviceStableRoot(unit, session),
                 stableMedia = unit.media,
-                stableDeleted = false,
-                stableDeletedAt = null,
+                stableDeleted = unit.deleted,
+                stableDeletedAt = if (unit.deleted) requireNotNull(
+                    Json.parseToJsonElement(unit.rootJson).jsonObject["updated_at"]?.jsonPrimitive?.longOrNull,
+                ) else null,
             )
         },
     )
@@ -598,3 +614,16 @@ private const val AVATAR_BABY_ID = "00000000-0000-4000-8000-000000000282"
 private const val CARE_PLAN_MUTATION_ID = "00000000-0000-4000-8000-000000000029"
 private const val CARE_PLAN_ID = "00000000-0000-4000-8000-000000000290"
 private const val CARE_PLAN_BABY_ID = "00000000-0000-4000-8000-000000000292"
+
+/** Match server-authored stable projection fields while hashing the unchanged submitted request. */
+internal fun deviceStableRoot(unit: CausalMutationUnit, session: SyncSession): String {
+    val root = Json.parseToJsonElement(unit.rootJson).jsonObject.toMutableMap()
+    when (unit.entityType) {
+        "record", "custom_item", "care_plan" -> {
+            if (root["created_by_membership_id"]?.toString() in setOf(null, "null", "\"\""))
+                root["created_by_membership_id"] = JsonPrimitive(session.membershipId)
+        }
+        "wake_observation" -> root["observer_membership_id"] = JsonPrimitive(session.membershipId)
+    }
+    return JsonObject(root).toString()
+}

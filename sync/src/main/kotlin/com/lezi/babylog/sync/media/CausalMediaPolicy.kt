@@ -12,7 +12,7 @@ enum class CausalMediaRole(val wireName: String) {
 /** Single owner for the Android causal-media manifest limits and entity/role mapping. */
 object CausalMediaPolicy {
     const val maxSpoolSlotBytes: Long = RecordPhotoResourcePolicy.maxUploadBytes
-    const val maxMimeBytes: Int = 255
+    const val maxMimeUnicodeScalars: Int = 255
 
     fun roleForEntityType(entityType: String): CausalMediaRole? = when (entityType) {
         "baby" -> CausalMediaRole.Avatar
