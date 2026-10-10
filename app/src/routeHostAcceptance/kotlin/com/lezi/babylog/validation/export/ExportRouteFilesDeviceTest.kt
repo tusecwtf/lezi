@@ -80,7 +80,7 @@ class ExportRouteFilesDeviceTest {
 
     @Test fun historicalPdfRequestsFreezeOptionsAndKeepDistinctFiles() {
         val fixture = seed()
-        ActivityScenario.launch(MainActivity::class.java).use {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             openExport()
             selectRange(FROM, TO)
             compose.onNode(isToggleable()).assertIsOn().performScrollTo().performClick().assertIsOff()
@@ -92,6 +92,15 @@ class ExportRouteFilesDeviceTest {
                 assertFrozenDraft(FROM, TO, photos = false)
                 assertEquals(1, reads.count(firstRequest))
                 assertTrue(chooserIntents().isEmpty())
+                assertFalse(firstHeld.completed.isCompleted)
+
+                // Recreate while the original read is still held, without rearming it.
+                scenario.recreate()
+                assertFrozenDraft(FROM, TO, photos = false)
+                assertFalse(firstHeld.completed.isCompleted)
+                assertEquals(1, reads.count(firstRequest))
+                assertTrue(chooserIntents().isEmpty())
+                assertEquals(fixture.beforeFiles, exportNames())
                 firstHeld.release()
                 val first = awaitShare(1, "application/pdf", "分享 PDF")
                 assertPreview(fixture, FROM, TO, includeStart = true)
@@ -133,7 +142,7 @@ class ExportRouteFilesDeviceTest {
 
     @Test fun readFailurePreservesDraftAndExplicitRetryGeneratesFile() {
         val fixture = seed()
-        ActivityScenario.launch(MainActivity::class.java).use {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             openExport()
             selectRange(FROM, TO)
             compose.onNode(isToggleable()).performScrollTo().performClick().assertIsOff()
@@ -143,6 +152,17 @@ class ExportRouteFilesDeviceTest {
                 clickExport(PDF)
                 awaitHeld(held)
                 assertFrozenDraft(FROM, TO, photos = false)
+                assertFalse(held.completed.isCompleted)
+                assertEquals(1, reads.count(request))
+                assertTrue(chooserIntents().isEmpty())
+
+                // The recreated route must keep the same pending attempt and frozen draft.
+                scenario.recreate()
+                assertFrozenDraft(FROM, TO, photos = false)
+                assertFalse(held.completed.isCompleted)
+                assertEquals(1, reads.count(request))
+                assertTrue(chooserIntents().isEmpty())
+                assertEquals(fixture.beforeFiles, exportNames())
                 held.release()
                 awaitText("本机保存没有成功", substring = true)
                 assertTrue(chooserIntents().isEmpty())

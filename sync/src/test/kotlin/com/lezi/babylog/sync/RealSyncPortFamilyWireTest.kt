@@ -613,20 +613,43 @@ class RealSyncPortFamilyWireTest {
 
     @Test
     fun multiPagePullRejectsConflictingFamilyNamesInsteadOfUsingTheLastPage() = runTest {
+        val backend = RecordingSyncBackend()
+        val pullAttempts = AtomicLong()
+        val continuationStarted = CompletableDeferred<SyncSession>()
+        val continuationCancelled = CompletableDeferred<Unit>()
         val rig = SyncRig(
             session = joinedSession("family-a").copy(
                 familyName = "拉取前名字",
                 pullGeneration = "g1",
             ),
+            syncBackend = object : SyncBackend by backend {
+                override suspend fun pull(
+                    session: SyncSession,
+                    page: com.lezi.babylog.sync.backend.PullPageRequest,
+                ): PullResult {
+                    if (pullAttempts.incrementAndGet() > 2) {
+                        // Observe the rejected cycle before a later successful page can
+                        // legitimately replace its checkpoint (the fake defaults to null).
+                        continuationStarted.complete(session)
+                        try {
+                            awaitCancellation()
+                        } finally {
+                            continuationCancelled.complete(Unit)
+                        }
+                    }
+                    return backend.pull(session, page)
+                }
+            },
         )
-        rig.backend.pullResults += PullResult(
+        rig.awaitInitialReplicaBarrier()
+        backend.pullResults += PullResult(
             entities = emptyList(),
             cursor = 1,
             generation = "g1",
             hasMore = true,
             familyName = "第一页名字",
         )
-        rig.backend.pullResults += PullResult(
+        backend.pullResults += PullResult(
             entities = emptyList(),
             cursor = 1,
             generation = "g1",
@@ -634,15 +657,27 @@ class RealSyncPortFamilyWireTest {
             familyName = "第二页名字",
         )
 
-        val result = rig.port.sync(SyncTrigger.PullToRefresh)
+        try {
+            val result = rig.port.sync(SyncTrigger.PullToRefresh)
 
-        // Family-name drift is a typed cycle-state failure: the page is not
-        // checkpointed with the conflicting name and the foreground cycle
-        // continues (self-heals next round) instead of hard-failing as a
-        // misclassified "check your input" error.
-        assertThat(result.isSuccess).isTrue()
-        assertThat(rig.preferences.current().familyName).isEqualTo("第一页名字")
-        assertThat(rig.preferences.current().pullCursor).isEqualTo(1)
+            // Family-name drift is a typed cycle-state failure: the page is not
+            // checkpointed with the conflicting name and the foreground cycle
+            // continues instead of hard-failing as a misclassified input error.
+            assertThat(result.isSuccess).isTrue()
+            val resumedSession = continuationStarted.await()
+            assertThat(pullAttempts.get()).isEqualTo(3L)
+            assertThat(backend.pullCursors).containsExactly(0L, 1L).inOrder()
+            assertThat(backend.pullPageRequests.map { it.pageIndex }).containsExactly(0, 1).inOrder()
+            assertThat(resumedSession.pullCursor).isEqualTo(1L)
+            assertThat(rig.preferences.current().familyName).isEqualTo("第一页名字")
+            assertThat(rig.preferences.current().pullCursor).isEqualTo(1)
+
+            // Fence the real IO continuation's cancellation, not virtual time.
+            rig.foreground.setForeground(false)
+            continuationCancelled.await()
+        } finally {
+            rig.foreground.setForeground(false)
+        }
     }
 
 }

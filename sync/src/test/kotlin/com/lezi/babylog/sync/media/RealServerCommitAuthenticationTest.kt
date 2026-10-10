@@ -8,12 +8,17 @@ import com.lezi.babylog.sync.backend.CausalMutationUnit
 import com.lezi.babylog.sync.backend.ReauthRequiredException
 import com.lezi.babylog.sync.backend.RefreshingSyncBackend
 import com.lezi.babylog.sync.backend.RemoteDeviceRemovedException
+import com.lezi.babylog.sync.backend.SessionRefreshResult
+import com.lezi.babylog.sync.backend.SyncHttpException
 import com.lezi.babylog.sync.backend.SyncBackend
 import com.lezi.babylog.sync.engine.CausalMediaSettlementPhase
 import com.lezi.babylog.sync.engine.decodeCausalMediaSettlementOrNull
 import com.lezi.babylog.sync.session.PolicyClock
 import com.lezi.babylog.sync.session.SyncSession
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
 
 /** Real Rust authentication replies through production HTTP parser + refresh + engine. */
@@ -29,7 +34,7 @@ class RealServerCommitAuthenticationTest {
     }
 
     @Test
-    fun revokedDeviceCommitIsTerminalWithoutRefreshOrBusinessRejection() = runBlocking {
+    fun revokedDeviceCommitConfirmsRemovalWithOneRefreshWithoutBusinessRejection() = runBlocking {
         runCase("revoked")
     }
 
@@ -42,6 +47,8 @@ class RealServerCommitAuthenticationTest {
             )
             var commitCalls = 0
             val attemptedMutations = mutableListOf<List<CausalMutationUnit>>()
+            val commitAuthFailures = mutableListOf<SyncHttpException>()
+            val refreshAuthFailures = mutableListOf<SyncHttpException>()
             val instrumented = object : SyncBackend by fixture.backend {
                 override suspend fun causalCommit(session: SyncSession, units: List<CausalMutationUnit>): CausalCommitBatchResult {
                     commitCalls++
@@ -56,7 +63,23 @@ class RealServerCommitAuthenticationTest {
                         // SQL edits would bypass that cache and do not simulate TTL.
                         fixture.server.setReceiptClock(session.accessExpiresAtEpochSeconds + 1)
                     }
-                    return fixture.backend.causalCommit(session, units)
+                    return try {
+                        fixture.backend.causalCommit(session, units)
+                    } catch (failure: SyncHttpException) {
+                        commitAuthFailures += failure
+                        throw failure
+                    }
+                }
+
+                override suspend fun refresh(
+                    baseUrl: String,
+                    refreshToken: String,
+                    refreshRequestId: String,
+                ): SessionRefreshResult = try {
+                    fixture.backend.refresh(baseUrl, refreshToken, refreshRequestId)
+                } catch (failure: SyncHttpException) {
+                    refreshAuthFailures += failure
+                    throw failure
                 }
             }
             val refreshing = RefreshingSyncBackend(instrumented, fixture.preferences, object : PolicyClock {
@@ -87,7 +110,29 @@ class RealServerCommitAuthenticationTest {
                     if (mode == "revoked") RemoteDeviceRemovedException::class.java else ReauthRequiredException::class.java,
                 )
                 assertThat(statuses).containsExactlyElementsIn(if (mode == "revoked") listOf(401) else listOf(401, 401)).inOrder()
-                assertThat(refreshes).hasSize(if (mode == "revoked") 0 else 1)
+                assertThat(refreshes).hasSize(1)
+                if (mode == "revoked") {
+                    // Commit deliberately closes every authentication failure as
+                    // unauthenticated. Only the one refresh identifies removal;
+                    // there must be no second commit or generic reauth cleanup.
+                    assertThat(commitCalls).isEqualTo(1)
+                    val rejectedCommit = commitAuthFailures.single()
+                    assertThat(rejectedCommit.statusCode).isEqualTo(401)
+                    assertThat(Json.parseToJsonElement(rejectedCommit.responseBody)).isEqualTo(
+                        Json.parseToJsonElement(
+                            """{"status":"rejected","error":{"code":"unauthenticated","retryable":false}}""",
+                        ),
+                    )
+                    val rejectedRefresh = refreshAuthFailures.single()
+                    assertThat(rejectedRefresh.statusCode).isEqualTo(401)
+                    assertThat(Json.parseToJsonElement(rejectedRefresh.responseBody)
+                        .jsonObject["code"]?.jsonPrimitive?.content).isEqualTo("device_removed")
+                    assertThat(fixture.preferences.current().accessToken).isEqualTo(original.accessToken)
+                    assertThat(fixture.preferences.current().refreshToken).isEqualTo(original.refreshToken)
+                    assertThat(fixture.preferences.current().reauthRequired).isFalse()
+                } else {
+                    assertThat(refreshAuthFailures).isEmpty()
+                }
                 assertThat(fixture.recordVersionCount()).isEqualTo(0)
                 val pendingRecord = requireNotNull(fixture.records.getByClientUuid(seeded.recordUuid))
                 assertThat(pendingRecord.syncDirty).isTrue()

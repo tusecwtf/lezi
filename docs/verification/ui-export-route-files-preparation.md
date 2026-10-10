@@ -59,6 +59,9 @@ Class: `com.lezi.babylog.validation.export.ExportRouteFilesDeviceTest`
 - Check the visible range, disabled date/photo controls and disabled export
   buttons. Attempt edits and duplicate clicks; the selected options remain
   unchanged and the exact tuple has one read, with no premature share.
+- Recreate the Activity before releasing that same held read. Repeat the frozen
+  range/options and duplicate-click checks on the restored route; require one
+  selected read, an incomplete original caller, no chooser and no new file.
 - Release and verify a real, readable one-page PDF and the selected preview.
   No-photo output is meaningful because the selected records do have images.
 - Change the next draft to 2025-02-02 only, turn photos on, and repeat the
@@ -76,8 +79,12 @@ identity. This does not claim PDF text extraction.
 
 ### `readFailurePreservesDraftAndExplicitRetryGeneratesFile`
 
-- Hold the matching historical photo-off PDF read, then release it into the
-  single injected IOException, before any renderer/file generation.
+- Hold the matching historical photo-off PDF read and recreate the Activity
+  before release. Before and after recreation, check the frozen draft and
+  disabled controls (including attempted edits and duplicate clicks), one
+  selected read, an incomplete original caller and no chooser. After recreation
+  require no new file, then release the same read into the single injected
+  IOException, before any renderer/file generation.
 - Require the real shared local-save failure dialog, no share/file, the same
   source records/media, and exactly one selected read.
 - Click the dialog's “再试一次”, verify the unchanged editable draft, then
@@ -120,8 +127,12 @@ authorizes execution.
 These sources complement, rather than repeat,
 `ProductionExportDraftRecreationDeviceTest`, which already prepares the
 production-Application empty-range / historical photo-off draft / Room queue /
-Activity-recreation retry slice. Successful-file cases here do not recreate
-the Activity, and the explicit return transition is not process death.
+Activity-recreation retry slice. The nonempty delayed-success and delayed-failure
+cases here now prepare Activity recreation while the original read remains held;
+no counters are reset and no replacement read is armed across recreation. This
+is a configuration-recreation check, not process-death recovery. The explicit
+return transition is also not process death. These added recreation assertions
+have not been compiled or run at this checkpoint.
 
 Still unproven: compilation, API26/API35 device behavior, actual system chooser
 return, third-party reading of the URI, native failure/deadline/lifecycle and
