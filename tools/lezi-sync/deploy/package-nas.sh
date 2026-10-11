@@ -540,6 +540,17 @@ attested_cutover_source() {
 }
 
 case "${version}" in
+  0.5.5)
+    package_server_schema="${LEZI_PACKAGE_SERVER_SCHEMA:-13}"
+    rollback_source_version="${LEZI_PACKAGE_ROLLBACK_SOURCE_VERSION:-0.5.4}"
+    rollback_source_server_schema="${LEZI_PACKAGE_ROLLBACK_SOURCE_SERVER_SCHEMA:-13}"
+    if [[ "${package_server_schema}" != "13" \
+        || "${rollback_source_version}" != "0.5.4" \
+        || "${rollback_source_server_schema}" != "13" ]]; then
+      echo "error: 0.5.5 requires schema 13 with 0.5.4/schema 13 rollback source" >&2
+      exit 1
+    fi
+    ;;
   0.5.4)
     package_server_schema="${LEZI_PACKAGE_SERVER_SCHEMA:-13}"
     rollback_source_version="${LEZI_PACKAGE_ROLLBACK_SOURCE_VERSION:-0.5.3}"

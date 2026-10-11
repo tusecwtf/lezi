@@ -119,6 +119,14 @@ attested_cutover_source() {
     *) return 1 ;;
   esac
 }
+if [[ "${version}" == "0.5.5" ]] \
+    && { [[ "${server_schema}" != "13" \
+      || "${android_version_code}" != "35" \
+      || "${minimum_supported_version_code}" != "21" \
+      || "${rollback_source_version}" != "0.5.4" \
+      || "${rollback_source_server_schema}" != "13" ]]; }; then
+  fail "0.5.5 release identity must be 0.5.5/code35/floor21/schema13 with 0.5.4/13 rollback source"
+fi
 if [[ "${version}" == "0.5.4" ]] \
     && { [[ "${server_schema}" != "13" \
       || "${android_version_code}" != "34" \

@@ -1,8 +1,8 @@
 # 分层架构（architecture）
 
-> 身份钉：current tree **0.5.4** / versionCode **34** / Room **29** / 本地数据契约 **6** /
-> server schema **13** / 同步 floor **21**；协议代 0.4.0（conflict-v2）。2026-09-30
-> 协同维护窗后 NAS 与渠道目标均为 0.5.4。构建真值以
+> 身份钉：current tree **0.5.5** / versionCode **35** / Room **29** / 本地数据契约 **6** /
+> server schema **13** / 同步 floor **21**；协议代 0.4.0（conflict-v2）。渠道目标与待上线
+> NAS 为 0.5.5。构建真值以
 > `app/build.gradle.kts` + `config/android-release-compatibility.json` 为准。
 >
 > **权界**：本文权威 = Gradle 模块图、依赖方向、package locality、模块↔规格↔代码连线。

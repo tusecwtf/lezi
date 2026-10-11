@@ -21,9 +21,8 @@ import org.junit.Test
  * release; Room 29, contract 6, and floor 21 still do not move.
  * 0.5.3: 0.5.3/33 is the upgrade target and 0.5.2/32 the last release;
  * Room 29, contract 6, and floor 21 still do not move.
- * 0.5.4: 0.5.4/34 is the upgrade target and 0.5.3/33 the last release;
- * Room 29, contract 6, and floor 21 still do not move (zero server movement —
- * the NAS stays on 0.5.3 and the channel target stays 0.5.3).
+ * 0.5.4: 0.5.4/34 is the last release; 0.5.5/35 is the upgrade target;
+ * Room 29, contract 6, and floor 21 still do not move.
  */
 
 class LocalDataContractSixCatalogTest {
@@ -50,24 +49,24 @@ class LocalDataContractSixCatalogTest {
         ).isTrue()
 
         val target = catalog.getValue("upgrade_target").jsonObject
-        assertThat(target.getValue("version_code").jsonPrimitive.int).isEqualTo(34)
-        assertThat(target.getValue("version_name").jsonPrimitive.content).isEqualTo("0.5.4")
+        assertThat(target.getValue("version_code").jsonPrimitive.int).isEqualTo(35)
+        assertThat(target.getValue("version_name").jsonPrimitive.content).isEqualTo("0.5.5")
         assertThat(target.getValue("room_schema").jsonPrimitive.int).isEqualTo(29)
         assertThat(target.getValue("local_data_contract").jsonPrimitive.int).isEqualTo(6)
 
         val released = catalog.getValue("released_versions").jsonArray.map { it.jsonObject }
         val previous = released.single {
-            it.getValue("version_code").jsonPrimitive.int == 33
+            it.getValue("version_code").jsonPrimitive.int == 34
         }
-        assertThat(previous.getValue("version_name").jsonPrimitive.content).isEqualTo("0.5.3")
+        assertThat(previous.getValue("version_name").jsonPrimitive.content).isEqualTo("0.5.4")
         assertThat(previous.getValue("room_schema").jsonPrimitive.int).isEqualTo(29)
         assertThat(previous.getValue("local_data_contract").jsonPrimitive.int).isEqualTo(6)
 
         val rollbackSource = released.single {
-            it.getValue("version_code").jsonPrimitive.int == 32
+            it.getValue("version_code").jsonPrimitive.int == 33
         }
         assertThat(rollbackSource.getValue("version_name").jsonPrimitive.content)
-            .isEqualTo("0.5.2")
+            .isEqualTo("0.5.3")
         assertThat(rollbackSource.getValue("room_schema").jsonPrimitive.int).isEqualTo(29)
         assertThat(rollbackSource.getValue("local_data_contract").jsonPrimitive.int).isEqualTo(6)
 

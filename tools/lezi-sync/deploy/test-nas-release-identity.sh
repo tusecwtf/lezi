@@ -186,12 +186,14 @@ EOF
     || fail "${version} stale-manifest rejection did not identify APK versus app-update.json"
 }
 
-# Current release identity: 0.5.4/code34/floor21/schema13 with a
-# 0.5.3/schema 13 rollback source.
+# Current release identity: 0.5.5/code35/floor21/schema13 with a
+# 0.5.4/schema 13 rollback source.
+verify_release_identity 0.5.5 35 21 13 0.5.4 13 0.5.3
+# Regression: the 0.5.4 identity and its 0.5.3/schema 13 rollback path stay intact.
 verify_release_identity 0.5.4 34 21 13 0.5.3 13 0.5.2
 # Regression: the 0.5.3 identity and its 0.5.2/schema 13 rollback path stay intact.
 verify_release_identity 0.5.3 33 21 13 0.5.2 13 0.5.1
 # Regression: the 0.5.2 identity and its 0.5.1/schema 13 rollback path stay intact.
 verify_release_identity 0.5.2 32 21 13 0.5.1 13 0.5.0
 
-echo 'NAS 0.5.4/0.5.3/0.5.2 full packaging, rollback identity, and check-only regressions passed'
+echo 'NAS 0.5.5/0.5.4/0.5.3 full packaging, rollback identity, and check-only regressions passed'

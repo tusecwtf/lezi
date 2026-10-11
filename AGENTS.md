@@ -144,7 +144,7 @@ ssh -p 10000 nas-operator@192.168.77.10 'curl -fsS http://127.0.0.1:8765/health'
 
 ### Agent workflow: cheapest proof, NAS only when required
 
-**Current alignment — 0.5.4 everywhere (2026-09-30 coordinated CD).** Android tree 0.5.4 / versionCode 34; `tools/lezi-sync` crate and family NAS 0.5.4; wire 0.4.0 / schema 13 / floor 21. Client-ahead with frozen wire is allowed (it produced the 2026-09 split; the 2026-09-30 maintenance window closed it). Do not propose NAS, bump `Cargo.toml`, or refresh `app-update.json` solely so versionName matches.
+**Current alignment — 0.5.5 target (Android tree 0.5.5 / versionCode 35; tools/lezi-sync crate 0.5.5; wire 0.4.0 / schema 13 / floor 21; NAS live 0.5.4 pending CD window).**
 
 **Live server ≠ NAS.** Dual-side live proof is `IsolatedLeziSyncServer` (mktemp data root, openssl loopback cert, tree `lezi-sync` binary). Certificate creation/replacement/TOFU tests stay on that harness; never against the family NAS, its container, or its data bind.
 

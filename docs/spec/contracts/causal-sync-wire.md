@@ -2,8 +2,8 @@
 
 > **状态：** 本文是 **协议冻结** 合同：Android/server **0.4.0**、versionCode **21**、Room **28**、本地数据契约
 > **5**、server schema **13**、同步 floor **21**。0.3.13/code 20/Room 27/server schema 12 是升级源。
-> **当前 tree** 是 0.5.4 / versionCode **34** / Room **29** / 本地数据契约 **6**；Room 28→29 只加空列
-> `media_assets.sha256`，0.5.0/0.5.1/0.5.2/0.5.3/0.5.4 零 schema，不改本 wire、不抬 floor。
+> **当前 tree** 是 0.5.5 / versionCode **35** / Room **29** / 本地数据契约 **6**；Room 28→29 只加空列
+> `media_assets.sha256`，0.5.0/0.5.1/0.5.2/0.5.3/0.5.4/0.5.5 零 schema，不改本 wire、不抬 floor。
 
 > 历史 0.3.9–0.3.12 叙述见
 > [`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md) 与 [`data-model.md`](./data-model.md)。

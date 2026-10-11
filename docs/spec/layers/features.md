@@ -1,6 +1,6 @@
 # features 层规格（`:app` 壳 + `:core:ui` + 10 个 `:feature:*`）
 
-> 身份钉：当前 tree 0.5.4。**权界**：本文权威 = 应用壳导航/chrome 策略、各 feature 的屏幕
+> 身份钉：当前 tree 0.5.5。**权界**：本文权威 = 应用壳导航/chrome 策略、各 feature 的屏幕
 > 清单、关键交互与跨 feature 协作。逐页 UI 合同（token/单手/文案/校验）唯一权威 =
 > [`contracts/ui.md`](../contracts/ui.md)；层规格中的「指针」不复制该合同。签名唯一权威是代码。
 

@@ -2,8 +2,8 @@
 
 > **个人/家庭使用** · Android · 无商业化
 > 决策日：2026-07-25 · **tree 发布线**以 `config/android-release-compatibility.json` 为准
-> 当前 tree 已激活 **0.5.4** / code **34** / Room **29** / local-data contract **6** /
-> server schema **13** / floor **21** / `causal_sync_v2`。0.5.3/code 33、0.5.2/code 32、0.5.1/code 31、0.5.0/code 30、0.4.8/code 29、0.4.7/code 28、0.4.6/code 27、0.4.5/code 26、0.4.4/code 25、0.4.3/code 24、0.4.2/code 23、0.4.1/code 22、0.4.0/code 21 与 0.3.13/code 20
+> 当前 tree 已激活 **0.5.5** / code **35** / Room **29** / local-data contract **6** /
+> server schema **13** / floor **21** / `causal_sync_v2`。0.5.4/code 34、0.5.3/code 33、0.5.2/code 32、0.5.1/code 31、0.5.0/code 30、0.4.8/code 29、0.4.7/code 28、0.4.6/code 27、0.4.5/code 26、0.4.4/code 25、0.4.3/code 24、0.4.2/code 23、0.4.1/code 22、0.4.0/code 21 与 0.3.13/code 20
 > 仍是升级源；协议代仍是 0.4.0 conflict-v2。
 
 > Wire 权威：[`contracts/causal-sync-wire.md`](./contracts/causal-sync-wire.md)。

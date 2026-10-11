@@ -1,6 +1,6 @@
 # domain 层规格（`:domain` 模块）
 
-> 身份钉：当前 tree 0.5.4。**权界**：本文权威 = `:domain` 的 seam（`CareLog` façade、
+> 身份钉：当前 tree 0.5.5。**权界**：本文权威 = `:domain` 的 seam（`CareLog` façade、
 > 协调器、聚合算法、端口）与测试契约。实体字段与聚合规则产品合同 =
 > [`contracts/data-model.md`](../contracts/data-model.md)；同步触发语义 =
 > [`layers/sync.md`](./sync.md)；来源关系 wire = wire §12 / ADR-0023。签名唯一权威是代码。

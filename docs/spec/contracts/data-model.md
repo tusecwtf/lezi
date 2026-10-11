@@ -10,7 +10,7 @@
 > [ADR-0011](../../adr/0011-root-admin-and-multi-device-membership.md)。membership 1:N device、
 > 每设备轮换 session、成员硬删除与无 SSID trusted endpoint。
 >
-> **当前 tree：** 0.5.4 / Room 29 / 契约 6，commit-first、完整 ConflictSnapshot、choice-only
+> **当前 tree：** 0.5.5 / Room 29 / 契约 6，commit-first、完整 ConflictSnapshot、choice-only
 > resolution，只协商 `causal_sync_v2`。协议代仍是 0.4.0；0.4.8 / 0.4.7 / 0.4.6 / 0.4.5 / 0.4.4 / 0.4.3 / 0.4.2 / 0.4.1 / Room 29 / 契约 6、0.4.0 / Room 28 / 契约 5 与 0.3.13 / Room 27
 > 保留为非破坏升级源。
 
@@ -784,12 +784,12 @@ snapshot 再执行 1 次计划读取、1 次活跃日志媒体读取，以及 1 
 
 Android 本地数据永久基线契约 v1（0.3.0 / versionCode 6）的 Room schema 为 v24；契约
 v2（0.3.5 / versionCode 12）为 Room v25，并通过 `CustomItemClientUuidIndexUpgradeStep`
-相邻升级；当前交付使用契约 v6（0.5.4 / versionCode 34）与 Room **v29**
+相邻升级；当前交付使用契约 v6（0.5.5 / versionCode 35）与 Room **v29**
 （tree 以 `config/android-release-compatibility.json` 与 `LeziDatabase` 为准；文档数字若
 漂移以清单重核）。契约 v5 / Room **v28** 是 0.4.0 / versionCode 21 升级源。`OutboxRetirementUpgradeStep` 转交旧发布意图并移除 outbox。Room 数据域包含
 LocalUser、Family、Membership、Baby、Record、MediaAsset、CustomItemDef、CarePlan、
 FulfillmentCandidate 与 WakeObservation。`ShareInvite` 已退役。SettingsLocal 在 DataStore，
 不是这张 Room 清单里的同步实体。并使用真实 `SyncPort` 和 Record/计划/醒来媒体原子包。
 
-当前身份：Android versionName `0.5.4` / versionCode **34**；家庭服务器仍是 0.5.3。Room **29** / local-data contract **6** / server schema **13**。协议代仍是 0.4.0。0.5.0 起零 schema：Room 28→29 的相邻空列 `media_assets.sha256`（64 位小写 hex 或 null）仍是当前形状，不改 0.4.0 wire。后续本地数据契约必须通过相邻迁移链保留 Room、设置、家庭凭证与受影响媒体；基线之前的 Room schema 在业务入口前无破坏阻断。当前数据库在进程重启及 APK 原地替换后必须完整保留业务数据、待对账标记/发布回执、计时与提醒恢复状态。
+当前身份：Android versionName `0.5.5` / versionCode **35**；家庭服务器待上线 0.5.5（live 停 0.5.4）。Room **29** / local-data contract **6** / server schema **13**。协议代仍是 0.4.0。0.5.0 起零 schema：Room 28→29 的相邻空列 `media_assets.sha256`（64 位小写 hex 或 null）仍是当前形状，不改 0.4.0 wire。后续本地数据契约必须通过相邻迁移链保留 Room、设置、家庭凭证与受影响媒体；基线之前的 Room schema 在业务入口前无破坏阻断。当前数据库在进程重启及 APK 原地替换后必须完整保留业务数据、待对账标记/发布回执、计时与提醒恢复状态。
 

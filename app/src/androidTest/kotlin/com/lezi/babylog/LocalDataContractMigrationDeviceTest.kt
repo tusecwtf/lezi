@@ -317,7 +317,7 @@ class LocalDataContractMigrationDeviceTest {
             }
         }
 
-        assertThat(versionCodes).containsExactlyElementsIn(6..33).inOrder()
+        assertThat(versionCodes).containsExactlyElementsIn(6..34).inOrder()
         assertThat(observedBoundaries).containsExactly(
             1 to 24,
             2 to 25,
@@ -328,7 +328,7 @@ class LocalDataContractMigrationDeviceTest {
         )
 
         val target = catalog.getJSONObject("upgrade_target")
-        assertThat(target.getInt("version_code")).isEqualTo(34)
+        assertThat(target.getInt("version_code")).isEqualTo(35)
         assertThat(target.getInt("room_schema")).isEqualTo(29)
         assertThat(target.getInt("local_data_contract")).isEqualTo(6)
 
