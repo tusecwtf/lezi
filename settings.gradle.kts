@@ -1,5 +1,11 @@
 pluginManagement {
     repositories {
+        // KSP is published on Maven Central. Resolve the marker and implementation
+        // from the same upstream instead of depending on mirror availability.
+        exclusiveContent {
+            forRepository { mavenCentral() }
+            filter { includeGroup("com.google.devtools.ksp") }
+        }
         maven("https://maven.aliyun.com/repository/google")
         maven("https://maven.aliyun.com/repository/gradle-plugin")
         maven("https://maven.aliyun.com/repository/public")
@@ -18,6 +24,10 @@ pluginManagement {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
+        exclusiveContent {
+            forRepository { mavenCentral() }
+            filter { includeGroup("com.google.devtools.ksp") }
+        }
         maven("https://maven.aliyun.com/repository/google")
         maven("https://maven.aliyun.com/repository/public")
         google()
