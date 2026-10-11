@@ -45,7 +45,8 @@ internal fun FamilyBabyDialog(
     onDelete: (Long) -> Unit,
     onPreviewMerge: (Long, Long) -> Unit,
     onMerge: (BabyMergePreview) -> Unit,
-    onUpdate: (Baby, BabyProfileUpdate, onFinished: () -> Unit) -> Unit,
+    onUpdate: (Baby, BabyProfileUpdate, onFinished: (String?) -> Unit) -> Unit,
+    onProfileSaved: () -> Unit,
     onCreate: (
         nickname: String,
         sex: String?,
@@ -90,6 +91,7 @@ internal fun FamilyBabyDialog(
                 canMoveEarlier = position > 0,
                 canMoveLater = position in 0 until babies.lastIndex,
                 onDismiss = onDismiss,
+                onSaved = onProfileSaved,
                 onSaveProfile = { nickname, sex, birthday, grams, avatar, removeAvatar, onFinished ->
                     onUpdate(
                         baby,

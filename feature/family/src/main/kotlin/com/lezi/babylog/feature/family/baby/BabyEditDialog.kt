@@ -1,6 +1,5 @@
 package com.lezi.babylog.feature.family.baby
 
-import android.net.Uri
 import com.lezi.babylog.core.common.LocalOpFailureCopy
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -25,12 +24,12 @@ import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -39,22 +38,24 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import com.lezi.babylog.core.model.Baby
-import com.lezi.babylog.core.model.birthWeightValidationError
 import com.lezi.babylog.core.ui.BabyAvatar
 import com.lezi.babylog.core.ui.BabyAvatarSizeEditPreview
 import com.lezi.babylog.core.ui.BabyBirthdayDatePickerDialog
 import com.lezi.babylog.core.ui.BabyProfileFormFields
 import com.lezi.babylog.core.ui.CameraCaptureOutcome
 import com.lezi.babylog.core.ui.CameraCaptureLauncher
-import com.lezi.babylog.core.ui.OwnedCameraCapture
+import com.lezi.babylog.core.ui.camera.CameraPermissionRecoveryDialog
 import com.lezi.babylog.core.ui.rememberCameraCaptureLauncher
 import com.lezi.babylog.designsystem.LeziBabyTheme
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
-import com.lezi.babylog.designsystem.normalizeBabyThemeArgb
 import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.designsystem.LeziSecondaryButton
@@ -82,7 +83,7 @@ internal fun BabyEditDialog(
         birthWeightGrams: Int?,
         avatarJpeg: ByteArray?,
         removeAvatar: Boolean,
-        onFinished: () -> Unit,
+        onFinished: (String?) -> Unit,
     ) -> Unit,
     onLocalTheme: (argb: Int, onDone: (String?) -> Unit) -> Unit,
     onMoveLocal: (delta: Int, onDone: (String?) -> Unit) -> Unit,
@@ -93,43 +94,41 @@ internal fun BabyEditDialog(
     ) -> CameraCaptureLauncher = { key, onOutcome ->
         rememberCameraCaptureLauncher(key, onOutcome)
     },
+    draftHost: BabyEditDraftHost = viewModel(key = "baby-edit-draft") { BabyEditDraftHost() },
+    onSaved: () -> Unit = onDismiss,
 ) {
-    var nickname by remember(baby.id) { mutableStateOf(baby.nickname) }
-    // Persist Home-LAN wire values (female/male/null), not Kotlin enum names.
-    var sex by remember(baby.id) {
-        mutableStateOf(
-            when (baby.sex?.name) {
-                "FEMALE" -> "female"
-                "MALE" -> "male"
-                else -> null
-            },
-        )
+    val draft = remember(draftHost, baby.id, baby.familyId, baby.clientUuid) { draftHost.open(baby) }
+    val latestSaved by rememberUpdatedState(onSaved)
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(draft, lifecycle) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            snapshotFlow { draft.saved }.collect { saved ->
+                if (saved && draft.consumeSaved()) {
+                    draftHost.close(draft)
+                    latestSaved()
+                }
+            }
+        }
     }
-    var birthday by remember(baby.id) { mutableLongStateOf(baby.birthdayEpochDay) }
-    var weightText by remember(baby.id) {
-        mutableStateOf(baby.birthWeightGrams?.let { (it / 1000.0).toString() }.orEmpty())
-    }
-    var showDate by remember { mutableStateOf(false) }
-    var localError by remember { mutableStateOf<String?>(null) }
-    var localPrefError by remember { mutableStateOf<String?>(null) }
-    var themeArgb by remember(baby.id) {
-        mutableStateOf(normalizeBabyThemeArgb(baby.themeColorArgb))
-    }
-    var pickedAvatarUri by remember(baby.id) { mutableStateOf<Uri?>(null) }
-    var ownedAvatarCapture by remember(baby.id) { mutableStateOf<OwnedCameraCapture?>(null) }
-    var croppedAvatar by remember(baby.id) { mutableStateOf<CroppedAvatar?>(null) }
-    var removeAvatar by remember(baby.id) { mutableStateOf(false) }
-    var saving by remember(baby.id) { mutableStateOf(false) }
-    var avatarError by remember(baby.id) { mutableStateOf<String?>(null) }
-    fun releaseOwnedAvatarCapture() {
-        ownedAvatarCapture?.release()
-        ownedAvatarCapture = null
-    }
-    val avatarCamera = cameraCaptureLauncherFactory("baby-edit-${baby.id}") { outcome ->
+    var nickname by draft::nickname
+    var sex by draft::sex
+    var birthday by draft::birthday
+    var weightText by draft::weightText
+    var showDate by draft::showDate
+    var nicknameError by draft::nicknameError
+    var weightError by draft::weightError
+    var localPrefError by draft::localPrefError
+    var themeArgb by draft::themeArgb
+    var pickedAvatarUri by draft::pickedAvatarUri
+    var croppedAvatar by draft::croppedAvatar
+    var removeAvatar by draft::removeAvatar
+    val saving = draft.saving || draft.saved
+    var avatarError by draft::avatarError
+    fun releaseOwnedAvatarCapture() = draft.releaseOwnedCapture()
+    val avatarCamera = cameraCaptureLauncherFactory("baby-edit-${baby.familyId}-${baby.clientUuid}") { outcome ->
         when (outcome) {
             is CameraCaptureOutcome.Captured -> {
-                releaseOwnedAvatarCapture()
-                ownedAvatarCapture = outcome.capture
+                draft.replaceOwnedCapture(outcome.capture)
                 removeAvatar = false
                 pickedAvatarUri = outcome.capture.uri
             }
@@ -149,22 +148,28 @@ internal fun BabyEditDialog(
             pickedAvatarUri = uri
         }
     }
-    DisposableEffect(baby.id) {
-        onDispose { releaseOwnedAvatarCapture() }
-    }
+    // The in-memory host owns completed captures and cropped bytes through configuration
+    // rebuilding. The launcher owns still-pending captures; explicit close ends both.
     val previewBitmap = remember(croppedAvatar) {
         croppedAvatar?.bitmap?.asImageBitmap()
     }
     val hasAvatar = croppedAvatar != null || (!removeAvatar && baby.avatarPath != null)
 
+    fun closeDraft() {
+        if (draft.saving || draft.saved) return
+        draftHost.close(draft)
+        avatarCamera.dispose()
+        onDismiss()
+    }
+    fun requestClose() {
+        when (draft.requestExit()) {
+            BabyProfileExit.Close -> closeDraft()
+            BabyProfileExit.ConfirmDiscard, BabyProfileExit.Saving -> Unit
+        }
+    }
+
     LeziAlertDialog(
-        onDismissRequest = {
-            if (!saving) {
-                releaseOwnedAvatarCapture()
-                avatarCamera.dispose()
-                onDismiss()
-            }
-        },
+        onDismissRequest = ::requestClose,
         modifier = Modifier.imePadding(),
         properties = DialogProperties(decorFitsSystemWindows = false),
         title = {
@@ -260,22 +265,46 @@ internal fun BabyEditDialog(
                         nickname = nickname,
                         onNicknameChange = {
                             nickname = it
-                            localError = null
+                            nicknameError = null
                         },
-                        nicknameError = localError,
+                        nicknameError = nicknameError,
                         sex = sex,
                         onSexChange = { sex = it },
                         birthdayEpochDay = birthday,
                         onPickBirthday = { showDate = true },
                         weightText = weightText,
-                        onWeightTextChange = { weightText = it },
+                        onWeightTextChange = {
+                            weightText = it
+                            weightError = null
+                        },
+                        weightError = weightError,
                         enabled = !saving,
                     )
                 }
 
+                if (!canEditProfile && draft.dirty) {
+                    Text(
+                        "档案编辑权限已变化，未保存的修改仍保留。恢复权限后可继续保存，或放弃档案修改。",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                if (canEditProfile && !canEditAvatar && draft.avatarChanged) {
+                    Text(
+                        "头像编辑权限已变化，未保存的头像仍保留。恢复权限后可继续保存，或放弃档案修改。",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                draft.formError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                if (canEditProfile) {
+                    Text(
+                        "保存档案仅提交头像、昵称、性别、出生日期和出生体重。",
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 Text("本机外观与顺序", style = LeziTypography.Label)
                 Text(
-                    "主题色与宝宝顺序只影响这台设备，不会修改家庭档案。",
+                    "主题色与宝宝顺序即时保存在这台设备，取消或放弃档案修改不会撤销。",
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -363,55 +392,71 @@ internal fun BabyEditDialog(
         confirmButton = {
             if (canEditProfile) {
                 LeziTextButton(
-                    label = if (saving) "保存中…" else "保存",
+                    label = if (saving) "保存中…" else "保存档案",
                     onClick = {
                         if (saving) return@LeziTextButton
-                        if (nickname.isBlank()) {
-                            localError = "请填写昵称"
-                            return@LeziTextButton
-                        }
-                        val grams = weightText.trim().takeIf { it.isNotEmpty() }
-                            ?.toDoubleOrNull()
-                            ?.let { (it * 1000).toInt() }
-                        if (weightText.isNotBlank() && grams == null) {
-                            localError = "出生体重格式不正确"
-                            return@LeziTextButton
-                        }
-                        birthWeightValidationError(grams)?.let {
-                            localError = it
-                            return@LeziTextButton
-                        }
-                        saving = true
+                        if (!canEditProfile || (!canEditAvatar && draft.avatarChanged)) return@LeziTextButton
+                        val weight = draft.beginSave() ?: return@LeziTextButton
                         onSaveProfile(
                             nickname.trim(),
                             sex,
                             birthday,
-                            grams,
+                            weight.grams,
                             croppedAvatar?.jpegBytes,
                             removeAvatar,
-                        ) {
-                            saving = false
+                        ) { error ->
+                            draft.finishSave(error)
                         }
                     },
-                    enabled = !saving,
+                    enabled = !saving && (canEditAvatar || !draft.avatarChanged),
                     tone = LeziTextButtonTone.Primary,
                 )
             } else {
-                LeziTextButton(label = "完成", onClick = onDismiss, enabled = !saving)
+                LeziTextButton(label = "完成", onClick = ::requestClose, enabled = !saving)
             }
         },
         dismissButton = {
             LeziTextButton(
                 label = if (canEditProfile) "取消" else "关闭",
-                onClick = {
-                    releaseOwnedAvatarCapture()
-                    avatarCamera.dispose()
-                    onDismiss()
-                },
+                onClick = ::requestClose,
                 enabled = !saving,
             )
         },
     )
+
+    if (canEditProfile && canEditAvatar) {
+        CameraPermissionRecoveryDialog(
+            launcher = avatarCamera,
+            enabled = !saving,
+            onChooseGallery = {
+                avatarError = null
+                avatarPicker.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                )
+            },
+        )
+    }
+
+    if (draft.showDiscard) {
+        LeziAlertDialog(
+            onDismissRequest = draft::keepEditing,
+            title = { Text("放弃未保存的档案修改？") },
+            text = {
+                Text("未保存的头像和档案字段将放弃。已保存的本机主题色和顺序会保留。")
+            },
+            confirmButton = {
+                LeziTextButton(
+                    label = "放弃档案修改",
+                    onClick = ::closeDraft,
+                    enabled = !saving,
+                    tone = LeziTextButtonTone.Destructive,
+                )
+            },
+            dismissButton = {
+                LeziTextButton(label = "继续编辑", onClick = draft::keepEditing, enabled = !saving)
+            },
+        )
+    }
 
     if (showDate) {
         BabyBirthdayDatePickerDialog(

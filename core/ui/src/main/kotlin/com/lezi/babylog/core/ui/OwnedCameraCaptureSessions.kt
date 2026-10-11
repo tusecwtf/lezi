@@ -1,5 +1,6 @@
 package com.lezi.babylog.core.ui
 
+import com.lezi.babylog.core.ui.camera.CameraPermissionRecovery
 import java.io.File
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
@@ -167,6 +168,7 @@ internal enum class CameraCapturePhase {
 internal data class CameraCaptureSnapshot(
     val phase: CameraCapturePhase,
     val token: String?,
+    val permissionRecovery: CameraPermissionRecovery? = null,
 )
 
 internal sealed interface CameraPictureCompletion {
@@ -189,12 +191,17 @@ internal class OwnedCameraCaptureController(
     private val sessions: OwnedCameraCaptureSessions,
     restoredPhase: String?,
     restoredToken: String?,
+    restoredPermissionRecovery: String? = null,
     private val onSnapshot: (CameraCaptureSnapshot) -> Unit = {},
 ) {
     // The IO orphan sweep reads this from a worker while Main callbacks write
     // it; volatile keeps the sweep's phase check honest across the hop.
     @Volatile
-    var snapshot: CameraCaptureSnapshot = restoredSnapshot(restoredPhase, restoredToken)
+    var snapshot: CameraCaptureSnapshot = restoredSnapshot(
+        restoredPhase,
+        restoredToken,
+        restoredPermissionRecovery,
+    )
         private set
 
     val isIdle: Boolean
@@ -208,14 +215,27 @@ internal class OwnedCameraCaptureController(
 
     fun permissionGranted(): Boolean = snapshot.phase == CameraCapturePhase.AwaitingPermission
 
-    fun permissionDenied(): Boolean {
+    fun permissionDenied(shouldShowRationale: Boolean? = null): Boolean {
         if (snapshot.phase != CameraCapturePhase.AwaitingPermission) return false
-        reset()
+        // Rationale is sampled only after the accepted request returns. Before the first request
+        // Android also reports false; that initial value alone must never block the first prompt.
+        update(
+            CameraCapturePhase.Idle,
+            null,
+            if (shouldShowRationale == false) CameraPermissionRecovery.OpenSettings
+            else CameraPermissionRecovery.RetryPermission,
+        )
         return true
     }
 
-    fun abandonPermission() {
-        if (snapshot.phase == CameraCapturePhase.AwaitingPermission) reset()
+    fun dismissPermissionRecovery() {
+        if (isIdle) reset()
+    }
+
+    fun abandonPermission(): Boolean {
+        if (snapshot.phase != CameraCapturePhase.AwaitingPermission) return false
+        reset()
+        return true
     }
 
     fun beginPicture(): OwnedCameraCaptureFile? {
@@ -301,12 +321,20 @@ internal class OwnedCameraCaptureController(
 
     private fun reset() = update(CameraCapturePhase.Idle, null)
 
-    private fun update(phase: CameraCapturePhase, token: String?) {
-        snapshot = CameraCaptureSnapshot(phase, token)
+    private fun update(
+        phase: CameraCapturePhase,
+        token: String?,
+        permissionRecovery: CameraPermissionRecovery? = null,
+    ) {
+        snapshot = CameraCaptureSnapshot(phase, token, permissionRecovery)
         onSnapshot(snapshot)
     }
 
-    private fun restoredSnapshot(phase: String?, token: String?): CameraCaptureSnapshot {
+    private fun restoredSnapshot(
+        phase: String?,
+        token: String?,
+        permissionRecovery: String?,
+    ): CameraCaptureSnapshot {
         val restored = phase
             ?.let { raw -> runCatching { CameraCapturePhase.valueOf(raw) }.getOrNull() }
             ?: CameraCapturePhase.Idle
@@ -321,7 +349,13 @@ internal class OwnedCameraCaptureController(
         ) {
             CameraCaptureSnapshot(CameraCapturePhase.Idle, null)
         } else {
-            CameraCaptureSnapshot(restored, normalizedToken)
+            CameraCaptureSnapshot(
+                restored,
+                normalizedToken,
+                CameraPermissionRecovery.entries.firstOrNull {
+                    restored == CameraCapturePhase.Idle && it.name == permissionRecovery
+                },
+            )
         }
     }
 }

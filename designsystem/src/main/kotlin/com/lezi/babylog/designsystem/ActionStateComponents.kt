@@ -246,6 +246,7 @@ fun LeziPrimaryButton(
             )
             .clickable(
                 enabled = clickable,
+                role = Role.Button,
                 interactionSource = interaction,
                 indication = if (clickable) ripple() else null,
                 onClick = onClick,
@@ -299,7 +300,7 @@ fun LeziSecondaryButton(
                 ),
                 shape = shape,
             )
-            .clickable(enabled = enabled && !busy, onClick = onClick),
+            .clickable(enabled = enabled && !busy, role = Role.Button, onClick = onClick),
         shape = shape,
         color = if (enabled) {
             MaterialTheme.colorScheme.surface

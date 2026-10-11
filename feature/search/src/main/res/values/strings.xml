@@ -16,6 +16,8 @@
     <string name="search_error_title">暂时无法搜索</string>
     <string name="search_error_message">搜索没有完成，可重试</string>
     <string name="search_retry_action">重试</string>
+    <string name="search_retrying_action">正在重试…</string>
+    <string name="search_stale_message">未能刷新。上次结果可能已过期，暂仅供查看；可重试获取最新记录。</string>
     <string name="search_empty_title">无结果</string>
     <string name="search_empty_message">没有匹配「%1$s」的记录</string>
     <string name="search_edit_action">编辑%1$s</string>

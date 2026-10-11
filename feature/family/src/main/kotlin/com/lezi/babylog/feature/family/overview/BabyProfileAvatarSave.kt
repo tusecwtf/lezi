@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.family.overview
 
+import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.DuplicateBabyNicknameException
@@ -10,6 +11,33 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+
+/** Lookup fails before a save begins; always complete that recoverable outcome for the draft. */
+internal suspend fun completeBabyProfileUpdate(
+    lookupExisting: suspend () -> Baby?,
+    saveProfile: suspend (Baby) -> String?,
+    onDone: (String?) -> Unit,
+) {
+    val existing = try {
+        lookupExisting()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Exception) {
+        currentCoroutineContext().ensureActive()
+        onDone(productUiError(error, "读取宝宝档案失败，请稍后重试"))
+        return
+    }
+    if (existing == null) {
+        currentCoroutineContext().ensureActive()
+        onDone("宝宝档案不存在")
+        return
+    }
+    // The existing save seam owns its commit/rollback semantics and failure copy.
+    // Do not turn an unknown post-write exception into an assertion of failure/success.
+    val errorMessage = saveProfile(existing)
+    currentCoroutineContext().ensureActive()
+    onDone(errorMessage)
+}
 
 /**
  * Pure avatar + profile write/rollback transaction used by [AccountOverviewHost].

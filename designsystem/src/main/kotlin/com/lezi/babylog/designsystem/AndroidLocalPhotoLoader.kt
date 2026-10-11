@@ -28,6 +28,9 @@ private val androidLocalPhotoLoader = BoundedLocalPhotoLoader(
     decodeContext = localPhotoDecodeDispatcher,
 )
 
+/** Explicit sampling for same-module diagnostics; never logs paths or changes cache ownership. */
+internal fun localPhotoCacheSnapshot(): LocalPhotoCacheSnapshot = androidLocalPhotoCache.snapshot()
+
 /**
  * Cancellable Compose entry point for app-private record-photo thumbnails and previews.
  *

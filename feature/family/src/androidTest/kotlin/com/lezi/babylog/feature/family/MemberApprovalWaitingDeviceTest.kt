@@ -17,6 +17,7 @@ import com.lezi.babylog.feature.family.members.MemberLoginQrCodeDialog
 import com.lezi.babylog.feature.family.members.MembersDevicesUi
 import com.lezi.babylog.feature.family.members.PendingMemberDecisionDialog
 import com.lezi.babylog.feature.family.wizard.MemberApprovalWaitingDialog
+import com.lezi.babylog.feature.family.wizard.memberApprovalExpiryCopy
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.PendingMemberLogin
 import com.lezi.babylog.sync.backend.MemberLoginStatus
@@ -58,6 +59,11 @@ class MemberApprovalWaitingDeviceTest {
         compose.onNodeWithText("等待管理员确认").assertIsDisplayed()
         compose.onNodeWithText("已申请：奶奶").assertIsDisplayed()
         compose.onNodeWithText("设备：Pixel 10").assertIsDisplayed()
+        compose.onNodeWithText(
+            memberApprovalExpiryCopy(1) +
+                "请点“检查结果”确认状态。管理员下次前台打开 App 后可以批准或拒绝。",
+        ).assertIsDisplayed()
+        compose.runOnIdle { assertThat(checks).isEqualTo(0) }
         compose.onNodeWithText("检查结果").performClick()
         compose.onNodeWithText("在这台设备放弃等待").performClick()
         compose.onNodeWithText("暂不连接，保持离线").performClick()
@@ -67,6 +73,34 @@ class MemberApprovalWaitingDeviceTest {
             assertThat(cancels).isEqualTo(1)
             assertThat(offline).isEqualTo(1)
         }
+    }
+
+    @Test
+    fun unknownDeadlineKeepsWaitingAndRequiresAnExplicitCheck() {
+        var checks = 0
+        compose.setContent {
+            LeziTheme {
+                MemberApprovalWaitingDialog(
+                    request = PendingMemberLogin(
+                        requestId = "request-unknown-deadline",
+                        displayName = "奶奶",
+                        deviceName = "平板",
+                        expiresAtEpochSeconds = 0,
+                    ),
+                    busy = false,
+                    cancelling = false,
+                    onCheck = { checks += 1 },
+                    onCancel = {},
+                    onKeepOffline = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("等待管理员确认").assertIsDisplayed()
+        compose.onNodeWithText("申请有效期暂不可用。", substring = true).assertIsDisplayed()
+        compose.runOnIdle { assertThat(checks).isEqualTo(0) }
+        compose.onNodeWithText("检查结果").performClick()
+        compose.runOnIdle { assertThat(checks).isEqualTo(1) }
     }
 
     @Test

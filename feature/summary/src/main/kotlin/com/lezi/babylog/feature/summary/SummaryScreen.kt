@@ -50,7 +50,10 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.isTraversalGroup
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.traversalIndex
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -161,6 +164,9 @@ data class SummaryTotals(
     val dayValuesPee: List<Float> = emptyList(),
     val dayValuesPoop: List<Float> = emptyList(),
     val dayValuesTemp: List<Float> = emptyList(),
+    /** Presence from the existing domain day projection; zero is not absence. */
+    val dayHasFeedRecords: List<Boolean> = emptyList(),
+    val dayHasSleepRecords: List<Boolean> = emptyList(),
     val feedTimeBuckets: List<Float> = List(4) { 0f },
     val chartWindows: ChartWindowTotals = ChartWindowTotals(),
     /** True when unresolved suspected-duplicate groups make totals a range. */
@@ -192,6 +198,8 @@ data class SummaryFoodPanel(
     /** Parsed-amount lower/upper bound. Exact ranges keep a single total. */
     val amountMin: Double = lanes.sumOf(SummaryFoodLane::total),
     val amountMax: Double = amountMin,
+    /** Presence in the same lower-bound interpretation that supplies the bars. */
+    val dayHasRecords: List<Boolean> = emptyList(),
 )
 
 data class SummaryUi(
@@ -829,6 +837,8 @@ internal fun SummaryChartSections(
                     values = totals.dayValuesFeed,
                     dates = chartDates,
                     metricLabel = "喂养量",
+                    dayHasRecords = totals.dayHasFeedRecords,
+                    accessibleValueFormatter = { "${it.toInt()}ml" },
                     color = ext.laneFeed,
                     valueFormatter = { v -> if (v <= 0f) "" else "${v.toInt()}ml" },
                 )
@@ -878,6 +888,7 @@ internal fun SummaryChartSections(
                     },
                     laneNames = foodPanel.lanes.map(SummaryFoodLane::name),
                     unparseableDayCounts = foodPanel.unparseableDayCounts,
+                    dayHasRecords = foodPanel.dayHasRecords,
                     laneColors = foodPanel.lanes.mapIndexed { index, _ ->
                         laneColors[index]
                     },
@@ -910,6 +921,8 @@ internal fun SummaryChartSections(
                     values = totals.dayValuesSleep,
                     dates = chartDates,
                     metricLabel = "睡眠分钟",
+                    dayHasRecords = totals.dayHasSleepRecords,
+                    accessibleValueFormatter = { "${it.toLong()}分钟" },
                     color = ext.laneSleep,
                     valueFormatter = { v ->
                         if (v <= 0f) "" else formatRecordDuration(v.toLong())
@@ -1094,7 +1107,7 @@ private fun showBarLabels(barCount: Int, nonZeroCount: Int): Boolean =
     barCount <= 7 || nonZeroCount <= 12
 
 /** Shared slot geometry for the bar charts: tighter gaps once the window passes two weeks. */
-private fun Density.chartBarLayout(barCount: Int, canvasWidth: Float): BarSlotLayout =
+internal fun Density.chartBarLayout(barCount: Int, canvasWidth: Float): BarSlotLayout =
     calculateBarSlotLayout(
         canvasWidth = canvasWidth,
         barCount = barCount,
@@ -1162,7 +1175,7 @@ private fun DiaperLegendDot(color: Color, label: String) {
 }
 
 @Composable
-private fun StackedDiaperBarChart(
+internal fun StackedDiaperBarChart(
     pee: List<Float>,
     poop: List<Float>,
     dates: List<LocalDate>,
@@ -1174,37 +1187,39 @@ private fun StackedDiaperBarChart(
         laneColors = listOf(peeColor, poopColor),
         laneAlphas = listOf(0.9f, 0.92f),
         dates = dates,
+        metricLabel = "尿布",
         barLabel = { total -> "${total.toInt()}" },
         dayDescription = { _, date, values ->
-            "${date.monthValue}月${date.dayOfMonth}日 " +
-                "尿${values[0].toInt()}次 便${values[1].toInt()}次 " +
-                "共${(values[0] + values[1]).toInt()}次"
+            diaperDayDescription(date, values[0], values[1])
         },
     )
 }
 
 @Composable
-private fun StackedFoodBarChart(
+internal fun StackedFoodBarChart(
     laneDayValues: List<List<Float>>,
     laneNames: List<String>,
     laneColors: List<Color>,
     unparseableDayCounts: List<Int>,
     dates: List<LocalDate>,
+    dayHasRecords: List<Boolean> = emptyList(),
 ) {
     StackedLaneBarChart(
         lanes = laneDayValues,
         laneColors = laneColors,
         laneAlphas = List(laneColors.size) { 0.9f },
         dates = dates,
+        metricLabel = "辅食",
         emptyDayMarkers = foodUnparseableOnlyDays(laneDayValues, unparseableDayCounts),
         emptyDayMarkerColor = MaterialTheme.colorScheme.onSurfaceVariant,
         barLabel = { total -> formatFoodChartValue(total) },
         dayDescription = { index, date, values ->
-            foodDayDescription(
+            accessibleFoodDayDescription(
                 date = date,
                 laneNames = laneNames,
                 values = values,
                 unparseableCount = unparseableDayCounts.getOrElse(index) { 0 },
+                hasRecords = dayHasRecords.getOrNull(index),
             )
         },
     )
@@ -1249,6 +1264,7 @@ private fun StackedLaneBarChart(
     laneColors: List<Color>,
     laneAlphas: List<Float>,
     dates: List<LocalDate>,
+    metricLabel: String,
     emptyDayMarkers: List<Boolean> = emptyList(),
     emptyDayMarkerColor: Color? = null,
     barLabel: (Float) -> String,
@@ -1262,16 +1278,11 @@ private fun StackedLaneBarChart(
     val max = (totals.maxOrNull() ?: 0f).coerceAtLeast(1f)
     val showLabels = showBarLabels(n, totals.count { it > 0f })
     val labelPaint = rememberBarLabelPaint(labelColor)
-    Column {
-        Spacer(
+    Column(Modifier.semantics { isTraversalGroup = true }) {
+        Box(
             Modifier
                 .fillMaxWidth()
                 .height(if (LeziThemeExt.isElder) 160.dp else if (showLabels) 108.dp else 88.dp)
-                .semantics {
-                    contentDescription = (0 until minOf(n, dates.size)).joinToString("；") { i ->
-                        dayDescription(i, dates[i], laneValues.map { it[i] })
-                    }
-                }
                 .drawWithCache {
                     // Slot layout, segment/marker geometry, label strings, and
                     // measureText resolve here; range fades re-invoke only the
@@ -1361,17 +1372,27 @@ private fun StackedLaneBarChart(
                         labels.forEach { label -> drawBarLabel(labelPaint, label) }
                     }
                 },
-        )
-        DateAxis(if (dates.size >= n) dates.take(n) else dates)
+        ) {
+            SummaryChartDayCells(
+                descriptions = (0 until minOf(n, dates.size)).map { i ->
+                    dayDescription(i, dates[i], laneValues.map { it[i] })
+                },
+                modifier = Modifier.matchParentSize(),
+            )
+        }
+        val visibleDates = if (dates.size >= n) dates.take(n) else dates
+        DateAxis(visibleDates, overviewModifier(metricLabel, visibleDates))
     }
 }
 
 @Composable
-private fun MiniBarChart(
+internal fun MiniBarChart(
     values: List<Float>,
     dates: List<LocalDate>,
     metricLabel: String,
     color: Color,
+    dayHasRecords: List<Boolean> = emptyList(),
+    accessibleValueFormatter: (Float) -> String,
     valueFormatter: (Float) -> String = { v ->
         if (v <= 0f) "" else if (v % 1f == 0f) "${v.toInt()}" else "%.1f".format(v)
     },
@@ -1381,14 +1402,11 @@ private fun MiniBarChart(
     val max = (values.maxOrNull() ?: 0f).coerceAtLeast(1f)
     val showLabels = showBarLabels(values.size, values.count { it > 0f })
     val labelPaint = rememberBarLabelPaint(labelColor)
-    Column {
-        Spacer(
+    Column(Modifier.semantics { isTraversalGroup = true }) {
+        Box(
             Modifier
                 .fillMaxWidth()
                 .height(if (LeziThemeExt.isElder) 160.dp else if (showLabels) 108.dp else 88.dp)
-                .semantics {
-                    contentDescription = chartDescription(metricLabel, dates, values)
-                }
                 .drawWithCache {
                     // Same cache discipline as StackedLaneBarChart: layout,
                     // label strings, and measureText resolve here once per
@@ -1453,13 +1471,23 @@ private fun MiniBarChart(
                         labels.forEach { label -> drawBarLabel(labelPaint, label) }
                     }
                 },
-        )
-        DateAxis(dates)
+        ) {
+            SummaryChartDayCells(
+                descriptions = dates.mapIndexed { index, date ->
+                    summaryValueDayDescription(
+                        date, metricLabel, values.getOrNull(index),
+                        dayHasRecords.getOrNull(index), accessibleValueFormatter,
+                    )
+                },
+                modifier = Modifier.matchParentSize(),
+            )
+        }
+        DateAxis(dates, overviewModifier(metricLabel, dates))
     }
 }
 
 @Composable
-private fun WeekLineChart(
+internal fun WeekLineChart(
     title: String,
     values: List<Float>,
     dates: List<LocalDate>,
@@ -1489,42 +1517,54 @@ private fun WeekLineChart(
         Spacer(Modifier.height(LeziSpacing.Xs))
         val max = (values.filter { it > 0f }.maxOrNull() ?: 37f).coerceAtLeast(37.5f)
         val min = (values.filter { it > 0f }.minOrNull() ?: 36f).coerceAtMost(36f)
-        Canvas(
-            Modifier
-                .fillMaxWidth()
-                .height(if (LeziThemeExt.isElder) 160.dp else 120.dp)
-                .semantics {
-                    contentDescription = chartDescription(title, dates, values)
-                },
-        ) {
-            if (journal) {
-                for (i in 0..4) {
-                    val y = size.height * i / 4f
-                    drawLine(grid.copy(alpha = 0.7f), Offset(0f, y), Offset(size.width, y), 1f)
+        Column(Modifier.semantics { isTraversalGroup = true }) {
+            Box {
+                Canvas(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(if (LeziThemeExt.isElder) 160.dp else 120.dp)
+                        .clearAndSetSemantics { },
+                ) {
+                    if (journal) {
+                        for (i in 0..4) {
+                            val y = size.height * i / 4f
+                            drawLine(grid.copy(alpha = 0.7f), Offset(0f, y), Offset(size.width, y), 1f)
+                        }
+                    }
+                    linePath.reset()
+                    var started = false
+                    val dotRadius = (if (journal) 2.dp else 3.dp).toPx()
+                    val strokeWidth = (if (journal) 1.5.dp else 2.dp).toPx()
+                    val plotBottomInset = 8.dp.toPx()
+                    values.forEachIndexed { i, v ->
+                        if (v <= 0f) return@forEachIndexed
+                        val x = size.width * (i / (values.size - 1f).coerceAtLeast(1f))
+                        val y = size.height -
+                            ((v - min) / (max - min).coerceAtLeast(0.1f)) * size.height * 0.85f -
+                            plotBottomInset
+                        if (!started) {
+                            linePath.moveTo(x, y)
+                            started = true
+                        } else {
+                            linePath.lineTo(x, y)
+                        }
+                        drawCircle(color, radius = dotRadius, center = Offset(x, y))
+                    }
+                    if (started) drawPath(linePath, color, style = Stroke(width = strokeWidth))
                 }
+                SummaryChartDayCells(
+                    descriptions = dates.mapIndexed { index, date ->
+                        summaryValueDayDescription(
+                            date, title, values.getOrNull(index),
+                            values.getOrNull(index)?.let { it > 0f },
+                        ) { "%.1f℃".format(it) }
+                    },
+                    lineChart = true,
+                    modifier = Modifier.matchParentSize(),
+                )
             }
-            linePath.reset()
-            var started = false
-            val dotRadius = (if (journal) 2.dp else 3.dp).toPx()
-            val strokeWidth = (if (journal) 1.5.dp else 2.dp).toPx()
-            val plotBottomInset = 8.dp.toPx()
-            values.forEachIndexed { i, v ->
-                if (v <= 0f) return@forEachIndexed
-                val x = size.width * (i / (values.size - 1f).coerceAtLeast(1f))
-                val y = size.height -
-                    ((v - min) / (max - min).coerceAtLeast(0.1f)) * size.height * 0.85f -
-                    plotBottomInset
-                if (!started) {
-                    linePath.moveTo(x, y)
-                    started = true
-                } else {
-                    linePath.lineTo(x, y)
-                }
-                drawCircle(color, radius = dotRadius, center = Offset(x, y))
-            }
-            if (started) drawPath(linePath, color, style = Stroke(width = strokeWidth))
+            DateAxis(dates, overviewModifier(title, dates))
         }
-        DateAxis(dates)
     }
 }
 
@@ -1570,16 +1610,11 @@ private fun DateAxis(
     }
 }
 
-private fun chartDescription(
-    metricLabel: String,
-    dates: List<LocalDate>,
-    values: List<Float>,
-): String = dates.zip(values).joinToString(
-    separator = "；",
-    prefix = "$metricLabel：",
-) { (date, value) ->
-    "${date.monthValue}月${date.dayOfMonth}日 ${"%.1f".format(value)}"
-}
+private fun overviewModifier(metricLabel: String, dates: List<LocalDate>): Modifier =
+    Modifier.clearAndSetSemantics {
+        contentDescription = summaryChartOverview(metricLabel, dates)
+        traversalIndex = -1f
+    }
 
 private fun formatSigned(value: Long, unit: String): String =
     "${if (value >= 0) "+" else ""}$value$unit"

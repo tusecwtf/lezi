@@ -36,6 +36,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -74,6 +75,8 @@ data class AccountOverviewUi(
     val openConflictCount: Int = 0,
     /** Classified last sync/session failure; tap the one-line status to explain. */
     val lastFailureKind: FailureKind? = null,
+    val switchingBaby: Boolean = false,
+    val babySwitchFeedback: String? = null,
 ) {
     val displayName: String get() = identity.displayName
     val enabled: Boolean get() = identity.enabled
@@ -114,6 +117,10 @@ class AccountOverviewHost @Inject constructor(
     private val addBabyAction = SingleFlightAction()
     private val reconcileAction = SingleFlightAction()
     private val appUpdate = AppUpdateOutcomeMachine(sync)
+    private val babySwitch = CurrentBabySwitchAction(
+        setCurrent = careLog::setCurrentBaby,
+        selectedId = { careLog.getCurrentBaby()?.id },
+    )
 
     val addingBaby: StateFlow<Boolean> = addBabyAction.busy
 
@@ -182,13 +189,18 @@ class AccountOverviewHost @Inject constructor(
         sync.availableOptionalAppUpdate(),
         careLog.observeOpenConflictInbox(),
         sync.lastFailureKind(),
-    ) { family, optionalUpdate, inbox, lastFailureKind ->
+        babySwitch.state,
+    ) { family, optionalUpdate, inbox, lastFailureKind, switchState ->
         // Only show the banner when the account is joined; never for offline/unjoined.
         family.copy(
             optionalAppUpdate = optionalUpdate.takeIf { family.enabled },
             openConflictCount = inbox.count.takeIf { family.enabled } ?: 0,
             lastFailureKind = lastFailureKind,
+            switchingBaby = switchState.switching,
+            babySwitchFeedback = switchState.failure?.messageFor(family),
         )
+    }.onEach { overview ->
+        babySwitch.invalidateFor(overview.currentBabySwitchContext())
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AccountOverviewUi())
 
     val appUpdateOutcome: StateFlow<AppUpdateUiOutcome?> = appUpdate.outcome
@@ -235,10 +247,9 @@ class AccountOverviewHost @Inject constructor(
 
     fun setCurrent(id: Long) {
         viewModelScope.launch {
-            // A clear racing the switch (epoch exceptions) or a member without
-            // permission keeps the current baby instead of crashing.
-            runCatching { careLog.setCurrentBaby(id) }
-                .onFailure { error -> if (error is CancellationException) throw error }
+            // Never optimistically select or write a rollback: CareLog guards
+            // permission and clear epochs; failure keeps its confirmed selection.
+            babySwitch.switch(id, ui.value.currentBabySwitchContext())
         }
     }
 
@@ -319,25 +330,24 @@ class AccountOverviewHost @Inject constructor(
     ) {
         viewModelScope.launch {
             profileSaveMutex.withLock {
-                val existing = careLog.listBabies().firstOrNull { it.id == babyId }
-                if (existing == null) {
-                    onDone("宝宝档案不存在")
-                    return@withLock
-                }
-                val errorMessage = saveBabyProfileWithAvatar(
-                    careLog = careLog,
-                    avatarFileStore = avatarFileStore,
-                    existing = existing,
-                    nickname = nickname,
-                    sex = sex,
-                    birthdayEpochDay = birthdayEpochDay,
-                    birthWeightGrams = birthWeightGrams,
-                    avatarJpeg = avatarJpeg,
-                    removeAvatar = removeAvatar,
-                    mayEditAvatar = canEditFamilyAvatar(ui.value.role),
+                completeBabyProfileUpdate(
+                    lookupExisting = { careLog.listBabies().firstOrNull { it.id == babyId } },
+                    saveProfile = { existing ->
+                        saveBabyProfileWithAvatar(
+                            careLog = careLog,
+                            avatarFileStore = avatarFileStore,
+                            existing = existing,
+                            nickname = nickname,
+                            sex = sex,
+                            birthdayEpochDay = birthdayEpochDay,
+                            birthWeightGrams = birthWeightGrams,
+                            avatarJpeg = avatarJpeg,
+                            removeAvatar = removeAvatar,
+                            mayEditAvatar = canEditFamilyAvatar(ui.value.role),
+                        )
+                    },
+                    onDone = onDone,
                 )
-                currentCoroutineContext().ensureActive()
-                onDone(errorMessage)
             }
         }
     }

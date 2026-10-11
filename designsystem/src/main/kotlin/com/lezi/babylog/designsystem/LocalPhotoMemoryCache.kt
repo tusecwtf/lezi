@@ -36,6 +36,14 @@ internal data class LocalPhotoCachedValue<T : Any>(
     val plan: LocalPhotoDecodePlan,
 )
 
+/** Numeric observation only; estimated decoded bytes are not process PSS. */
+internal data class LocalPhotoCacheSnapshot(
+    val entries: Int,
+    val pinnedEntries: Int,
+    val totalPins: Int,
+    val estimatedDecodedBytes: Long,
+)
+
 /**
  * Process-local LRU for decoded record/plan photo previews.
  *
@@ -77,6 +85,16 @@ internal class LocalPhotoMemoryCache<T : Any>(
 
     val decodedByteSize: Long
         get() = synchronized(lock) { entries.values.sumOf { it.byteSize } }
+
+    /** One consistent read without granting pins, touching LRU order, or evicting values. */
+    fun snapshot(): LocalPhotoCacheSnapshot = synchronized(lock) {
+        LocalPhotoCacheSnapshot(
+            entries = entries.size,
+            pinnedEntries = entries.values.count { it.pins > 0 },
+            totalPins = entries.values.sumOf { it.pins },
+            estimatedDecodedBytes = entries.values.sumOf { it.byteSize },
+        )
+    }
 
     /** Cache hit: moves to MRU and grants one pin. */
     fun get(key: LocalPhotoCacheKey): LocalPhotoCachedValue<T>? = synchronized(lock) {

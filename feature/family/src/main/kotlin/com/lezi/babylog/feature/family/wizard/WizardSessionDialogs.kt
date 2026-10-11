@@ -465,7 +465,8 @@ internal fun MemberApprovalWaitingDialog(
                 Text("已申请：${request.displayName}")
                 Text("设备：${request.deviceName}")
                 Text(
-                    "申请将在 24 小时内失效。管理员下次前台打开 App 后可以批准或拒绝。",
+                    memberApprovalExpiryCopy(request.expiresAtEpochSeconds) +
+                        "请点“检查结果”确认状态。管理员下次前台打开 App 后可以批准或拒绝。",
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

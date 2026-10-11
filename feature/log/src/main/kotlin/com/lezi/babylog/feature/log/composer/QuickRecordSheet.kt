@@ -52,6 +52,7 @@ import com.lezi.babylog.core.model.MAX_RECORD_PHOTOS
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.ui.CameraCaptureLauncher
 import com.lezi.babylog.core.ui.CameraCaptureOutcome
+import com.lezi.babylog.core.ui.camera.CameraPermissionRecoveryDialog
 import com.lezi.babylog.core.ui.rememberCameraCaptureLauncher
 import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.core.ui.presentation
@@ -167,7 +168,7 @@ internal fun QuickRecordSheet(
             }
             CameraCaptureOutcome.Cancelled -> Unit
             CameraCaptureOutcome.PermissionDenied -> {
-                photoActionError = "需要相机权限才能拍照，请在系统设置中开启"
+                photoActionError = "需要相机权限才能拍照，也可从相册选择"
             }
             CameraCaptureOutcome.NoCamera -> photoActionError = "此设备没有可用相机"
             CameraCaptureOutcome.LaunchFailed -> photoActionError = LocalOpFailureCopy.CAMERA_LAUNCH
@@ -177,6 +178,16 @@ internal fun QuickRecordSheet(
         photoActionError = null
         cameraCapture.launch()
     }
+    CameraPermissionRecoveryDialog(
+        launcher = cameraCapture,
+        enabled = actionsEnabled,
+        onChooseGallery = {
+            photoActionError = null
+            photoPicker.launch(
+                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+            )
+        },
+    )
     val isIntervalMode = draft.mode == QuickRecordMode.Sleep
     val visibleIntervalPreview = draft.visibleIntervalDurationPreview(
         nowMillis = nowMillis,

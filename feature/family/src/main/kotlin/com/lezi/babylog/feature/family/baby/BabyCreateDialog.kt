@@ -40,13 +40,15 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
-import com.lezi.babylog.core.model.birthWeightValidationError
+import com.lezi.babylog.core.model.BirthWeightInputResult
+import com.lezi.babylog.core.model.parseBirthWeightKilograms
 import com.lezi.babylog.core.ui.BabyAvatar
 import com.lezi.babylog.core.ui.BabyAvatarSizeEditPreview
 import com.lezi.babylog.core.ui.BabyBirthdayDatePickerDialog
 import com.lezi.babylog.core.ui.BabyProfileFormFields
 import com.lezi.babylog.core.ui.CameraCaptureOutcome
 import com.lezi.babylog.core.ui.CameraCaptureLauncher
+import com.lezi.babylog.core.ui.camera.CameraPermissionRecoveryDialog
 import com.lezi.babylog.core.ui.OwnedCameraCapture
 import com.lezi.babylog.core.ui.rememberCameraCaptureLauncher
 import com.lezi.babylog.designsystem.LeziBabyTheme
@@ -90,7 +92,9 @@ internal fun BabyCreateDialog(
     var weightText by remember { mutableStateOf("") }
     var themeIndex by remember { mutableIntStateOf(0) }
     var showDate by remember { mutableStateOf(false) }
-    var localError by remember { mutableStateOf<String?>(null) }
+    var nicknameError by remember { mutableStateOf<String?>(null) }
+    var weightError by remember { mutableStateOf<String?>(null) }
+    var formError by remember { mutableStateOf<String?>(null) }
     var pickedAvatarUri by remember { mutableStateOf<Uri?>(null) }
     var ownedAvatarCapture by remember { mutableStateOf<OwnedCameraCapture?>(null) }
     var croppedAvatar by remember { mutableStateOf<CroppedAvatar?>(null) }
@@ -207,15 +211,19 @@ internal fun BabyCreateDialog(
                     nickname = nickname,
                     onNicknameChange = {
                         nickname = it
-                        localError = null
+                        nicknameError = null
                     },
-                    nicknameError = localError,
+                    nicknameError = nicknameError,
                     sex = sex,
                     onSexChange = { sex = it },
                     birthdayEpochDay = birthday,
                     onPickBirthday = { showDate = true },
                     weightText = weightText,
-                    onWeightTextChange = { weightText = it },
+                    onWeightTextChange = {
+                        weightText = it
+                        weightError = null
+                    },
+                    weightError = weightError,
                     enabled = !blocked,
                 )
                 Text("主题色", style = LeziTypography.Label)
@@ -258,6 +266,7 @@ internal fun BabyCreateDialog(
                         }
                     }
                 }
+                formError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         },
         confirmButton = {
@@ -265,32 +274,24 @@ internal fun BabyCreateDialog(
                 label = if (blocked) "添加中…" else "添加",
                 onClick = {
                     if (blocked) return@LeziTextButton
-                    if (nickname.isBlank()) {
-                        localError = "请填写昵称"
+                    nicknameError = if (nickname.isBlank()) "请填写昵称" else null
+                    val weight = parseBirthWeightKilograms(weightText)
+                    weightError = (weight as? BirthWeightInputResult.Invalid)?.message
+                    if (nicknameError != null || weight !is BirthWeightInputResult.Valid) {
                         return@LeziTextButton
                     }
-                    val grams = weightText.trim().takeIf { it.isNotEmpty() }
-                        ?.toDoubleOrNull()
-                        ?.let { (it * 1000).toInt() }
-                    if (weightText.isNotBlank() && grams == null) {
-                        localError = "出生体重格式不正确"
-                        return@LeziTextButton
-                    }
-                    birthWeightValidationError(grams)?.let {
-                        localError = it
-                        return@LeziTextButton
-                    }
+                    formError = null
                     submitting = true
                     onCreate(
                         nickname.trim(),
                         sex,
                         birthday,
-                        grams,
+                        weight.grams,
                         themeArgb,
                         croppedAvatar?.jpegBytes,
                     ) { err ->
                         submitting = false
-                        if (err != null) localError = err
+                        formError = err
                     }
                 },
                 enabled = !blocked,
@@ -306,6 +307,17 @@ internal fun BabyCreateDialog(
                     onDismiss()
                 },
                 enabled = !blocked,
+            )
+        },
+    )
+
+    CameraPermissionRecoveryDialog(
+        launcher = avatarCamera,
+        enabled = !blocked,
+        onChooseGallery = {
+            avatarError = null
+            avatarPicker.launch(
+                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
             )
         },
     )

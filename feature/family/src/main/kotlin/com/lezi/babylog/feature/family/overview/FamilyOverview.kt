@@ -26,7 +26,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -83,12 +85,28 @@ internal fun FamilyOverview(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        ui.babySwitchFeedback?.let { feedback ->
+            Text(
+                feedback,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        if (ui.switchingBaby) {
+            Text(
+                "正在切换宝宝…",
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         ui.babies.forEach { b ->
             val selected = b.id == current?.id
             val dup = (nickCounts[b.nickname.trim()] ?: 0) > 1
             BabyRosterCard(
                 baby = b,
                 selected = selected,
+                selectionEnabled = !ui.switchingBaby,
                 meta = familyListBabyMeta(
                     birthdayEpochDay = b.birthdayEpochDay,
                     birthWeightGrams = b.birthWeightGrams,
@@ -141,6 +159,7 @@ internal fun FamilyOverview(
 private fun BabyRosterCard(
     baby: Baby,
     selected: Boolean,
+    selectionEnabled: Boolean,
     meta: String,
     metaError: Boolean,
     canManage: Boolean,
@@ -170,6 +189,7 @@ private fun BabyRosterCard(
             )
             .semantics { this.selected = selected }
             .clickable(
+                enabled = selectionEnabled,
                 role = Role.Button,
                 onClickLabel = if (selected) {
                     "${baby.nickname}，当前宝宝"

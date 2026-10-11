@@ -268,6 +268,7 @@ internal suspend fun aggregateFoodPanel(
         unparseableDayCounts = unparseableDayCounts.toList(),
         amountMin = amountMin,
         amountMax = amountMax,
+        dayHasRecords = drawn.lanesByDay.map { it.isNotEmpty() },
     )
 }
 
@@ -438,6 +439,10 @@ private fun assembleSummaryUi(
         },
         dayValuesTemp = rangeSummary.days.map { day ->
             day.bucket.temps.takeIf { it.isNotEmpty() }?.average()?.toFloat() ?: 0f
+        },
+        dayHasFeedRecords = rangeSummary.days.map { it.feedCount > 0 },
+        dayHasSleepRecords = rangeSummary.days.map {
+            it.sleepSegments > 0 || it.bucket.sleepMin > 0L
         },
         feedTimeBuckets = anchorDay.feedTimeBuckets,
         chartWindows = chartWindows,

@@ -126,7 +126,8 @@ CancellationException / Error → 先停服再原样重抛，不得吞成产品�
   `networksettings/`（家庭网络设置：可用性/手动刷新/重连）、`components/`。
 - 交互：管理员登录、成员申请审批、设备撤销、可选更新横幅；失败浅状态点按接同一条
   `PullToRefresh`（endpoint §7.1）；已加入态手动刷新 = 单次认证心跳（layers/sync.md §5）。
-- UI 合同：ui.md §5、design/2026-07-30 companion。
+- UI 合同：ui.md §5、§10、design/2026-07-30 companion；档案草稿只在进程内跨配置保留，
+  与本机主题/排序的即时保存分离。切宝宝失败反馈和成员申请真实截止时间不改变 domain/sync 合同。
 
 ## 7. `:feature:settings` — 设置中心
 
@@ -141,6 +142,7 @@ CancellationException / Error → 先停服再原样重抛，不得吞成产品�
 `SummaryScreen.kt` + `SummaryAggregation.kt`（`SummaryAggregationEngine`）：日/周聚合、
 喂养图卡 + 辅食面板（Top3 + 其他）。聚合**必须**复用 domain `CareAggregation`
 （layers/domain.md §3）；下拉刷新触发 `PullToRefresh`。
+图表按日读屏沿已有展示视窗与缺失值口径，概览和图形层不重复日列表（ui.md §10）。
 
 ## 9. `:feature:growth` — 成长
 
@@ -157,6 +159,8 @@ product §4.6）。下拉刷新触发同步。
 
 `SearchScreen.kt` + `SearchRepository.kt`；最近备注候选严格按当前宝宝与记录类型
 （product §4.1）；不能编辑的记录打开只读查看会话。
+重读失败时只有同查询、宝宝与有效本地权限范围的成功快照可暂留，并强制只读；
+范围变化立即失效，首次失败全页反馈（ui.md §10）。
 
 ## 12. `:feature:widget` — 桌面小组件
 

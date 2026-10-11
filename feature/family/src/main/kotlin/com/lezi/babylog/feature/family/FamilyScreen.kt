@@ -1595,14 +1595,10 @@ fun FamilyRoute(
                         update.avatarJpeg,
                         update.removeAvatar,
                     ) { error ->
-                        onFinished()
-                        if (error == null) {
-                            showMessage("宝宝档案已保存")
-                        } else {
-                            showMessage(error, resume = FamilyDialog.EditBaby(baby))
-                        }
+                        onFinished(error)
                     }
                 },
+                onProfileSaved = { showMessage("宝宝档案已保存") },
                 onCreate = { nickname, sex, birthday, grams, theme, avatar, onFinished ->
                     overviewHost.addBaby(
                         nickname = nickname,

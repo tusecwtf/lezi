@@ -1,5 +1,6 @@
 package com.lezi.babylog.core.ui
 
+import com.lezi.babylog.core.ui.camera.CameraPermissionRecovery
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -9,6 +10,79 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OwnedCameraCaptureSessionsTest {
+    @Test
+    fun cancelledPermissionEndsOnlyThePendingRequestWithoutDenialOrCaptureOwnership() {
+        val files = FakeCaptureFileSystem()
+        val sessions = OwnedCameraCaptureSessions(files)
+        val controller = OwnedCameraCaptureController(sessions, null, null)
+        assertFalse(controller.abandonPermission())
+        assertTrue(controller.awaitPermission())
+        assertTrue(controller.abandonPermission())
+        assertTrue(controller.isIdle)
+        assertNull(controller.snapshot.permissionRecovery)
+        assertTrue(files.ownedNames().isEmpty())
+
+        // A stale denied/cancelled callback cannot turn cancellation into permanent denial.
+        assertFalse(controller.permissionDenied(shouldShowRationale = false))
+        assertFalse(controller.abandonPermission())
+        assertNull(controller.snapshot.permissionRecovery)
+        assertTrue(controller.awaitPermission())
+        assertTrue(files.ownedNames().isEmpty())
+    }
+
+    @Test
+    fun denialRecoveryRequiresAnAcceptedPermissionResultAndNeverAllocatesACapture() {
+        val files = FakeCaptureFileSystem()
+        val sessions = OwnedCameraCaptureSessions(files)
+        val controller = OwnedCameraCaptureController(sessions, null, null)
+
+        // Fresh installs also have false rationale; without a pending request it proves nothing.
+        assertFalse(controller.permissionDenied(shouldShowRationale = false))
+        assertNull(controller.snapshot.permissionRecovery)
+        assertTrue(controller.awaitPermission())
+        assertFalse(controller.awaitPermission())
+        assertTrue(controller.permissionDenied(shouldShowRationale = true))
+        assertEquals(CameraPermissionRecovery.RetryPermission, controller.snapshot.permissionRecovery)
+        assertTrue(files.ownedNames().isEmpty())
+
+        assertTrue(controller.awaitPermission())
+        assertNull(controller.snapshot.permissionRecovery)
+        assertTrue(controller.permissionDenied(shouldShowRationale = false))
+        assertEquals(CameraPermissionRecovery.OpenSettings, controller.snapshot.permissionRecovery)
+        assertFalse(controller.permissionDenied(shouldShowRationale = true))
+        assertEquals(CameraPermissionRecovery.OpenSettings, controller.snapshot.permissionRecovery)
+        assertTrue(files.ownedNames().isEmpty())
+
+        controller.dismissPermissionRecovery()
+        assertTrue(controller.isIdle)
+        assertNull(controller.snapshot.permissionRecovery)
+        assertTrue(files.ownedNames().isEmpty())
+    }
+
+    @Test
+    fun unavailableRationaleOffersRetryAndRestoredRecoveryWaitsForAUserAction() {
+        val files = FakeCaptureFileSystem()
+        val sessions = OwnedCameraCaptureSessions(files)
+        val controller = OwnedCameraCaptureController(sessions, null, null)
+        assertTrue(controller.awaitPermission())
+        assertTrue(controller.permissionDenied(shouldShowRationale = null))
+        val saved = controller.snapshot
+        val restored = OwnedCameraCaptureController(
+            sessions,
+            saved.phase.name,
+            saved.token,
+            saved.permissionRecovery?.name,
+        )
+
+        assertEquals(CameraPermissionRecovery.RetryPermission, restored.snapshot.permissionRecovery)
+        assertNull(restored.recoverBeforeCollection())
+        assertTrue(restored.isIdle)
+        assertTrue(files.ownedNames().isEmpty())
+        restored.dispose()
+        assertNull(restored.snapshot.permissionRecovery)
+        assertFalse(restored.permissionDenied(shouldShowRationale = false))
+    }
+
     @Test
     fun beginCreatesUniqueRecoverableOwnedFilesAndReleaseIsIdempotent() {
         val fileSystem = FakeCaptureFileSystem()

@@ -47,6 +47,7 @@ import com.lezi.babylog.core.ui.stoolAmountLabel
 import com.lezi.babylog.core.ui.stoolColorLabel
 import com.lezi.babylog.core.ui.stoolConsistencyLabel
 import com.lezi.babylog.designsystem.LeziAlphas
+import com.lezi.babylog.designsystem.LeziMotion
 import com.lezi.babylog.designsystem.LeziPeeAmountMark
 import com.lezi.babylog.designsystem.LeziNursingConfirmFields
 import com.lezi.babylog.designsystem.LeziShapes
@@ -58,6 +59,7 @@ import com.lezi.babylog.designsystem.LeziStoolConsistencyMark
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.designsystem.LeziTextField
+import com.lezi.babylog.designsystem.leziMotionMillis
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -533,30 +535,39 @@ private fun SleepFields(
 }
 
 @Composable
-private fun SleepActionAnimation(
+internal fun SleepActionAnimation(
     action: SleepDraftAction,
     animationDescription: String,
+    motionMillis: Int = leziMotionMillis(LeziMotion.Fast),
 ) {
+    // Same live reduce-motion gate as the header sleep cap. Static marks keep
+    // their meaning without creating an InfiniteTransition or pumping frames.
+    val motionEnabled = motionMillis > 0
     // Exactly one infinite animator runs for the visible variant; the unused
     // child used to pump the frame clock alongside the applied one.
     if (action == SleepDraftAction.WakeUp) {
-        WakePulseMark(animationDescription)
+        WakePulseMark(animationDescription, motionEnabled)
     } else {
-        SleepBobMark(animationDescription)
+        SleepBobMark(animationDescription, motionEnabled)
     }
 }
 
 @Composable
-private fun WakePulseMark(animationDescription: String) {
-    val pulse by rememberInfiniteTransition(label = "wake-pulse").animateFloat(
-        initialValue = 0.92f,
-        targetValue = 1.08f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1_000, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "wake-pulse",
-    )
+private fun WakePulseMark(animationDescription: String, motionEnabled: Boolean) {
+    val pulse = if (motionEnabled) {
+        val animatedPulse by rememberInfiniteTransition(label = "wake-pulse").animateFloat(
+            initialValue = 0.92f,
+            targetValue = 1.08f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(1_000, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "wake-pulse",
+        )
+        animatedPulse
+    } else {
+        1f
+    }
     val sun = com.lezi.babylog.designsystem.LeziColors.SleepSun
     Canvas(
         modifier = Modifier
@@ -594,16 +605,21 @@ private fun WakePulseMark(animationDescription: String) {
 }
 
 @Composable
-private fun SleepBobMark(animationDescription: String) {
-    val bob by rememberInfiniteTransition(label = "sleep-action").animateFloat(
-        initialValue = -2f,
-        targetValue = 2f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1_400, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "sleep-bob",
-    )
+private fun SleepBobMark(animationDescription: String, motionEnabled: Boolean) {
+    val bob = if (motionEnabled) {
+        val animatedBob by rememberInfiniteTransition(label = "sleep-action").animateFloat(
+            initialValue = -2f,
+            targetValue = 2f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(1_400, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "sleep-bob",
+        )
+        animatedBob
+    } else {
+        0f
+    }
     val surface = MaterialTheme.colorScheme.surface
     val moon = com.lezi.babylog.designsystem.LeziColors.SleepMoonCap
     val sun = com.lezi.babylog.designsystem.LeziColors.SleepSun

@@ -18,8 +18,10 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import com.lezi.babylog.core.ui.camera.CameraPermissionRecovery
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -58,7 +60,12 @@ sealed interface CameraCaptureOutcome {
 
 /** Small caller interface backed by permission, hardware, launcher and owned-file policy. */
 interface CameraCaptureLauncher {
+    /** Set only after a denied callback; a fresh false rationale is not permanent denial. */
+    val permissionRecovery: CameraPermissionRecovery? get() = null
+
     fun launch()
+
+    fun dismissPermissionRecovery() = Unit
 
     /** Release the current session on dialog dismiss or composition removal. */
     fun dispose()
@@ -111,6 +118,11 @@ internal fun rememberCameraCaptureLauncherModule(
     sessionsFor: (Context) -> OwnedCameraCaptureSessions = CameraCapture::sessions,
     hasPermission: (Context) -> Boolean = CameraCapture::hasPermission,
     hasCameraHardware: (Context) -> Boolean = CameraCapture::hasCameraHardware,
+    shouldShowPermissionRationale: (Context) -> Boolean? = { context ->
+        context.findActivity()?.let {
+            ActivityCompat.shouldShowRequestPermissionRationale(it, CameraCapture.PERMISSION)
+        }
+    },
     captureUri: (Context, OwnedCameraCaptureFile) -> Uri? = ::fileProviderCaptureUri,
     preserveOnDispose: (Context) -> Boolean = {
         it.findActivity()?.isChangingConfigurations == true
@@ -123,14 +135,19 @@ internal fun rememberCameraCaptureLauncherModule(
         mutableStateOf(CameraCapturePhase.Idle.name)
     }
     var savedToken by rememberSaveable(ownershipKey) { mutableStateOf<String?>(null) }
+    var savedPermissionRecovery by rememberSaveable(ownershipKey) {
+        mutableStateOf<String?>(null)
+    }
     val controller = remember(ownershipKey, sessions) {
         OwnedCameraCaptureController(
             sessions = sessions,
             restoredPhase = savedPhase,
             restoredToken = savedToken,
+            restoredPermissionRecovery = savedPermissionRecovery,
             onSnapshot = { snapshot ->
                 savedPhase = snapshot.phase.name
                 savedToken = snapshot.token
+                savedPermissionRecovery = snapshot.permissionRecovery?.name
             },
         )
     }
@@ -183,17 +200,28 @@ internal fun rememberCameraCaptureLauncherModule(
     }
 
     val permission = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        if (granted && controller.permissionGranted()) {
-            startPicture()
-        } else if (!granted && controller.permissionDenied()) {
-            latestOutcome(CameraCaptureOutcome.PermissionDenied)
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { result ->
+        // The Boolean contract conflates cancellation/empty grants with denial. Request only the
+        // existing CAMERA permission, but retain its key so cancelling the prompt stays cancellation.
+        when (result[CameraCapture.PERMISSION]) {
+            true -> if (controller.permissionGranted()) startPicture()
+            false -> if (controller.permissionDenied(shouldShowPermissionRationale(context))) {
+                latestOutcome(CameraCaptureOutcome.PermissionDenied)
+            }
+            null -> if (controller.abandonPermission()) {
+                latestOutcome(CameraCaptureOutcome.Cancelled)
+            }
         }
     }
 
     val launcher = remember(ownershipKey, context, sessions) {
         object : CameraCaptureLauncher {
+            override val permissionRecovery: CameraPermissionRecovery?
+                get() = CameraPermissionRecovery.entries.firstOrNull {
+                    it.name == savedPermissionRecovery
+                }
+
             override fun launch() {
                 if (!controller.isIdle) return
                 if (!hasCameraHardware(context)) {
@@ -201,12 +229,14 @@ internal fun rememberCameraCaptureLauncherModule(
                 } else if (hasPermission(context)) {
                     startPicture()
                 } else if (controller.awaitPermission()) {
-                    runCatching { permission.launch(CameraCapture.PERMISSION) }.onFailure {
+                    runCatching { permission.launch(arrayOf(CameraCapture.PERMISSION)) }.onFailure {
                         controller.abandonPermission()
                         latestOutcome(CameraCaptureOutcome.LaunchFailed)
                     }
                 }
             }
+
+            override fun dismissPermissionRecovery() = controller.dismissPermissionRecovery()
 
             override fun dispose() = controller.dispose()
         }

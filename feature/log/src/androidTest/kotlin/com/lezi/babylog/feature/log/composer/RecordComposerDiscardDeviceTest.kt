@@ -31,6 +31,7 @@ import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.ui.CameraCaptureLauncher
 import com.lezi.babylog.core.ui.CameraCaptureOutcome
 import com.lezi.babylog.core.ui.OwnedCameraCapture
+import com.lezi.babylog.core.ui.camera.CameraPermissionRecovery
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -53,6 +54,49 @@ import com.lezi.babylog.feature.log.photo.*
 class RecordComposerDiscardDeviceTest {
     @get:Rule
     val compose = createComposeRule()
+
+    @Test
+    fun deniedCameraKeepsTheRecordDraftAndDoesNotRetryUntilTheUserTapsAgain() {
+        val camera = FakeCameraCapture()
+        val draft = mutableStateOf(
+            QuickRecordDraft.create(RecordType.DIARY, 1_000L).copy(note = "未保存的护理说明"),
+        )
+        compose.setContent {
+            MaterialTheme {
+                QuickRecordSheet(
+                    draft = draft.value,
+                    interactionKey = "denial-draft",
+                    amountStepMl = 5,
+                    timeStepMin = 1,
+                    saving = false,
+                    deleting = false,
+                    saveError = null,
+                    canStartNursingTimer = false,
+                    onDraftChange = { draft.value = it },
+                    onDismiss = {},
+                    onDelete = null,
+                    onConfirm = {},
+                    onStartNursingTimer = {},
+                    onImportPhotos = {},
+                    onImportCapturedPhoto = { _, done -> done(true) },
+                    onRemovePhoto = {},
+                    cameraCaptureLauncherFactory = { key, outcome ->
+                        camera.rememberLauncher(key, outcome)
+                    },
+                )
+            }
+        }
+        compose.onNodeWithText("拍照").performClick()
+        compose.runOnIdle { camera.emitDenied(CameraPermissionRecovery.OpenSettings) }
+        compose.onNodeWithText("打开设置").assertIsDisplayed()
+        compose.onNodeWithText("从相册选择").assertIsDisplayed()
+        compose.onNodeWithText("暂不拍照").performClick()
+        compose.onNodeWithText("未保存的护理说明").assertIsDisplayed()
+        assertEquals("未保存的护理说明", draft.value.note)
+        assertEquals(1, camera.launchCount)
+        compose.onNodeWithText("拍照").performClick()
+        assertEquals(2, camera.launchCount)
+    }
 
     @Test
     fun recordCameraEntryReleasesCancelAndDurablyImportedCaptureAcrossRestoration() {
@@ -118,9 +162,13 @@ class RecordComposerDiscardDeviceTest {
             get() = requireNotNull(pending).uri
         private lateinit var onOutcome: (CameraCaptureOutcome) -> Unit
         private var pending: FakeOwnedCapture? = null
+        private var recovery by mutableStateOf<CameraPermissionRecovery?>(null)
 
         private val launcher = object : CameraCaptureLauncher {
+            override val permissionRecovery: CameraPermissionRecovery? get() = recovery
+
             override fun launch() {
+                recovery = null
                 pending?.release()
                 launchCount += 1
                 pending = FakeOwnedCapture(
@@ -133,6 +181,10 @@ class RecordComposerDiscardDeviceTest {
             override fun dispose() {
                 pending?.release()
                 pending = null
+            }
+
+            override fun dismissPermissionRecovery() {
+                recovery = null
             }
         }
 
@@ -161,6 +213,11 @@ class RecordComposerDiscardDeviceTest {
             pending?.release()
             pending = null
             onOutcome(outcome)
+        }
+
+        fun emitDenied(value: CameraPermissionRecovery) {
+            recovery = value
+            emitFailure(CameraCaptureOutcome.PermissionDenied)
         }
     }
 

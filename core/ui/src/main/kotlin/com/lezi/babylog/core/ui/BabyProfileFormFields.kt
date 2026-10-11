@@ -44,6 +44,7 @@ fun BabyProfileFormFields(
     onWeightTextChange: (String) -> Unit,
     enabled: Boolean,
     modifier: Modifier = Modifier,
+    weightError: String? = null,
 ) {
     val dateLabel = formatBabyBirthday(birthdayEpochDay)
     Column(
@@ -86,12 +87,13 @@ fun BabyProfileFormFields(
         LeziTextField(
             value = weightText,
             enabled = enabled,
-            onValueChange = { onWeightTextChange(it.filter { ch -> ch.isDigit() || ch == '.' }) },
+            onValueChange = onWeightTextChange,
             label = { Text("出生体重（kg，可选）") },
             placeholder = { Text("例如 3.20") },
             singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-            supportingText = { Text("可填千克，保存时换算为克") },
+            isError = weightError != null,
+            supportingText = { Text(weightError ?: "可填千克，保存时换算为克") },
             modifier = Modifier.fillMaxWidth(),
         )
     }

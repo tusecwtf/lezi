@@ -80,7 +80,7 @@ class OwnedCameraAvatarEntrypointsDeviceTest {
                     canMoveEarlier = false,
                     canMoveLater = false,
                     onDismiss = {},
-                    onSaveProfile = { _, _, _, _, _, _, done -> done() },
+                    onSaveProfile = { _, _, _, _, _, _, done -> done(null) },
                     onLocalTheme = { _, done -> done(null) },
                     onMoveLocal = { _, done -> done(null) },
                     onSetCurrent = {},
