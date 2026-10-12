@@ -526,6 +526,7 @@ class RealSyncPortFamilyWireTest {
                 pullGeneration = "g1",
             ),
         )
+        rig.awaitStartupRecovery()
         rig.backend.pullResults += PullResult(
             entities = emptyList(),
             cursor = 1,
@@ -541,15 +542,44 @@ class RealSyncPortFamilyWireTest {
             familyName = "第二页名字",
         )
 
-        val result = rig.port.sync(SyncTrigger.PullToRefresh)
+        val continuationStarted = CompletableDeferred<Unit>()
+        val releaseContinuation = CompletableDeferred<Unit>()
+        // The hook is one-shot: let both conflicting pages return, then gate the
+        // next round before its default empty page can legitimately clear the name.
+        rig.backend.beforePullReturn = {
+            rig.backend.beforePullReturn = {
+                rig.backend.pullStarted = continuationStarted
+                rig.backend.releasePull = releaseContinuation
+            }
+        }
+        try {
+            val result = rig.port.sync(SyncTrigger.PullToRefresh)
+            withContext(Dispatchers.IO) {
+                withTimeout(5_000) { continuationStarted.await() }
+            }
 
-        // Family-name drift is a typed cycle-state failure: the page is not
-        // checkpointed with the conflicting name and the foreground cycle
-        // continues (self-heals next round) instead of hard-failing as a
-        // misclassified "check your input" error.
-        assertThat(result.isSuccess).isTrue()
-        assertThat(rig.preferences.current().familyName).isEqualTo("第一页名字")
+            // Family-name drift is a typed cycle-state failure: the page is not
+            // checkpointed with the conflicting name and the foreground cycle
+            // continues (self-heals next round) instead of hard-failing as a
+            // misclassified "check your input" error.
+            assertThat(result.isSuccess).isTrue()
+            assertThat(rig.preferences.current().familyName).isEqualTo("第一页名字")
+            assertThat(rig.preferences.current().pullCursor).isEqualTo(1)
+            assertThat(rig.preferences.updatePullCheckpointCalls).isEqualTo(1)
+            assertThat(rig.backend.pullCursors).containsExactly(0L, 1L, 1L).inOrder()
+        } finally {
+            releaseContinuation.complete(Unit)
+        }
+
+        withContext(Dispatchers.IO) {
+            withTimeout(5_000) { rig.port.status().first { it == SyncStatus.Idle } }
+        }
+        assertThat(rig.preferences.current().familyName).isNull()
         assertThat(rig.preferences.current().pullCursor).isEqualTo(1)
+        assertThat(rig.preferences.current().pullGeneration).isEqualTo("g1")
+        assertThat(rig.preferences.updatePullCheckpointCalls).isEqualTo(2)
+        assertThat(rig.preferences.current().lastSuccessAt).isEqualTo(rig.clock.nowMillis())
+        assertThat(rig.port.lastFailureKind().first()).isNull()
     }
 
 }

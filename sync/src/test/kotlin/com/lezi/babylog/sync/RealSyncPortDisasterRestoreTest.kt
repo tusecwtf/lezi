@@ -250,28 +250,53 @@ class RealSyncPortDisasterRestoreTest {
                 createdByMembershipId = oldSession.membershipId,
             ),
         )
-        val committed = rig.port.commitDisasterRecovery("commit-root-secret").getOrThrow()
+        // Commit schedules a real-IO foreground round. Park its first pull so these
+        // assertions observe atomic activation/retirement, before later remote convergence.
+        val pullStarted = CompletableDeferred<Unit>()
+        val releasePull = CompletableDeferred<Unit>()
+        rig.backend.pullStarted = pullStarted
+        rig.backend.releasePull = releasePull
+        try {
+            val committed = rig.port.commitDisasterRecovery("commit-root-secret").getOrThrow()
+            withContext(Dispatchers.IO) {
+                withTimeout(5_000) { pullStarted.await() }
+            }
 
-        assertThat(committed.session.familyId).isEqualTo(oldSession.familyId)
-        assertThat(committed.session.membershipId).isEqualTo("restored-owner-membership")
-        assertThat(rig.preferences.current().copy(lastSuccessAt = committed.session.lastSuccessAt))
-            .isEqualTo(committed.session)
+            assertThat(committed.session.familyId).isEqualTo(oldSession.familyId)
+            assertThat(committed.session.membershipId).isEqualTo("restored-owner-membership")
+            assertThat(rig.preferences.current().copy(lastSuccessAt = committed.session.lastSuccessAt))
+                .isEqualTo(committed.session)
+            assertThat(rig.preferences.verifiedEndpoint.first()).isEqualTo(candidate)
+            assertThat(rig.records.getByClientUuid("record-local")?.createdByMembershipId)
+                .isEqualTo("restored-owner-membership")
+            assertThat(rig.records.getByClientUuid("record-local")?.syncDirty).isFalse()
+            assertThat(rig.carePlans.getByClientUuid("plan-local")?.createdByMembershipId)
+                .isEqualTo("restored-owner-membership")
+            assertThat(rig.carePlans.getByClientUuid("plan-local")?.syncDirty).isFalse()
+            assertThat(rig.media.getByClientUuid("media-local")?.remoteUri).isNotNull()
+            assertThat(rig.media.getByClientUuid("media-local")?.syncDirty).isFalse()
+            assertThat(rig.records.getByClientUuid("record-after-restore-start")?.createdByMembershipId)
+                .isEqualTo("restored-owner-membership")
+            assertThat(rig.records.getByClientUuid("record-after-restore-start")?.syncDirty).isTrue()
+            assertThat(rig.backend.disasterRestoreCommitRootPasswords)
+                .containsExactly("commit-root-secret")
+            assertThat(rig.preferences.disasterRestoreCheckpoint.first()).isNull()
+            assertThat(rig.preferences.disasterRestoreToken()).isEmpty()
+        } finally {
+            releasePull.complete(Unit)
+        }
+
+        withContext(Dispatchers.IO) {
+            withTimeout(5_000) { rig.port.status().first { it == SyncStatus.Idle } }
+        }
+        // The backend's default empty page authoritatively clears the family name.
+        // Once released, the round may converge it and publish the post-snapshot row.
+        assertThat(rig.preferences.current().familyName).isNull()
+        assertThat(rig.preferences.current().pullGeneration).isEqualTo("restored-generation")
+        assertThat(rig.preferences.current().lastSuccessAt).isEqualTo(rig.clock.nowMillis())
         assertThat(rig.preferences.verifiedEndpoint.first()).isEqualTo(candidate)
-        assertThat(rig.records.getByClientUuid("record-local")?.createdByMembershipId)
-            .isEqualTo("restored-owner-membership")
-        assertThat(rig.records.getByClientUuid("record-local")?.syncDirty).isFalse()
-        assertThat(rig.carePlans.getByClientUuid("plan-local")?.createdByMembershipId)
-            .isEqualTo("restored-owner-membership")
-        assertThat(rig.carePlans.getByClientUuid("plan-local")?.syncDirty).isFalse()
-        assertThat(rig.media.getByClientUuid("media-local")?.remoteUri).isNotNull()
-        assertThat(rig.media.getByClientUuid("media-local")?.syncDirty).isFalse()
-        assertThat(rig.records.getByClientUuid("record-after-restore-start")?.createdByMembershipId)
-            .isEqualTo("restored-owner-membership")
-        assertThat(rig.records.getByClientUuid("record-after-restore-start")?.syncDirty).isTrue()
-        assertThat(rig.backend.disasterRestoreCommitRootPasswords)
-            .containsExactly("commit-root-secret")
-        assertThat(rig.preferences.disasterRestoreCheckpoint.first()).isNull()
-        assertThat(rig.preferences.disasterRestoreToken()).isEmpty()
+        assertThat(rig.records.getByClientUuid("record-after-restore-start")?.syncDirty).isFalse()
+        assertThat(rig.port.lastFailureKind().first()).isNull()
     }
 
     @Test

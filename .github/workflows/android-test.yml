@@ -47,5 +47,20 @@ jobs:
       - name: Grant gradlew
         run: chmod +x gradlew
 
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build isolated sync test service
+        run: |
+          openssl version
+          curl --version
+          sqlite3 --version
+          cargo build --manifest-path "$GITHUB_WORKSPACE/tools/lezi-sync/Cargo.toml" \
+            --locked --bin lezi-sync --target-dir "$GITHUB_WORKSPACE/tools/lezi-sync/target"
+          test -f "$GITHUB_WORKSPACE/tools/lezi-sync/target/debug/lezi-sync"
+          test -x "$GITHUB_WORKSPACE/tools/lezi-sync/target/debug/lezi-sync"
+
       - name: Unit tests
+        env:
+          LEZI_SYNC_BIN: ${{ github.workspace }}/tools/lezi-sync/target/debug/lezi-sync
         run: ./gradlew test --stacktrace --info --no-daemon

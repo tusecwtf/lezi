@@ -15,6 +15,7 @@ import com.lezi.babylog.sync.conflict.ConflictSnapshotValidation
 import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -412,14 +413,14 @@ class CareLogRealServerSeamResourceSaturationTest {
      *  terminal shape (branches and pending markers compacted, durable
      *  resolution evidence kept) with a bounded deadline. */
     private fun awaitRetentionSweep(db: File, conflictId: String): ResourceCounts {
-        val deadline = System.currentTimeMillis() + 10_000L
-        var counts = queryResourceCounts(db, conflictId)
-        while (
-            System.currentTimeMillis() < deadline &&
-            (counts.branchRows != 0L || counts.pendingMarkers != 0L)
-        ) {
-            Thread.sleep(50L)
-            counts = queryResourceCounts(db, conflictId)
+        val deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(10L)
+        var counts = queryResourceCounts(db, conflictId, deadlineNanos)
+        while (counts.branchRows != 0L || counts.pendingMarkers != 0L) {
+            val remainingNanos = deadlineNanos - System.nanoTime()
+            if (remainingNanos <= 0L) break
+            TimeUnit.NANOSECONDS.sleep(minOf(TimeUnit.MILLISECONDS.toNanos(50L), remainingNanos))
+            if (System.nanoTime() >= deadlineNanos) break
+            counts = queryResourceCounts(db, conflictId, deadlineNanos)
         }
         return counts
     }
@@ -434,16 +435,42 @@ class CareLogRealServerSeamResourceSaturationTest {
         val completeMarkers: Long,
     )
 
-    private fun queryResourceCounts(db: File, conflictId: String): ResourceCounts {
+    private fun queryResourceCounts(
+        db: File,
+        conflictId: String,
+        deadlineNanos: Long = System.nanoTime() + TimeUnit.SECONDS.toNanos(10L),
+    ): ResourceCounts {
         fun scalar(sql: String): Long {
+            val remainingNanos = deadlineNanos - System.nanoTime()
+            check(remainingNanos > 0L) { "sqlite3 resource query exceeded 10s deadline sql=$sql" }
+            // Even WAL readers can briefly meet the last writer's connection-cleanup lock.
+            // All seven reads and every poll share one budget, rather than 10s per process.
+            val busyMillis = TimeUnit.NANOSECONDS.toMillis(remainingNanos).coerceAtLeast(1L)
             val process = ProcessBuilder(
                 "sqlite3",
+                "-readonly",
+                "-cmd",
+                ".timeout $busyMillis",
                 db.absolutePath,
                 sql,
             ).redirectErrorStream(true).start()
-            val out = process.inputStream.readBytes().toString(Charsets.UTF_8).trim()
-            check(process.waitFor() == 0) { "sqlite3 failed: $out sql=$sql" }
-            return out.toLong()
+            try {
+                // Scalar output is tiny; wait first so readBytes cannot outlive the deadline.
+                check(
+                    process.waitFor(
+                        (deadlineNanos - System.nanoTime()).coerceAtLeast(0L),
+                        TimeUnit.NANOSECONDS,
+                    ),
+                ) { "sqlite3 resource query exceeded 10s deadline sql=$sql" }
+                val out = process.inputStream.readBytes().toString(Charsets.UTF_8).trim()
+                check(process.exitValue() == 0) { "sqlite3 failed: $out sql=$sql" }
+                return out.toLong()
+            } finally {
+                if (process.isAlive) process.destroyForcibly()
+                process.inputStream.close()
+                process.outputStream.close()
+                process.errorStream.close()
+            }
         }
         val safeId = conflictId.replace("'", "''")
         return ResourceCounts(
