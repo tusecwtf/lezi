@@ -170,7 +170,11 @@ val validateReleaseSigning = tasks.register("validateReleaseSigning") {
     }
 }
 
-tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+// Release unit tests compile this variant without producing an installable artifact.
+// Guard both APK and intermediate bundle packaging before they can emit a product.
+tasks.matching {
+    it.name in setOf("packageRelease", "packageReleaseBundle")
+}.configureEach {
     dependsOn(validateReleaseSigning)
 }
 
