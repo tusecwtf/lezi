@@ -6,9 +6,13 @@ pluginManagement {
             forRepository { mavenCentral() }
             filter { includeGroup("com.google.devtools.ksp") }
         }
-        maven("https://maven.aliyun.com/repository/google")
-        maven("https://maven.aliyun.com/repository/gradle-plugin")
-        maven("https://maven.aliyun.com/repository/public")
+        // Keep mirror-first resolution locally. GitHub Actions uses upstreams
+        // only: a mirror HTTP failure can abort resolution before fallback.
+        if (providers.environmentVariable("GITHUB_ACTIONS").orNull != "true") {
+            maven("https://maven.aliyun.com/repository/google")
+            maven("https://maven.aliyun.com/repository/gradle-plugin")
+            maven("https://maven.aliyun.com/repository/public")
+        }
         google {
             content {
                 includeGroupByRegex("com\\.android.*")
@@ -28,8 +32,11 @@ dependencyResolutionManagement {
             forRepository { mavenCentral() }
             filter { includeGroup("com.google.devtools.ksp") }
         }
-        maven("https://maven.aliyun.com/repository/google")
-        maven("https://maven.aliyun.com/repository/public")
+        // Apply the same upstream-only policy to CI project dependencies.
+        if (providers.environmentVariable("GITHUB_ACTIONS").orNull != "true") {
+            maven("https://maven.aliyun.com/repository/google")
+            maven("https://maven.aliyun.com/repository/public")
+        }
         google()
         mavenCentral()
     }
