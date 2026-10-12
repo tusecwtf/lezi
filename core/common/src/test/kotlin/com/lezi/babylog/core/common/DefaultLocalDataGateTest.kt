@@ -79,6 +79,44 @@ class DefaultLocalDataGateTest {
     }
 
     @Test
+    fun readyStateIsVisibleToCompletionObserversBeforeRetryReturns() = runTest {
+        val inspectionStarted = CompletableDeferred<Unit>()
+        val releaseInspection = CompletableDeferred<Unit>()
+        val observedCompletionState = CompletableDeferred<LocalDataUpgradeState>()
+        val gate = DefaultLocalDataGate(
+            currentContractVersion = 1,
+            minimumMigratableContractVersion = 1,
+            steps = emptySet(),
+            environment = object : LocalDataUpgradeEnvironment {
+                override suspend fun inspect(): LocalDataInspection {
+                    inspectionStarted.complete(Unit)
+                    releaseInspection.await()
+                    return LocalDataInspection(1)
+                }
+
+                override suspend fun prepareSnapshot(step: LocalDataUpgradeStep) = Unit
+                override suspend fun commitContract(contractVersion: Int) = Unit
+                override suspend fun cleanupSnapshots() = Unit
+                override suspend fun verifyCurrent() = Unit
+                override fun diagnosticContext(): String = "publication-order"
+            },
+        )
+        val attempt = async { gate.retry() }
+        inspectionStarted.await()
+        // Observe the actual completion boundary; no scheduling delay or rewritten gate algorithm.
+        val field = DefaultLocalDataGate::class.java.getDeclaredField("inFlightPublished")
+            .apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val published = field.get(gate) as CompletableDeferred<LocalDataUpgradeState>
+        published.invokeOnCompletion { observedCompletionState.complete(gate.state.value) }
+        releaseInspection.complete(Unit)
+
+        assertThat(attempt.await()).isEqualTo(LocalDataUpgradeState.Ready(1))
+        assertThat(observedCompletionState.await()).isEqualTo(LocalDataUpgradeState.Ready(1))
+        assertThat(gate.state.value).isEqualTo(LocalDataUpgradeState.Ready(1))
+    }
+
+    @Test
     fun migrationSnapshotsBeforeMutationAndPublishesReadyOnlyAfterVerification() = runTest {
         val events = mutableListOf<String>()
         val step = object : LocalDataUpgradeStep {
@@ -217,9 +255,7 @@ class DefaultLocalDataGateTest {
 
         assertThat(gate.ensureReady()).isFalse()
         firstInspectStarted.await()
-        // The timeout watchdog completes `published` before publishing state, so the
-        // flow can lag retry()/ensureReady()'s return by a scheduling quantum:
-        // await the value instead of racing it.
+        // Check that the recovery flow also exposes the timeout winner for this inspection.
         withTimeout(5_000) {
             gate.state.first { it is LocalDataUpgradeState.Blocked }
         }
