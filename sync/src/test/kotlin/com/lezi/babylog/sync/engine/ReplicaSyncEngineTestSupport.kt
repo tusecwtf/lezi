@@ -111,7 +111,13 @@ internal class ReplicaEngineRig(
     val carePlanAppliedBatches = mutableListOf<List<String>>()
     val engine = newEngine()
 
-    fun newEngine() = ReplicaSyncEngine(
+    fun newEngine() = newEngine(preferences)
+
+    fun newEngine(
+        preferences: com.lezi.babylog.sync.session.SyncPreferences,
+        conflictDetails: com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao =
+            this.conflictDetails,
+    ) = ReplicaSyncEngine(
         backend = backend,
         preferences = preferences,
         recordDao = records,

@@ -297,33 +297,38 @@ class ReplicaSyncEnginePullCheckpointTest {
             pullGeneration = "member-authority-generation",
         )
         val rig = ReplicaEngineRig(session)
-        val babyId = rig.babies.seed(
-            localReplicaBaby().copy(
-                clientUuid = "baby-remote",
-                syncDirty = false,
-                familyAuthority = true,
-            ),
+        rig.babies.seed(
+            localReplicaBaby().copy(clientUuid = "baby-remote", syncDirty = false),
         )
         rig.engine.resetLocalSyncReceipts(
             previous = session,
             invalidateCurrentReceipts = true,
         )
-        rig.babies.seed(
-            localReplicaBaby().copy(
-                id = babyId,
-                clientUuid = "baby-remote",
-                syncDirty = false,
-                familyAuthority = true,
-            ),
+        rig.preferences.updateCursor(0, session.pullGeneration)
+        rig.backend.pullResults += PullResult(
+            entities = listOf(remoteReplicaBaby()),
+            cursor = 1,
+            generation = session.pullGeneration,
+            hasMore = true,
         )
+        rig.backend.beforePullReturn = {
+            rig.backend.beforePullReturn = {
+                throw CancellationException("restart after the durable page checkpoint")
+            }
+        }
+        val interrupted = runCatching {
+            rig.engine.synchronize(rig.preferences.current(), SyncTrigger.PullToRefresh)
+        }.exceptionOrNull()
+        assertThat(interrupted).isInstanceOf(CancellationException::class.java)
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(1)
         rig.backend.pullResults += PullResult(
             entities = emptyList(),
             cursor = 1,
-            generation = "member-authority-generation",
+            generation = session.pullGeneration,
             hasMore = false,
         )
 
-        rig.engine.synchronize(session, SyncTrigger.PullToRefresh)
+        rig.newEngine().synchronize(rig.preferences.current(), SyncTrigger.PullToRefresh)
 
         assertThat(rig.babies.getByClientUuid("baby-remote")!!.familyAuthority).isTrue()
         assertThat(rig.preferences.current().pullCursor).isEqualTo(1)

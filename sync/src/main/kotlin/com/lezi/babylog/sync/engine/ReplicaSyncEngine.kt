@@ -372,6 +372,11 @@ internal class ReplicaSyncEngine(
                 }
             }
         }
+        if (classifiedPullFailure != null && transitionReceipt != null) {
+            // A resumed authoritative walk is still incomplete. Do not publish
+            // reset-derived pending rows or consume its durable recovery boundary.
+            throw classifiedPullFailure
+        }
         // Historical missing media is a bounded full-cycle queue, not a per-page
         // scan. Run it after pull pages and before freeze so a GET-window local
         // edit is still captured by this cycle's publish. LocalWrite never
@@ -2337,9 +2342,9 @@ internal class ReplicaSyncEngine(
     /**
      * Applies one bounded server page at a time. Normal incremental pulls
      * durably advance only after that page (including media materialization)
-     * succeeds; the authoritative pre-push phase of full resync publishes its
-     * cursor only after every page succeeds. Current-server `hasMore` and
-     * `familyName` envelope fields are mandatory at the HTTP boundary.
+     * succeeds. Reset-authority observations are durable before that checkpoint,
+     * while authority replacement waits for the complete walk. Current-server
+     * `hasMore` and `familyName` envelope fields are mandatory at the HTTP boundary.
      */
     private suspend fun pullAllPages(
         initial: SyncSession,
@@ -2353,6 +2358,30 @@ internal class ReplicaSyncEngine(
         reconcileLiveCensus: Boolean = false,
     ): SyncSession {
         var current = initial
+        val authorityJournal = resetReceiptJournal.takeIf {
+            initial.role == FamilyRole.Member && resetReceipt != null &&
+                initial.pullGeneration.isNotBlank()
+        }
+        // A full cycle may have no generation yet. Let pull's 409 establish it;
+        // unknown generation must not become durable authority evidence.
+        var memberAuthority = authorityJournal?.loadMemberAuthority(requireNotNull(resetReceipt))
+        if (authorityJournal != null &&
+            (memberAuthority?.generation != current.pullGeneration ||
+                current.pullCursor == 0L)
+        ) {
+            // A legacy receipt has no evidence for pages before its cursor.
+            // Rewalk using the ORIGINAL reset roots, preserving local intent.
+            // Reset the checkpoint before saving an empty observation set so a
+            // crash between stores cannot skip pages with no durable evidence.
+            if (current.pullCursor != 0L) {
+                preferences.updateCursor(0, generation = current.pullGeneration)
+                current = preferences.session.first()
+            }
+            val freshProgress = MemberAuthorityProgress(current.pullGeneration)
+            authorityJournal.saveMemberAuthority(requireNotNull(resetReceipt), freshProgress)
+            memberAuthority = freshProgress
+        }
+        val walkStart = current
         val authoritativeMemberAvatarPointers = if (reconcileMemberAvatars) {
             linkedMapOf<String, String?>()
         } else {
@@ -2371,7 +2400,7 @@ internal class ReplicaSyncEngine(
         // (reinstall, rejoin, device re-add, generation full resync) rewalks
         // every live rev, so prior attempt counts must not push keys past the
         // ceiling on the fresh pass — clear them and retry from zero.
-        val stallAttempts = if (initial.pullCursor == 0L) {
+        val stallAttempts = if (walkStart.pullCursor == 0L) {
             savePullStallAttempts(emptyMap())
             mutableMapOf<String, Int>()
         } else {
@@ -2438,6 +2467,21 @@ internal class ReplicaSyncEngine(
             noteAppliedPullRev(appliedRevByKey, pulled.entities, pageUnresolved)
             deferredUnresolved += pageUnresolved
             observedEntityKeys += pageKeys
+            memberAuthority?.let { progress ->
+                val observedBabies = pageKeys.mapNotNull { (type, uuid) ->
+                    uuid.takeIf { type == "baby" }
+                }
+                val next = progress.copy(babyClientUuids = progress.babyClientUuids + observedBabies)
+                if (next != progress) {
+                    // Room applies before this write; DataStore checkpoints after
+                    // it. Cancellation can replay a page, but cannot lose its seen set.
+                    requireNotNull(authorityJournal).saveMemberAuthority(
+                        requireNotNull(resetReceipt),
+                        next,
+                    )
+                    memberAuthority = next
+                }
+            }
             val pageUnresolvedKeys = pageUnresolved
                 .map { it.entity.type to it.entity.clientUuid }
                 .toSet()
@@ -2542,7 +2586,7 @@ internal class ReplicaSyncEngine(
                 .minOfOrNull { it.entity.rev }
             if (holdRev != null) {
                 val heldCursor = minOf(current.pullCursor, holdRev - 1)
-                    .coerceAtLeast(initial.pullCursor)
+                    .coerceAtLeast(walkStart.pullCursor)
                 if (heldCursor < current.pullCursor) {
                     current = current.copy(pullCursor = heldCursor)
                 }
@@ -2567,27 +2611,15 @@ internal class ReplicaSyncEngine(
             }
             cleanupUnownedStagedMedia(discardedPaths)
         }
-        if (initial.role == FamilyRole.Member && resetReceipt != null) {
-            val pulledBabyClientUuids = observedEntityKeys
-                .mapNotNull { (type, uuid) -> uuid.takeIf { type == "baby" } }
-                .toSet()
-            // An already-caught-up restart (cursor at tip, empty page) must not
-            // treat zero observed keys as "the family has no babies".
-            val replacementProgress = pulledBabyClientUuids.isNotEmpty() ||
-                pullCheckpointChanged(
-                    initial,
-                    current.pullCursor,
-                    current.pullGeneration,
-                    observedFamilyName,
-                )
-            if (replacementProgress) {
-                revokeMemberAuthorityOutside(pulledBabyClientUuids)
-            }
+        memberAuthority?.let { progress ->
+            // The set covers all checkpointed pages of this reset generation,
+            // including earlier cycles and a restart after the final checkpoint.
+            revokeMemberAuthorityOutside(progress.babyClientUuids)
         }
         if (
             (deferCursorUntilComplete || deferredUnresolved.isNotEmpty()) &&
                 pullCheckpointChanged(
-                    initial,
+                    walkStart,
                     current.pullCursor,
                     current.pullGeneration,
                     observedFamilyName,
@@ -2612,8 +2644,8 @@ internal class ReplicaSyncEngine(
             // comparison may reuse the cached entries.
             val zeroApplicationRound = observedEntityKeys.isEmpty() &&
                 deferredUnresolved.isEmpty() &&
-                current.pullCursor == initial.pullCursor &&
-                current.pullGeneration == initial.pullGeneration
+                current.pullCursor == walkStart.pullCursor &&
+                current.pullGeneration == walkStart.pullGeneration
             current = reconcileLiveCensusAtHead(
                 current,
                 headCensus,

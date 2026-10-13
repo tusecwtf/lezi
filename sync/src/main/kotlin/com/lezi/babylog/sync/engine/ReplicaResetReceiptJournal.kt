@@ -3,7 +3,6 @@ package com.lezi.babylog.sync.engine
 import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
 import com.lezi.babylog.sync.session.FamilySessionReplica
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -24,16 +23,39 @@ import kotlinx.serialization.json.put
 internal class ReplicaResetReceiptJournal(
     private val cache: ConflictSnapshotCacheDao,
 ) {
-    suspend fun load(): FamilySessionReplica.ResetReceipt? =
+    private suspend fun loadState(): ReplicaResetState? =
         cache.getTransportJournal(REPLICA_RESET_RECEIPT_KEY)?.let { row ->
             decodeReplicaResetReceipt(row.payloadJson)
         }
 
+    suspend fun load(): FamilySessionReplica.ResetReceipt? = loadState()?.receipt
+
     suspend fun replace(receipt: FamilySessionReplica.ResetReceipt) {
+        persist(ReplicaResetState(receipt))
+    }
+
+    suspend fun loadMemberAuthority(
+        receipt: FamilySessionReplica.ResetReceipt,
+    ): MemberAuthorityProgress? = requireCurrent(receipt).memberAuthority
+
+    suspend fun saveMemberAuthority(
+        receipt: FamilySessionReplica.ResetReceipt,
+        progress: MemberAuthorityProgress,
+    ) {
+        persist(requireCurrent(receipt).copy(memberAuthority = progress))
+    }
+
+    private suspend fun requireCurrent(
+        receipt: FamilySessionReplica.ResetReceipt,
+    ): ReplicaResetState = requireNotNull(loadState()).also {
+        require(it.receipt == receipt) { "replica reset receipt changed during recovery" }
+    }
+
+    private suspend fun persist(state: ReplicaResetState) {
         cache.putTransportJournal(
             journalKey = REPLICA_RESET_RECEIPT_KEY,
-            payloadJson = encodeReplicaResetReceipt(receipt),
-            contentEpoch = receipt.roots.maxOfOrNull(FamilySessionReplica.ResetRoot::contentEpoch)
+            payloadJson = encodeReplicaResetReceipt(state),
+            contentEpoch = state.receipt.roots.maxOfOrNull(FamilySessionReplica.ResetRoot::contentEpoch)
                 ?: 0L,
         )
     }
@@ -45,12 +67,43 @@ internal class ReplicaResetReceiptJournal(
     }
 }
 
-private const val REPLICA_RESET_RECEIPT_KEY = "replica-reset-receipt:current"
-private const val REPLICA_RESET_RECEIPT_SCHEMA = 1
+/** Independent of the immutable reset roots used to preserve in-flight local intent. */
+internal data class MemberAuthorityProgress(
+    val generation: String,
+    val babyClientUuids: Set<String> = emptySet(),
+) {
+    init {
+        require(generation.isNotBlank()) { "replica reset authority generation is blank" }
+    }
+}
 
-private fun encodeReplicaResetReceipt(receipt: FamilySessionReplica.ResetReceipt): String =
+private data class ReplicaResetState(
+    val receipt: FamilySessionReplica.ResetReceipt,
+    // Null also represents a schema-1 journal: its already-checkpointed pages are unknown.
+    val memberAuthority: MemberAuthorityProgress? = null,
+)
+
+private const val REPLICA_RESET_RECEIPT_KEY = "replica-reset-receipt:current"
+private const val REPLICA_RESET_RECEIPT_SCHEMA = 2
+
+private fun encodeReplicaResetReceipt(state: ReplicaResetState): String =
     buildJsonObject {
+        val receipt = state.receipt
         put("schema", REPLICA_RESET_RECEIPT_SCHEMA)
+        put(
+            "member_authority",
+            state.memberAuthority?.let { progress ->
+                buildJsonObject {
+                    put("generation", progress.generation)
+                    put(
+                        "baby_client_uuids",
+                        buildJsonArray {
+                            progress.babyClientUuids.sorted().forEach { add(JsonPrimitive(it)) }
+                        },
+                    )
+                }
+            } ?: JsonNull,
+        )
         put("previous_family_id", receipt.previousFamilyId)
         put("previous_membership_id", receipt.previousMembershipId)
         put("previous_device_id", receipt.previousDeviceId)
@@ -83,9 +136,13 @@ private fun encodeReplicaResetReceipt(receipt: FamilySessionReplica.ResetReceipt
         )
     }.toString()
 
-private fun decodeReplicaResetReceipt(encoded: String): FamilySessionReplica.ResetReceipt {
+private fun decodeReplicaResetReceipt(encoded: String): ReplicaResetState {
     val root = Json.parseToJsonElement(encoded).jsonObject
-    root.requireExactKeys(
+    val schema = root.getValue("schema").jsonPrimitive.long
+    require(schema == 1L || schema == REPLICA_RESET_RECEIPT_SCHEMA.toLong()) {
+        "unsupported replica reset receipt schema"
+    }
+    val receiptKeys = arrayOf(
         "schema",
         "previous_family_id",
         "previous_membership_id",
@@ -94,8 +151,19 @@ private fun decodeReplicaResetReceipt(encoded: String): FamilySessionReplica.Res
         "recovery_target",
         "roots",
     )
-    require(root.getValue("schema").jsonPrimitive.long == REPLICA_RESET_RECEIPT_SCHEMA.toLong()) {
-        "unsupported replica reset receipt schema"
+    root.requireExactKeys(*(if (schema == 1L) receiptKeys else receiptKeys + "member_authority"))
+    val memberAuthority = if (schema == 1L || root["member_authority"] is JsonNull) {
+        null
+    } else {
+        val progress = root.getValue("member_authority").jsonObject
+        progress.requireExactKeys("generation", "baby_client_uuids")
+        val babyClientUuids = progress.getValue("baby_client_uuids").jsonArray.map {
+            it.jsonPrimitive.content.also { uuid -> require(uuid.isNotBlank()) }
+        }
+        require(babyClientUuids.distinct().size == babyClientUuids.size) {
+            "replica reset authority contains duplicate babies"
+        }
+        MemberAuthorityProgress(progress.requiredString("generation"), babyClientUuids.toSet())
     }
     val target = root.getValue("recovery_target").let { value ->
         if (value is JsonNull) {
@@ -128,7 +196,7 @@ private fun decodeReplicaResetReceipt(encoded: String): FamilySessionReplica.Res
     require(roots.map { it.entityType to it.clientUuid }.distinct().size == roots.size) {
         "replica reset receipt contains duplicate roots"
     }
-    return FamilySessionReplica.ResetReceipt(
+    val receipt = FamilySessionReplica.ResetReceipt(
         previousFamilyId = root.rawString("previous_family_id"),
         previousMembershipId = root.rawString("previous_membership_id"),
         previousDeviceId = root.rawString("previous_device_id"),
@@ -136,6 +204,7 @@ private fun decodeReplicaResetReceipt(encoded: String): FamilySessionReplica.Res
         recoveryTarget = target,
         roots = roots,
     )
+    return ReplicaResetState(receipt, memberAuthority)
 }
 
 private fun JsonObject.requireExactKeys(vararg expected: String) {
