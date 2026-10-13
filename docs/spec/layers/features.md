@@ -22,6 +22,9 @@
 **feature 互不依赖**（architecture §2）：log↔timer 协作仅经 `core:model` 的
 `TimerHandoffSeed` + composition root（app 壳）；完成写记录经 domain。
 
+升级保留媒体的内容身份由 `RetainedMediaDigest.kt` 读取同一个已打开流，使用有界 buffer
+计算 sha256；空内容和中途读取失败仍阻断升级，不先把整张照片读入内存。
+
 ## 2. `:core:ui` 跨 feature 共享 UI 逻辑
 
 | seam | 锚点 | 职责 |

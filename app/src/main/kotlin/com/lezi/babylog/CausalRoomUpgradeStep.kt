@@ -12,7 +12,6 @@ import com.lezi.babylog.core.database.causal.MediaReferenceHolderKind
 import com.lezi.babylog.core.database.mediaAssetOwnerTriggerSql
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
-import java.security.MessageDigest
 import javax.inject.Inject
 
 /**
@@ -610,12 +609,9 @@ internal class CausalRoomUpgradeStep internal constructor(
                 LocalDataUpgradeBlockReason.InconsistentData,
                 "无法读取 sleep 媒体字节以计算 wire §11 sha256: $localUri",
             )
-        val bytes = file.readBytes()
-        check(bytes.isNotEmpty()) {
-            "sleep 媒体字节为空，无法计算 wire §11 sha256: $localUri"
+        return file.inputStream().use { input ->
+            retainedMediaSha256(input, localUri)
         }
-        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
-        return digest.joinToString("") { b -> "%02x".format(b) }
     }
 
     private fun resolveLocalMediaFile(localUri: String): File? {

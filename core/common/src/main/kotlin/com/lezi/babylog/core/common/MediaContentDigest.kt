@@ -11,7 +11,11 @@ object MediaContentDigest {
     fun newHasher(): MessageDigest = MessageDigest.getInstance("SHA-256")
 
     fun hex(bytes: ByteArray): String = buildString(bytes.size * 2) {
-        bytes.forEach { byte -> append("%02x".format(byte)) }
+        bytes.forEach { byte ->
+            val unsigned = byte.toInt() and 0xff
+            append(HEX_DIGITS[unsigned ushr 4])
+            append(HEX_DIGITS[unsigned and 0x0f])
+        }
     }
 
     fun finish(hasher: MessageDigest): String = hex(hasher.digest())
@@ -48,4 +52,6 @@ object MediaContentDigest {
         require(HEX.matches(sha256)) { "media sha256 must be 64 lowercase hex" }
         return sha256
     }
+
+    private const val HEX_DIGITS = "0123456789abcdef"
 }

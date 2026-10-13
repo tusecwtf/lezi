@@ -58,6 +58,48 @@ class ReplicaSyncEnginePersistMediaSha256Test {
     }
 
     @Test
+    fun laterDownloadForSameUuidUsesItsOwnBytesDigest() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 1)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee12"
+        rig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = babyUuid,
+                syncDirty = false,
+                familyAuthority = true,
+                baseVersion = "v-baby",
+            ),
+        )
+        val recordUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee13"
+        val mediaUuid = "11111111-1111-4111-8111-111111111112"
+        for ((index, bytesAndDigest) in listOf(
+            byteArrayOf(1, 2, 3, 4) to KNOWN_BYTES_1234_SHA256,
+            byteArrayOf(8, 6, 7, 5) to KNOWN_BYTES_8675_SHA256,
+        ).withIndex()) {
+            val (bytes, expectedDigest) = bytesAndDigest
+            rig.backend.mediaBytes = bytes
+            rig.backend.nextPull = PullResult(
+                entities = listOf(
+                    remoteReplicaRecord(recordUuid, babyClientUuid = babyUuid),
+                    remoteReplicaMedia(mediaUuid, recordUuid).copy(updatedAt = 210L + index),
+                ),
+                cursor = 2L + index,
+                generation = session.pullGeneration,
+                hasMore = false,
+            )
+
+            rig.engine.synchronize(rig.preferences.current(), SyncTrigger.PullToRefresh)
+
+            val stored = requireNotNull(rig.media.getByClientUuid(mediaUuid))
+            assertThat(stored.sha256).isEqualTo(expectedDigest)
+            assertThat(stored.byteSize).isEqualTo(bytes.size.toLong())
+            assertThat(stored.syncDirty).isFalse()
+            assertThat(rig.preferences.current().pullCursor).isEqualTo(2L + index)
+        }
+        assertThat(rig.backend.mediaGets).containsExactly(mediaUuid, mediaUuid)
+    }
+
+    @Test
     fun historicalDownloadSuccessPersistsKnownSha256() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 4)
         val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }

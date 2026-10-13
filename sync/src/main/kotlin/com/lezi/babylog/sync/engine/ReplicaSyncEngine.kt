@@ -1751,7 +1751,7 @@ internal class ReplicaSyncEngine(
                         requireForegroundCycleBudgetRemaining()
                         val identity = item.expected
                         val bytes = backend.getMedia(session, item.entity.clientUuid)
-                        requireDownloadedMatchesExpected(bytes, identity)
+                        val digest = requireDownloadedMatchesExpected(bytes, identity)
                         val localUri = mediaFiles.saveDownloaded(
                             item.entity.clientUuid,
                             item.wire.kind,
@@ -1760,8 +1760,7 @@ internal class ReplicaSyncEngine(
                         )
                         StagedLogMedia(
                             localUri = localUri,
-                            sha256 = identity?.sha256
-                                ?: MediaContentDigest.ofBytes(bytes),
+                            sha256 = digest,
                             byteSize = bytes.size.toLong(),
                         )
                     }
