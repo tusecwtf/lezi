@@ -579,6 +579,7 @@ class RealSyncPortClearResyncTest {
                 pullGeneration = "old-generation",
             ),
         )
+        rig.awaitStartupRecovery()
         rig.babies.seed(
             localBaby().copy(
                 clientUuid = "baby-page-one",
@@ -631,18 +632,25 @@ class RealSyncPortClearResyncTest {
                 hasMore = true,
             ),
         )
-        rig.backend.pullResults.add(
-            PullResult(
-                entities = emptyList(),
-                cursor = 1,
-                generation = "new-generation",
-                hasMore = true,
-            ),
+        // Keep returning the stalled page during automatic foreground retries;
+        // an exhausted response queue would otherwise invent a successful empty head.
+        rig.backend.nextPull = PullResult(
+            entities = emptyList(),
+            cursor = 1,
+            generation = "new-generation",
+            hasMore = true,
         )
 
-        rig.port.sync(SyncTrigger.PullToRefresh)
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        withContext(Dispatchers.IO) {
+            withTimeout(5_000) { rig.port.status().first { it == SyncStatus.Error } }
+        }
         assertThat(rig.port.lastFailureKind().first())
             .isNotEqualTo(com.lezi.babylog.core.common.failure.FailureKind.InvalidInput)
+        assertThat(rig.port.lastFailureKind().first())
+            .isEqualTo(com.lezi.babylog.core.common.failure.FailureKind.HouseholdStateChanged)
+        assertThat(rig.backend.pullCount).isGreaterThan(3)
+        assertThat(rig.backend.causalCommittedUnits).isEmpty()
 
         val unseen = requireNotNull(rig.babies.getByClientUuid("baby-page-two"))
         assertThat(unseen.avatarMediaUuid).isEqualTo("avatar-page-two")
@@ -659,6 +667,7 @@ class RealSyncPortClearResyncTest {
                 pullGeneration = "old-generation",
             ),
         )
+        rig.awaitStartupRecovery()
         rig.backend.pullFailures.add(
             SyncHttpException(
                 statusCode = 409,
@@ -682,18 +691,24 @@ class RealSyncPortClearResyncTest {
                 hasMore = true,
             ),
         )
-        rig.backend.pullResults.add(
-            PullResult(
-                entities = emptyList(),
-                cursor = 1,
-                generation = "new-generation",
-                hasMore = true,
-            ),
+        // Model a page that remains failed until the continuation budget is spent.
+        rig.backend.nextPull = PullResult(
+            entities = emptyList(),
+            cursor = 1,
+            generation = "new-generation",
+            hasMore = true,
         )
 
-        rig.port.sync(SyncTrigger.PullToRefresh)
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        withContext(Dispatchers.IO) {
+            withTimeout(5_000) { rig.port.status().first { it == SyncStatus.Error } }
+        }
         assertThat(rig.port.lastFailureKind().first())
             .isNotEqualTo(com.lezi.babylog.core.common.failure.FailureKind.InvalidInput)
+        assertThat(rig.port.lastFailureKind().first())
+            .isEqualTo(com.lezi.babylog.core.common.failure.FailureKind.HouseholdStateChanged)
+        assertThat(rig.backend.pullCount).isGreaterThan(3)
+        assertThat(rig.backend.causalCommittedUnits).isEmpty()
 
         assertThat(rig.babies.getByClientUuid("baby-remote")).isNotNull()
         assertThat(rig.preferences.current().pullCursor).isEqualTo(1)
