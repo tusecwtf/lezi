@@ -23,6 +23,12 @@ status: accepted
   领域真相；envelope 不是第二份可编辑事实、事件日志或通用 outbox。
 - 0.3.13 source runtime 只服务升级源，绝不是 0.4.0 dual-read/downgrade。`authoritative_reconcile_v1` 普通发表路径已删除。
 - replica-reset receipt 与五类 root 的 pending capture/requeue 同一 Room 事务写入，恢复成功即删除，不进入冲突收件箱，也不是产品事实、事件日志或通用 outbox。
+  Member 全量恢复的同一 reset/generation 累计已见 Baby 集合也保存在该本地 journal 中：每页
+  apply 后先持久化已见集合，再发布该页 cursor；跨轮或进程重启继续合并，完整到达 head 后才
+  撤销真正未见 Baby 的 authority。全量 pull 未完成时的失败或取消保留恢复边界，不进入 reset
+  派生 pending rows 的发表阶段。
+  旧 schema-1 receipt 不含已见集合，须保留原 reset roots 从 cursor 0 重建，不能从当前 dirty
+  状态推断已应用页；新代际或家庭边界不沿用旧集合。这是客户端 journal 的恢复规则，不改变 wire 合同。
 
 ## 决策
 
