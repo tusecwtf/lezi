@@ -61,6 +61,55 @@ jobs:
           test -x "$GITHUB_WORKSPACE/tools/lezi-sync/target/debug/lezi-sync"
 
       - name: Unit tests
+        id: unit_tests
+        shell: bash
         env:
           LEZI_SYNC_BIN: ${{ github.workspace }}/tools/lezi-sync/target/debug/lezi-sync
-        run: ./gradlew test --stacktrace --info --no-daemon
+        run: |
+          set -o pipefail
+          ./gradlew test --stacktrace --info --no-daemon 2>&1 | tee "$RUNNER_TEMP/android-unit-tests.log"
+
+      - name: Summarize unit test diagnostics
+        if: always()
+        env:
+          UNIT_TEST_OUTCOME: ${{ steps.unit_tests.outcome }}
+        run: |
+          python3 - <<'PY'
+          import html
+          import os
+          from pathlib import Path
+          import re
+
+          log = Path(os.environ["RUNNER_TEMP"]) / "android-unit-tests.log"
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
+              summary.write("## Android unit test diagnostics\n\n")
+              summary.write(f"Unit tests: {os.environ['UNIT_TEST_OUTCOME']}.\n\n")
+              summary.write("The upload step below collects the full Gradle log and any generated JUnit XML/HTML reports as android-unit-test-diagnostics (3-day retention).\n\n")
+              if not log.is_file():
+                  summary.write("No Gradle log was created; the unit test step may not have started.\n")
+              else:
+                  lines = log.read_text(errors="replace").splitlines()
+                  failure = re.compile(r"(^FAILURE:|\bFAILED\b|^e: |^error: |Execution failed for task|Caused by:)")
+                  hits = [i for i, line in enumerate(lines) if failure.search(line)][:20]
+                  selected = set()
+                  for i in hits:
+                      selected.update(range(max(0, i - 3), min(len(lines), i + 9)))
+                  if not selected:
+                      selected.update(range(max(0, len(lines) - 60), len(lines)))
+                  excerpt = "\n".join(f"{i + 1}: {lines[i]}" for i in sorted(selected))
+                  excerpt = html.escape(excerpt).encode("utf-8")[:24000].decode("utf-8", errors="ignore")
+                  summary.write("Excerpt: first 20 failure markers with context, or the last 60 lines if none match; capped at 24,000 bytes.\n\n")
+                  summary.write(f"<pre>{excerpt}</pre>\n")
+          PY
+
+      - name: Upload unit test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-unit-test-diagnostics
+          path: |
+            ${{ runner.temp }}/android-unit-tests.log
+            **/build/test-results/**/*.xml
+            **/build/reports/tests/**
+          if-no-files-found: warn
+          retention-days: 3
