@@ -90,6 +90,34 @@ class HttpSyncBackendMediaStreamSeamTest {
     }
 
     @Test
+    fun emptySuccessfulMediaBodyReturnsZeroByteReceiptForCompletionPolicy() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val responder = thread(name = "lezi-media-empty-stream") {
+            runCatching {
+                server.accept().use { socket ->
+                    readRequest(socket)
+                    socket.getOutputStream().use { output ->
+                        output.write(("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n" +
+                            "Connection: close\r\n\r\n").toByteArray(Charsets.US_ASCII))
+                    }
+                }
+            }
+        }
+        try {
+            val sink = ByteArrayOutputStream()
+            val receipt = loopbackBackend().downloadMedia(
+                testSession(server).copy(serverScheme = "http"), MEDIA_UUID, sink,
+            )
+            assertThat(receipt.byteCount).isEqualTo(0)
+            assertThat(receipt.sha256).isEqualTo(sha256Hex(byteArrayOf()))
+            assertThat(sink.size()).isEqualTo(0)
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
     fun overCapMediaStreamAbortsOnCumulativeBytesAndStagingCleansUp() = runTest {
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
         // No Content-Length: close-delimited body. Only the cumulative byte

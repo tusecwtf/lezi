@@ -1107,6 +1107,7 @@ class RealSyncPortAtomicMediaTest {
 
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
 
+        assertThat(rig.conflictDetails.getTransportJournal("media-save-failed:$mediaUuid")).isNotNull()
         assertThat(rig.preferences.current().pullCursor).isEqualTo(43)
         assertThat(rig.preferences.current().pullGeneration)
             .isEqualTo("current-generation")

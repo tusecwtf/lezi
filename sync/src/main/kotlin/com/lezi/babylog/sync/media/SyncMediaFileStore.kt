@@ -388,6 +388,7 @@ private class BufferedMediaDownloadTarget(
     private var localUri: String? = null
 
     override suspend fun complete(receipt: MediaDownloadReceipt): String {
+        require(receipt.byteCount > 0) { "家庭服务器返回了空媒体" }
         check(receipt.byteCount == output.size().toLong()) { "下载媒体长度与流式回执不符" }
         return store.saveDownloaded(clientUuid, kind, output.toByteArray(), mime).also { localUri = it }
     }

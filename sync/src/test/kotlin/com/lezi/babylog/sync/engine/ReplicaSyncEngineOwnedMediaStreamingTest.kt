@@ -387,6 +387,67 @@ class ReplicaSyncEngineOwnedMediaStreamingTest {
         assertThat(rig.conflictDetails.getTransportJournal("media-save-failed:$MEDIA_A")).isNull()
     }
 
+    @Test fun emptyHistoricalStreamRetainsRetryJournalWithoutBlockingAcceptedPullPage() = runTest {
+        val files = OwnedFiles(temporary.root)
+        val backend = StreamingBackend()
+        val rig = newRig(files, backend)
+        seedHistorical(rig, MEDIA_A)
+        val historical = requireNotNull(rig.media.getByClientUuid(MEDIA_A))
+        rig.media.update(historical.copy(sha256 = null))
+        backend.nextPull = PullResult(emptyList(), cursor = 5, generation = session.pullGeneration, hasMore = false)
+        backend.stream = { _, _ -> MediaDownloadReceipt(MediaContentDigest.ofBytes(byteArrayOf()), 0) }
+
+        assertThat(rig.engine.synchronize(session, SyncTrigger.Foreground))
+            .isEqualTo(ReplicaSyncOutcome.Synchronized)
+
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(5)
+        assertThat(rig.media.getByClientUuid(MEDIA_A)?.localUri).isEmpty()
+        assertThat(rig.media.listMissingLocalBytes().map { it.clientUuid }).containsExactly(MEDIA_A)
+        assertThat(rig.conflictDetails.getTransportJournal("media-save-failed:$MEDIA_A")).isNotNull()
+        assertThat(mediaFiles()).isEmpty()
+        assertThat(ownerMarkers()).isEmpty()
+
+        backend.stream = { _, output -> output.write(bytes); receipt() }
+        rig.engine.synchronize(rig.preferences.current(), SyncTrigger.PullToRefresh)
+        val adopted = requireNotNull(rig.media.getByClientUuid(MEDIA_A))
+        assertThat(File(adopted.localUri).readBytes()).isEqualTo(bytes)
+        assertThat(rig.conflictDetails.getTransportJournal("media-save-failed:$MEDIA_A")).isNull()
+    }
+
+    @Test fun emptyHistoricalStreamStillFailsWhenItViolatesPinnedContentIdentity() = runTest {
+        val files = OwnedFiles(temporary.root)
+        val backend = StreamingBackend()
+        val rig = newRig(files, backend)
+        seedHistorical(rig, MEDIA_A)
+        backend.stream = { _, _ -> MediaDownloadReceipt(MediaContentDigest.ofBytes(byteArrayOf()), 0) }
+
+        val failure = runCatching { rig.engine.synchronize(session, SyncTrigger.Foreground) }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(failure).hasMessageThat().contains("本机内容身份不符")
+        assertThat(rig.media.getByClientUuid(MEDIA_A)?.localUri).isEmpty()
+        assertThat(rig.conflictDetails.getTransportJournal("media-save-failed:$MEDIA_A")).isNull()
+        assertThat(mediaFiles()).isEmpty()
+        assertThat(ownerMarkers()).isEmpty()
+    }
+
+    @Test fun emptyStreamCannotPublishAtomicPageOrAdvanceCursor() = runTest {
+        val files = OwnedFiles(temporary.root)
+        val backend = StreamingBackend()
+        val rig = newRig(files, backend)
+        backend.nextPull = PullResult(page(), cursor = 5, generation = session.pullGeneration, hasMore = false)
+        backend.stream = { _, _ -> MediaDownloadReceipt(MediaContentDigest.ofBytes(byteArrayOf()), 0) }
+
+        val failure = runCatching { rig.engine.synchronize(session, SyncTrigger.Foreground) }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(4)
+        assertThat(rig.records.getByClientUuid(RECORD)).isNull()
+        assertThat(rig.media.getByClientUuid(MEDIA_A)).isNull()
+        assertThat(mediaFiles()).isEmpty()
+        assertThat(ownerMarkers()).isEmpty()
+    }
+
     @Test fun pendingCleanupFailureDoesNotBlockMediaFreeBootstrapAndIsRetriedBeforeDownload() = runTest {
         val oldStore = OwnedMediaDownloadStore(temporary.root)
         oldStore.begin(MEDIA_B, "log", "image/jpeg").apply { output.write(bytes); close() }

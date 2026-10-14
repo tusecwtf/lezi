@@ -1977,7 +1977,8 @@ internal class ReplicaSyncEngine(
         expected: MediaContentIdentity?,
     ): String {
         val digest = MediaContentDigest.requireValid(receipt.sha256)
-        require(receipt.byteCount > 0) { "家庭服务器返回了空媒体" }
+        // Completion rejects unusable bytes. Keep identity mismatches here fatal,
+        // while historical completion failures remain queued under the save-failed policy.
         if (expected != null) {
             require(digest == expected.sha256 && receipt.byteCount == expected.byteSize) {
                 when (expected.origin) {

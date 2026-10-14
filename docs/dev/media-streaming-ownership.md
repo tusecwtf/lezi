@@ -28,6 +28,11 @@ round entry recover best-effort; a real new download retries recovery and fails 
 if it still cannot complete. Media-free convergence is not blocked by a stale cleanup
 failure. Historical local sink/complete failures retain the existing save-failed journal;
 content mismatch, authentication, trust and network failures keep their previous meanings.
+Zero-byte responses are rejected at target completion: an unpinned historical attachment
+stays queued with its save-failed journal while an already accepted pull page may advance.
+The same rejection aborts a new atomic page before publication. A historical response that
+violates a pinned digest/size still fails the cycle before completion; no integrity,
+authentication, deadline, or transport failure is downgraded to a successful repair.
 
 A crash between exclusive mkdir and marker creation can leave an empty directory, never
 media bytes. Once the marker is durable, a restart can reclaim a partial/complete orphan
