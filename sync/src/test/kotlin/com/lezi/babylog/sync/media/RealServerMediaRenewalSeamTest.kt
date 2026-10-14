@@ -34,6 +34,10 @@ class RealServerMediaRenewalSeamTest {
             fixture.session = ownerSession.copy(pullCursor = fixture.preferences.current().pullCursor)
             fixture.preferences.saveSession(fixture.session)
             assertThat(fixture.session.membershipId).isNotEqualTo(uploaderMembership)
+            // LocalWrite settles the upload but does not pull its published remote receipt.
+            // Establish the owner's actual published-content identity through the normal pull.
+            fixture.newEngine().synchronize(fixture.session, SyncTrigger.PullToRefresh)
+            fixture.session = fixture.preferences.current()
             val record = requireNotNull(fixture.records.getByClientUuid(seeded.recordUuid))
             val asset = fixture.media.listForRecord(record.id).single()
             assertThat(asset.remoteUri).isNotNull()
