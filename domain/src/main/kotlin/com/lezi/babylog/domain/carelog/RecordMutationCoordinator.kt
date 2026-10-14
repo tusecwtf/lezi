@@ -1,5 +1,8 @@
 package com.lezi.babylog.domain.carelog
 import com.lezi.babylog.core.common.newClientUuid
+import com.lezi.babylog.core.common.diagnostics.CareLatencyDiagnostics
+import com.lezi.babylog.core.common.diagnostics.CareLatencyOperation
+import com.lezi.babylog.core.common.diagnostics.CareLatencyStage
 import com.lezi.babylog.core.common.uuidV5
 import com.lezi.babylog.core.database.BabyEntity
 import com.lezi.babylog.core.database.CarePlanDao
@@ -100,6 +103,20 @@ internal class RecordMutationCoordinator(
     private val requestLocalSync: () -> Unit,
     private val wakeObservations: WakeObservationCoordinator,
 ) {
+    private suspend fun <T> measuredRecordTransaction(
+        operation: CareLatencyOperation,
+        mediaCount: Int,
+        block: suspend () -> T,
+    ): T = CareLatencyDiagnostics.measure(
+        stage = CareLatencyStage.LOCAL_TRANSACTION,
+        operation = operation,
+        mediaCount = mediaCount,
+        // This record command may also mutate Wake roots; total causal root count is unknown here.
+        rootCount = -1,
+    ) {
+        transactionRunner.run(block)
+    }
+
     suspend fun addRecord(
         babyId: Long,
         type: RecordType,
@@ -144,7 +161,7 @@ internal class RecordMutationCoordinator(
             val contentDigests = photoAttachmentReconciler.digestReadablePaths(photos)
             if (type == RecordType.SLEEP && endTimestamp == null) {
                 sleepMutationMutex.withLock {
-                    transactionRunner.run {
+                    measuredRecordTransaction(CareLatencyOperation.CREATE_RECORD, photos.size) {
                         val existing = recordDao.getByClientUuid(clientUuid)
                         if (existing != null) {
                             check(existing.deletedAt == null) {
@@ -153,7 +170,7 @@ internal class RecordMutationCoordinator(
                             require(existing.babyId == babyId && existing.type == type.key) {
                                 "记录写入标识与既有记录冲突"
                             }
-                            return@run existing.id
+                            return@measuredRecordTransaction existing.id
                         }
                         requireActiveBaby(babyId)
                         if (hasOpenSleep(babyId)) {
@@ -170,7 +187,7 @@ internal class RecordMutationCoordinator(
                     }
                 }
             } else {
-                transactionRunner.run {
+                measuredRecordTransaction(CareLatencyOperation.CREATE_RECORD, photos.size) {
                     val existing = recordDao.getByClientUuid(clientUuid)
                     if (existing != null) {
                         check(existing.deletedAt == null) {
@@ -179,7 +196,7 @@ internal class RecordMutationCoordinator(
                         require(existing.babyId == babyId && existing.type == type.key) {
                             "记录写入标识与既有记录冲突"
                         }
-                        return@run existing.id
+                        return@measuredRecordTransaction existing.id
                     }
                     requireActiveBaby(babyId)
                     val inserted = insertRecord(record)
@@ -222,8 +239,8 @@ internal class RecordMutationCoordinator(
         ) {
             val contentDigests = photoAttachmentReconciler.digestReadablePaths(photos.orEmpty())
             sleepMutationMutex.withLock {
-                transactionRunner.run {
-                    val existing = recordDao.get(id) ?: return@run emptySet<String>()
+                measuredRecordTransaction(CareLatencyOperation.EDIT_RECORD, photos?.size ?: -1) {
+                    val existing = recordDao.get(id) ?: return@measuredRecordTransaction emptySet<String>()
                     val canManage = actorCanManageRecord(existing)
                     if (!canManage) {
                         throw RecordPermissionException()

@@ -516,6 +516,10 @@ class CareLogRealServerSeamResourceSaturationTest {
         val listProcess = ProcessBuilder(
             "sqlite3",
             "-json",
+            // The live server keeps writing this DB; reads wait out transient
+            // write locks instead of treating them as terminal failures.
+            "-cmd",
+            ".timeout 5000",
             db.absolutePath,
             "SELECT mutation_id, receipt_json, conflict_id FROM mutation_receipts " +
                 "WHERE membership_id='__conflict_retention_v2__' " +
@@ -568,6 +572,9 @@ class CareLogRealServerSeamResourceSaturationTest {
                     "AND mutation_id='$escapedOld';"
             val update = ProcessBuilder(
                 "sqlite3",
+                // Same transient write-lock window as the reads above.
+                "-cmd",
+                ".timeout 5000",
                 db.absolutePath,
                 sql,
             ).redirectErrorStream(true).start()

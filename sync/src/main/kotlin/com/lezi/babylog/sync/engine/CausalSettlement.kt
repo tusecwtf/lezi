@@ -1,4 +1,10 @@
 package com.lezi.babylog.sync.engine
+import com.lezi.babylog.core.common.diagnostics.CareLatencyDiagnostics
+import com.lezi.babylog.core.common.diagnostics.CareLatencyOperation
+import com.lezi.babylog.core.common.diagnostics.CareLatencyOutcome
+import com.lezi.babylog.core.common.diagnostics.CareLatencySpan
+import com.lezi.babylog.core.common.diagnostics.CareLatencyStage
+import kotlinx.coroutines.CancellationException
 
 import com.lezi.babylog.core.common.MediaContentDigest
 import com.lezi.babylog.core.database.BabyDao
@@ -285,7 +291,9 @@ internal class CausalSettlement(
         frozen: List<FrozenCausalUnit>,
         localFrozenProof: Boolean,
     ) {
-        stageCausalMediaPreimages(session, frozen)
+        measuredCausalBatch(CareLatencyStage.MEDIA_RECEIPTS, frozen) {
+            stageCausalMediaPreimages(session, frozen)
+        }
         frozen.filter { it.mutation.media.isNotEmpty() }.forEach { unit ->
             requireNotNull(mediaSettlementJournal) {
                 "causal media commit requires durable settlement journal"
@@ -293,7 +301,9 @@ internal class CausalSettlement(
         }
         requireRemoteAllowed(session)
         val commit = try {
-            backend.causalCommit(session, frozen.map(FrozenCausalUnit::mutation))
+            measuredCausalBatch(CareLatencyStage.COMMIT_ROUND_TRIP, frozen) {
+                backend.causalCommit(session, frozen.map(FrozenCausalUnit::mutation))
+            }
         } catch (failure: Throwable) {
             val rejected = failure as? CausalCommitRejectedException
                 ?: (failure.cause as? CausalCommitRejectedException)
@@ -302,20 +312,31 @@ internal class CausalSettlement(
             }
             throw failure
         }
-        validateCausalProof(
-            session = session,
-            frozen = frozen,
-            batch = commit,
-            localFrozenProof = localFrozenProof,
-        )
+        val proofSpan = causalBatchSpan(CareLatencyStage.PROOF_VALIDATION, frozen)
+        try {
+            validateCausalProof(
+                session = session,
+                frozen = frozen,
+                batch = commit,
+                localFrozenProof = localFrozenProof,
+            )
+            proofSpan?.finish(commit.diagnosticOutcome())
+        } catch (failure: Throwable) {
+            proofSpan?.finish(
+                if (failure is CancellationException) CareLatencyOutcome.CANCELLED else CareLatencyOutcome.FAILED,
+            )
+            throw failure
+        }
         val commitByMutation = commit.results.associateBy(CausalCommitUnitResult::mutationId)
-        transactionRunner.run {
-            for (unit in frozen) {
-                applyCommitFirstResult(
-                    unit,
-                    commitByMutation.getValue(unit.mutation.mutationId),
-                    commit.generation,
-                )
+        measuredCausalBatch(CareLatencyStage.LOCAL_SETTLEMENT, frozen) {
+            transactionRunner.run {
+                for (unit in frozen) {
+                    applyCommitFirstResult(
+                        unit,
+                        commitByMutation.getValue(unit.mutation.mutationId),
+                        commit.generation,
+                    )
+                }
             }
         }
         frozen.forEach { unit ->
@@ -326,6 +347,43 @@ internal class CausalSettlement(
             ) {
                 mediaSettlementJournal?.finishCleanup(unit.mutation.mutationId)
             }
+        }
+    }
+
+    private fun causalBatchSpan(stage: CareLatencyStage, frozen: List<FrozenCausalUnit>): CareLatencySpan? {
+        if (!CareLatencyDiagnostics.isRecording) return null
+        return CareLatencyDiagnostics.begin(
+            stage, CareLatencyOperation.COMMIT_BATCH,
+            mediaCount = frozen.sumOf { it.mutation.media.size }, rootCount = frozen.size,
+        )
+    }
+
+    private inline fun <T> measuredCausalBatch(
+        stage: CareLatencyStage,
+        frozen: List<FrozenCausalUnit>,
+        block: () -> T,
+    ): T {
+        val span = causalBatchSpan(stage, frozen)
+        try {
+            val result = block()
+            span?.finish()
+            return result
+        } catch (failure: Throwable) {
+            span?.finish(
+                if (failure is CancellationException) CareLatencyOutcome.CANCELLED else CareLatencyOutcome.FAILED,
+            )
+            throw failure
+        }
+    }
+
+    private fun CausalCommitBatchResult.diagnosticOutcome(): CareLatencyOutcome {
+        val first = results.firstOrNull()?.status
+        if (results.any { it.status != first }) return CareLatencyOutcome.MIXED
+        return when (first) {
+            CausalCommitStatus.ACCEPTED -> CareLatencyOutcome.ACCEPTED
+            CausalCommitStatus.MERGED -> CareLatencyOutcome.MERGED
+            CausalCommitStatus.BRANCHED -> CareLatencyOutcome.BRANCHED
+            else -> CareLatencyOutcome.FAILED
         }
     }
 

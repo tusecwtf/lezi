@@ -7,6 +7,11 @@ import com.lezi.babylog.core.common.failure.FailureKind
 import com.lezi.babylog.core.common.newClientUuid
 import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.common.LocalOpFailureCopy
+import com.lezi.babylog.core.common.diagnostics.CareLatencyDiagnostics
+import com.lezi.babylog.core.common.diagnostics.CareLatencyOperation
+import com.lezi.babylog.core.common.diagnostics.CareLatencyOutcome
+import com.lezi.babylog.core.common.diagnostics.CareLatencySpan
+import com.lezi.babylog.core.common.diagnostics.CareLatencyStage
 import com.lezi.babylog.sync.session.familyFailureKind
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.NextFeedPlanReconciliation
@@ -640,12 +645,32 @@ class RecordComposerViewModel @Inject constructor(
             confirmedAtMillis = nowMillis,
             clientUuid = newClientUuid(),
         )
-        // Persist identity + exact command before any cancellable import join or domain IO.
-        savedState.savePendingWrite(pending)
-        // Save-priority: lock imports, cancel in-flight import, then join+reclaim in the job.
-        val (preemptedOrphans, cancelledImport) = beginExclusiveCommit()
-        _state.update { it.copy(saving = true, error = null) }
-        launchPendingWrite(pending, session, preemptedOrphans, cancelledImport)
+        // Ordinary record save only. Separate spans start after command freeze;
+        // accepted VM state is not a rendered frame or a remote confirmation.
+        val diagnosticOperation = when (pending.writeDecision) {
+            ComposerWriteDecision.AddRecord -> CareLatencyOperation.CREATE_RECORD
+            ComposerWriteDecision.UpdateRecord -> CareLatencyOperation.EDIT_RECORD
+            else -> null
+        }
+        val writeSpan = diagnosticOperation?.let {
+            CareLatencyDiagnostics.begin(CareLatencyStage.COMPOSER_WRITE, it, pending.draft.photos.size)
+        }
+        val uiSpan = diagnosticOperation?.let {
+            CareLatencyDiagnostics.begin(CareLatencyStage.COMPOSER_UI_STATE, it, pending.draft.photos.size)
+        }
+        try {
+            // Persist identity + exact command before any cancellable import join or domain IO.
+            savedState.savePendingWrite(pending)
+            // Save-priority: lock imports, cancel in-flight import, then join+reclaim in the job.
+            val (preemptedOrphans, cancelledImport) = beginExclusiveCommit()
+            _state.update { it.copy(saving = true, error = null) }
+            launchPendingWrite(pending, session, preemptedOrphans, cancelledImport, writeSpan, uiSpan)
+        } catch (failure: Throwable) {
+            val outcome = if (failure is CancellationException) CareLatencyOutcome.CANCELLED else CareLatencyOutcome.FAILED
+            writeSpan?.finish(outcome)
+            uiSpan?.finish(outcome)
+            throw failure
+        }
     }
 
     private fun resumePendingWrite(pending: ComposerPendingWrite) {
@@ -668,8 +693,11 @@ class RecordComposerViewModel @Inject constructor(
         session: RecordComposerSessionToken,
         preemptedOrphans: List<String>,
         cancelledImport: Job?,
+        writeSpan: CareLatencySpan? = null,
+        uiSpan: CareLatencySpan? = null,
     ) {
         actionJob = viewModelScope.launch {
+            // Pre-write import join retains its existing cancellation/resource order.
             joinAndReclaimCancelledImport(
                 importSave = importSave,
                 preemptedOrphans = preemptedOrphans,
@@ -678,11 +706,15 @@ class RecordComposerViewModel @Inject constructor(
             )
             importJob = null
             val writtenPlanId = try {
-                executePendingWrite(pending)
+                executePendingWrite(pending).also { writeSpan?.finish() }
             } catch (cancelled: CancellationException) {
+                writeSpan?.finish(CareLatencyOutcome.CANCELLED)
+                uiSpan?.finish(CareLatencyOutcome.CANCELLED)
                 importSave.endCommit()
                 throw cancelled
             } catch (error: Throwable) {
+                writeSpan?.finish(CareLatencyOutcome.FAILED)
+                uiSpan?.finish(CareLatencyOutcome.FAILED)
                 currentCoroutineContext().ensureActive()
                 importSave.endCommit()
                 savedState.clearPendingWrite()
@@ -751,7 +783,11 @@ class RecordComposerViewModel @Inject constructor(
                     ).copy(failureKind = calendarKind)
                     // Publish while this session is still active. Pending already lives in
                     // SavedState when deliver is skipped; recreation rehydrates it.
-                    if (!sessionGate.deliver(session) { _state.value = appliedState }) {
+                    if (!sessionGate.deliver(session) {
+                            _state.value = appliedState
+                            uiSpan?.finish()
+                        }
+                    ) {
                         val durable = rehydrateComposerPostSaveStage(
                             pendingNextFeedOffer = appliedState.pendingNextFeedOffer,
                             pendingFinishMessage = appliedState.pendingFinishMessage,
@@ -766,12 +802,27 @@ class RecordComposerViewModel @Inject constructor(
                                 failureKind = calendarKind,
                             )
                         }
+                        uiSpan?.finish(CareLatencyOutcome.UI_NOT_DELIVERED)
                     }
                 } finally {
+                    uiSpan?.finish(CareLatencyOutcome.FAILED)
                     // Always clear commit lock — sheet close also resets, but a missed deliver
                     // must not leave import blocked.
                     importSave.endCommit()
                 }
+            }
+        }
+        // Only opt-in tracing registers this callback. It also retires spans when
+        // the job never starts or aborts before executePendingWrite's existing guard.
+        if (writeSpan != null || uiSpan != null) {
+            actionJob?.invokeOnCompletion { cause ->
+                val outcome = when {
+                    cause is CancellationException -> CareLatencyOutcome.CANCELLED
+                    cause != null -> CareLatencyOutcome.FAILED
+                    else -> CareLatencyOutcome.UI_NOT_DELIVERED
+                }
+                writeSpan?.finish(outcome)
+                uiSpan?.finish(outcome)
             }
         }
     }

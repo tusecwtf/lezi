@@ -31,6 +31,15 @@ private val androidLocalPhotoLoader = BoundedLocalPhotoLoader(
 /** Explicit sampling for same-module diagnostics; never logs paths or changes cache ownership. */
 internal fun localPhotoCacheSnapshot(): LocalPhotoCacheSnapshot = androidLocalPhotoCache.snapshot()
 
+private val localPhotoDiagnostics = LocalPhotoDiagnosticSampler(snapshotSupplier = ::localPhotoCacheSnapshot)
+
+/** Explicit same-module opt-in only; no UI/log/export path or automatic measurement window. */
+internal fun startLocalPhotoDiagnosticWindow(): Boolean = localPhotoDiagnostics.startWindow()
+
+internal fun readLocalPhotoDiagnosticWindow(): LocalPhotoDiagnosticReport? = localPhotoDiagnostics.readWindow()
+
+internal fun stopLocalPhotoDiagnosticWindow(): LocalPhotoDiagnosticReport? = localPhotoDiagnostics.stopWindow()
+
 /**
  * Cancellable Compose entry point for app-private record-photo thumbnails and previews.
  *
@@ -57,8 +66,14 @@ fun rememberLocalPhoto(
         val loaded = androidLocalPhotoLoader.load(request)
         val readyKey = (loaded as? LocalPhotoLoadResult.Ready)?.plan?.cacheKey
         value = loaded
+        localPhotoDiagnostics.record(
+            if (readyKey == null) LocalPhotoDiagnosticEvent.Unavailable else LocalPhotoDiagnosticEvent.Ready,
+        )
         awaitDispose {
-            readyKey?.let(androidLocalPhotoCache::unpin)
+            readyKey?.let { key ->
+                androidLocalPhotoCache.unpin(key)
+                localPhotoDiagnostics.record(LocalPhotoDiagnosticEvent.Unpinned)
+            }
         }
     }
 }
