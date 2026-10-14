@@ -147,3 +147,56 @@ mod tests {
         assert!(global.check_and_record("rotated-overflow", 160));
     }
 }
+
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    #[ignore = "release-profile timing probe: cargo test --release --lib rate_limiter_timing -- --ignored --nocapture"]
+    fn rate_limiter_timing() {
+        // Existing defaults: heartbeat 30/device, 300/family; causal commit
+        // 120/principal, 1200/family. Include a lightly used and a full window.
+        for (name, per_scope, scopes, calls) in [
+            ("heartbeat_light", 30, 1, 5),
+            ("heartbeat_busy", 30, 10, 330),
+            ("causal_busy", 120, 10, 1320),
+        ] {
+            let keys: Vec<_> = (0..scopes).map(|index| format!("scope-{index}")).collect();
+            let mut samples = Vec::new();
+            let cycles = 500;
+            for _ in 0..21 {
+                let limiter = RateLimiter::new(RateLimitConfig {
+                    max_attempts: per_scope,
+                    window_seconds: 60,
+                });
+                let start = Instant::now();
+                let mut accepted = 0;
+                for cycle in 0..cycles {
+                    for call in 0..calls {
+                        accepted += usize::from(
+                            limiter
+                                .check_and_record_in(
+                                    &keys[call % scopes],
+                                    "synthetic-family",
+                                    cycle * 60,
+                                )
+                                .is_ok(),
+                        );
+                    }
+                }
+                let elapsed = start.elapsed().as_nanos();
+                assert_eq!(
+                    accepted,
+                    cycles as usize * calls.min(scopes * per_scope as usize)
+                );
+                samples.push(elapsed / (cycles as u128 * calls as u128));
+            }
+            println!(
+                "rate_limiter_timing: {}",
+                serde_json::json!({"workload":name, "ns_per_call":samples})
+            );
+        }
+    }
+}

@@ -39,6 +39,8 @@ dependencies {
     ksp(libs.hilt.compiler)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation(libs.androidx.room.runtime)
     testImplementation(libs.truth)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(testFixtures(project(":core:model")))

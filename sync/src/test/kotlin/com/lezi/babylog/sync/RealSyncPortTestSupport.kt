@@ -243,7 +243,7 @@ internal fun remoteRecord() = SyncEntity(
     updatedAt = 210,
 )
 
-internal class RecordingSyncBackend : SyncBackend {
+internal open class RecordingSyncBackend : SyncBackend {
     val operationOrder = mutableListOf<String>()
     val syncOrder = mutableListOf<String>()
     var pullCount = 0

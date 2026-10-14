@@ -353,6 +353,10 @@ Record→CarePlan 转换、**Owner 删除宝宝时的全部 active avatar** 和�
    远程 materialization 仍主要通过 sync 引擎 `syncMutex` 串行 reclaim，而非
    `MediaLocalPathGate`；domain attach 与 reference-aware reclaim 才共享 path gate。
 
+路径锁条目按规范化 path 原子计入持有者和等待者，解锁（或等待取消）后才释放引用，
+最后一个使用者结束时移除条目，避免媒体唯一文件名随重试长期堆积。不同路径仍可独立
+并行，包括哈希碰撞的路径；多路径操作保持去空白、去重、排序后逐个加锁的既有顺序。
+
 #### 原子包 prepare / commit 与 domain revision 的 CAS 边界
 
 推送 Record/CarePlan/Baby 原子媒体包时，客户端对每条 live 媒体先做本机探测

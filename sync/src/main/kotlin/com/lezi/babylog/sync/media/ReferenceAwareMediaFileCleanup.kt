@@ -33,6 +33,10 @@ class ReferenceAwareMediaFileCleanup @Inject constructor(
     private val transactionRunner: DatabaseTransactionRunner,
     private val pathGate: MediaLocalPathGate,
 ) {
+    /** Writers take the same path gate before their short Room publication lease. */
+    suspend fun <T> withPathLocks(paths: Collection<String>, block: suspend () -> T): T =
+        pathGate.withLocks(paths, block)
+
     suspend fun cleanupPendingTombstones() {
         cleanupTombstones(mediaDao.listPendingFileCleanupClientUuids().toSet())
     }

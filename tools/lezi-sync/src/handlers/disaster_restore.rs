@@ -4,6 +4,8 @@
 //! journaled. Root authentication occurs only at start and final commit. Until Store activation,
 //! the staged manifest and media have no family row and are invisible to normal APIs.
 
+use crate::diagnostics::Stage;
+use crate::run_observed;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::net::SocketAddr;
@@ -137,9 +139,10 @@ pub(crate) async fn start(
     let device_name = require_device_name(&request.device_name)?;
 
     let provisioning_lock = state.family_lock(crate::PROVISIONING_LOCK_KEY).await;
-    let _provisioning_guard = provisioning_lock.lock().await;
+    let _provisioning_guard = provisioning_lock.lock_owned().await;
     let blocking_state = state.clone();
-    run_blocking(move || {
+    let probe = state.performance_probe.as_ref();
+    let (response, _provisioning_guard) = run_observed(probe, Stage::RestoreStart, move || {
         if !blocking_state.store.family_ids()?.is_empty() {
             return Err(ApiError::conflict(
                 "Disaster restore requires an empty family server",
@@ -160,7 +163,10 @@ pub(crate) async fn start(
                 ));
             }
             ensure_credential_envelope(&blocking_state.data_root, &journal)?;
-            return Ok(start_response(&blocking_state, &journal, StatusCode::OK));
+            return Ok((
+                start_response(&blocking_state, &journal, StatusCode::OK),
+                _provisioning_guard,
+            ));
         }
 
         if has_active_batch(&blocking_state.data_root, blocking_state.now())? {
@@ -196,13 +202,13 @@ pub(crate) async fn start(
         };
         save_journal(&blocking_state.data_root, &journal)?;
         ensure_credential_envelope(&blocking_state.data_root, &journal)?;
-        Ok(start_response(
-            &blocking_state,
-            &journal,
-            StatusCode::CREATED,
+        Ok((
+            start_response(&blocking_state, &journal, StatusCode::CREATED),
+            _provisioning_guard,
         ))
     })
-    .await
+    .await?;
+    Ok(response)
 }
 
 pub(crate) async fn put_manifest(

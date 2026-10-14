@@ -83,7 +83,6 @@ internal const val MEMBER_REQUEST_VIEW_HEADER = "X-Lezi-Member-Request-View"
 internal const val OPEN_MEMBER_REQUEST_VIEW = "open-v1"
 private val REFRESH_REQUEST_ID_PATTERN = Regex("[A-Za-z0-9_-]{32,128}")
 internal const val MAX_SYNC_JSON_RESPONSE_BYTES = 16 * 1024 * 1024
-internal const val MAX_SYNC_MEDIA_RESPONSE_BYTES = 10 * 1024 * 1024
 /** Self-hosted release APK download bound (full package, not media). */
 internal const val MAX_SYNC_APP_UPDATE_APK_BYTES = 100 * 1024 * 1024
 private const val MAX_SYNC_ERROR_RESPONSE_BYTES = 64 * 1024
@@ -1366,6 +1365,25 @@ class HttpSyncBackend internal constructor(
             familyOperation = FamilyHttpOperation.MediaGet,
         )
 
+    override suspend fun downloadMedia(
+        session: SyncSession,
+        clientUuid: String,
+        target: OutputStream,
+    ): MediaDownloadReceipt {
+        val receipt = requestBytesToSink(
+            session.baseUrl,
+            "/v1/media/$clientUuid",
+            "GET",
+            session.accessToken,
+            target = target.withMediaDownloadWriteErrors(),
+            successLimitBytes = MAX_SYNC_MEDIA_RESPONSE_BYTES,
+            successResponseKind = "媒体",
+            familyOperation = FamilyHttpOperation.MediaGet,
+            rejectDeclaredOversize = true,
+        )
+        return MediaDownloadReceipt(receipt.sha256, receipt.byteCount)
+    }
+
     override suspend fun getAppUpdateMetadata(session: SyncSession): AppUpdateMetadata {
         session.requireCurrentReplicaTransport()
         val json = get(
@@ -1739,6 +1757,7 @@ class HttpSyncBackend internal constructor(
         successResponseKind: String,
         readTimeoutMillis: Int? = null,
         familyOperation: FamilyHttpOperation? = FamilyHttpOperation.Session,
+        rejectDeclaredOversize: Boolean = false,
     ): AppUpdateApkDownload {
         val send = suspend {
             requestBytesToSinkOnce(
@@ -1750,6 +1769,7 @@ class HttpSyncBackend internal constructor(
                 successLimitBytes = successLimitBytes,
                 successResponseKind = successResponseKind,
                 readTimeoutMillis = readTimeoutMillis,
+                rejectDeclaredOversize = rejectDeclaredOversize,
             )
         }
         val operation = familyOperation
@@ -1769,6 +1789,7 @@ class HttpSyncBackend internal constructor(
         successLimitBytes: Int,
         successResponseKind: String,
         readTimeoutMillis: Int?,
+        rejectDeclaredOversize: Boolean,
     ): AppUpdateApkDownload = withKeepAlive(
         base = base,
         path = path,
@@ -1780,6 +1801,7 @@ class HttpSyncBackend internal constructor(
             target = target,
             successLimitBytes = successLimitBytes,
             successResponseKind = successResponseKind,
+            rejectDeclaredOversize = rejectDeclaredOversize,
         )
     }
 
@@ -2008,10 +2030,11 @@ class HttpSyncBackend internal constructor(
          * exactly the bytes handed to [target]; partial bytes remain there for the
          * caller to clean up.
          */
-        fun streamBoundedBodyTo(
+        suspend fun streamBoundedBodyTo(
             target: OutputStream,
             successLimitBytes: Int,
             successResponseKind: String,
+            rejectDeclaredOversize: Boolean,
         ): AppUpdateApkDownload {
             val code = connection.responseCode
             val retryAfterHeader = connection.getHeaderField("Retry-After")
@@ -2029,11 +2052,19 @@ class HttpSyncBackend internal constructor(
                 )
             }
             val declaredBytes = connection.contentLengthLong
+            if (rejectDeclaredOversize && declaredBytes > successLimitBytes) {
+                throw SyncResponseTooLargeException(
+                    successResponseKind,
+                    successLimitBytes,
+                    declaredBytes,
+                )
+            }
             val hasher = MediaContentDigest.newHasher()
             val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
             var totalBytes = 0L
             connection.inputStream.use { input ->
                 while (true) {
+                    currentCoroutineContext().ensureActive()
                     val count = input.read(buffer)
                     if (count < 0) break
                     if (count > successLimitBytes - totalBytes) {

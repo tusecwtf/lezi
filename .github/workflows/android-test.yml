@@ -60,14 +60,19 @@ jobs:
           test -f "$GITHUB_WORKSPACE/tools/lezi-sync/target/debug/lezi-sync"
           test -x "$GITHUB_WORKSPACE/tools/lezi-sync/target/debug/lezi-sync"
 
-      - name: Unit tests
+      - name: Search SQL regression checks
+        run: python3 domain/src/test/python/search_sql_contract_test.py
+
+      - name: Unit tests and all debug test APK compilation
         id: unit_tests
         shell: bash
         env:
           LEZI_SYNC_BIN: ${{ github.workspace }}/tools/lezi-sync/target/debug/lezi-sync
+          LEZI_SYNC_PERF_SAMPLE: "1"
         run: |
           set -o pipefail
-          ./gradlew test --stacktrace --info --no-daemon 2>&1 | tee "$RUNNER_TEMP/android-unit-tests.log"
+          export LEZI_SYNC_SOURCE_SHA="$(git rev-parse HEAD)"
+          ./gradlew test :app:assembleDebug assembleDebugAndroidTest --stacktrace --info --no-daemon 2>&1 | tee "$RUNNER_TEMP/android-unit-tests.log"
 
       - name: Summarize unit test diagnostics
         if: always()

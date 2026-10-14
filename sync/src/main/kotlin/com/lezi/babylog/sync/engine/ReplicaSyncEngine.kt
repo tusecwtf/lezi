@@ -84,6 +84,16 @@ import com.lezi.babylog.sync.backend.LiveCensusEntry
 import com.lezi.babylog.sync.backend.liveCensusKeyDigest
 import com.lezi.babylog.sync.media.LocalMediaInfo
 import com.lezi.babylog.sync.media.ReferenceAwareMediaFileCleanup
+import com.lezi.babylog.sync.media.MediaDownloadOwnership
+import com.lezi.babylog.sync.performance.SyncPerformanceProbe
+import com.lezi.babylog.sync.performance.SyncPerformanceStage
+import com.lezi.babylog.sync.backend.MediaDownloadReceipt
+import com.lezi.babylog.sync.backend.MediaDownloadWriteException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import com.lezi.babylog.sync.media.SyncMediaFileStore
 import com.lezi.babylog.sync.media.ImmutableMediaSpool
 import com.lezi.babylog.sync.session.CreatorAcknowledgementRef
@@ -206,6 +216,7 @@ internal class ReplicaSyncEngine(
     @Volatile
     private var localCensusReuseCache: LocalCensusCacheEntry? = null
     private var lastPulledLiveCensus: LiveCensus? = null
+    private val downloadRecoveryMutex = Mutex()
 
     private val publisher = EphemeralPublishPipeline(
         backend = backend,
@@ -245,14 +256,16 @@ internal class ReplicaSyncEngine(
         session: SyncSession,
         trigger: SyncTrigger,
     ): ReplicaSyncOutcome {
-        try {
-            return synchronizeCycle(session, trigger)
-        } finally {
-            // 0.5 W3: round end keeps authenticated handles for idle reuse (90s
-            // TTL) so the next round does not re-pay TCP+TLS. Identity changes
-            // still evict immediately; out-of-round conflict paths keep the
-            // immediate [releaseForegroundKeepAlive] teardown.
-            backend.releaseForegroundKeepAliveToIdleTtl()
+        return SyncPerformanceProbe.measure(SyncPerformanceStage.ReplicaRound) {
+            try {
+                return synchronizeCycle(session, trigger)
+            } finally {
+                // 0.5 W3: round end keeps authenticated handles for idle reuse (90s
+                // TTL) so the next round does not re-pay TCP+TLS. Identity changes
+                // still evict immediately; out-of-round conflict paths keep the
+                // immediate [releaseForegroundKeepAlive] teardown.
+                backend.releaseForegroundKeepAliveToIdleTtl()
+            }
         }
     }
     suspend fun abandonMutation(entityType: String, clientUuid: String) {
@@ -284,15 +297,20 @@ internal class ReplicaSyncEngine(
         session.requireCurrentReplicaSession(requireGeneration = !plan.pull)
         var current = preferences.session.first()
         requireRemoteAllowed(current)
+        recoverDownloadsBestEffort()
         // The handshake RTT overlaps the round's local pre-work (tombstone
         // sweep + reset-receipt journal): neither reads anything the handshake
         // returns. A pre-work failure still aborts the round before the result
         // is consumed; the in-flight request is cancelled with the scope.
         val (handshake, transitionReceipt) = coroutineScope {
             val handshakeAsync = async {
-                backend.authenticatedHandshake(current).also { it.requireCompatible(current) }
+                SyncPerformanceProbe.measure(SyncPerformanceStage.Handshake) {
+                    backend.authenticatedHandshake(current).also { it.requireCompatible(current) }
+                }
             }
-            mediaFileCleanup.cleanupPendingTombstones()
+            SyncPerformanceProbe.measure(SyncPerformanceStage.CleanupMedia) {
+                mediaFileCleanup.cleanupPendingTombstones()
+            }
             val receipt = try {
                 resetReceiptJournal?.load()?.takeIf { it.belongsTo(current) }
             } catch (cancelled: CancellationException) {
@@ -391,7 +409,9 @@ internal class ReplicaSyncEngine(
                 // so a leftover dirty Baby is not committed and rejected as forbidden.
                 settleMemberLocalOnlySubtrees()
             }
-            val captured = captureLocalChanges(current, skipIdleMediaRepair = !doPull)
+            val captured = SyncPerformanceProbe.measure(SyncPerformanceStage.CaptureLocalChanges) {
+                captureLocalChanges(current, skipIdleMediaRepair = !doPull)
+            }
             if (captured.pendingCreatorAcknowledgements.isNotEmpty()) {
                 preferences.updateCreatorAcknowledgements(
                     add = captured.pendingCreatorAcknowledgements,
@@ -399,11 +419,13 @@ internal class ReplicaSyncEngine(
                 current = preferences.session.first()
             }
             try {
-                settleAndPublish(
-                    current,
-                    captured.candidates,
-                    captured.mediaRepair,
-                )
+                SyncPerformanceProbe.measure(SyncPerformanceStage.SettlePublish) {
+                    settleAndPublish(
+                        current,
+                        captured.candidates,
+                        captured.mediaRepair,
+                    )
+                }
             } catch (error: AuthorityProofException) {
                 if (trigger == SyncTrigger.LocalWrite) {
                     // Keep dirty roots; do not reuse reset-receipt (that would force doPull).
@@ -464,7 +486,9 @@ internal class ReplicaSyncEngine(
         // A completed quiet cycle also completes file-side technical cleanup.
         // Tombstone metadata remains as family deletion evidence; only unowned
         // bytes and their retry marker are reclaimed here.
-        mediaFileCleanup.cleanupPendingTombstones()
+        SyncPerformanceProbe.measure(SyncPerformanceStage.CleanupMedia) {
+            mediaFileCleanup.cleanupPendingTombstones()
+        }
         transitionReceipt?.let { resetReceiptJournal?.complete(it) }
         if (classifiedPullFailure != null) {
             throw classifiedPullFailure
@@ -509,7 +533,10 @@ internal class ReplicaSyncEngine(
         resetReceipt: FamilySessionReplica.ResetReceipt?,
     ) {
         session.requireCurrentReplicaSession()
-        mediaFileCleanup.cleanupPendingTombstones()
+        recoverDownloadsBestEffort()
+        SyncPerformanceProbe.measure(SyncPerformanceStage.CleanupMedia) {
+            mediaFileCleanup.cleanupPendingTombstones()
+        }
         journalReferenceUnready(
             applyRemote(
                 session,
@@ -563,10 +590,12 @@ internal class ReplicaSyncEngine(
                 // only when the dirty causal set shrank (progress), same pass budget as
                 // commit-first replan. Fulfillment facts use their immutable atomic bundle below.
                 // Later passes reuse the first capture's spool recovery and media repair.
-                val remaining = captureLocalChanges(
-                    session,
-                    mediaRepair = mediaRepair,
-                ).candidates
+                val remaining = SyncPerformanceProbe.measure(SyncPerformanceStage.CaptureLocalChanges) {
+                    captureLocalChanges(
+                        session,
+                        mediaRepair = mediaRepair,
+                    )
+                }.candidates
                 val remainingCausal = remaining.filter {
                     it.entityType in CAUSAL_ROOT_TYPES || it.entityType == "media"
                 }
@@ -624,196 +653,244 @@ internal class ReplicaSyncEngine(
         // a staging map BEFORE any Room apply, so partial failure never exposes a
         // record/plan with placeholder media or advances past an incomplete package.
         val parsedMediaWires = linkedMapOf<String, MediaWire>()
-        val stagedLogMediaBytes = stageLogMediaDownloads(session, entities, parsedMediaWires)
+        var stagedLogMediaBytes: Map<String, StagedLogMedia> = emptyMap()
+        val ownedDownloads = java.util.Collections.synchronizedList(mutableListOf<MediaDownloadOwnership>())
+        var primaryFailure: Throwable? = null
         val appliedCarePlanUuids = mutableListOf<String>()
         val unresolved = mutableListOf<UnresolvedPull>()
         try {
-            transactionRunner.run {
-                val activeResetReceipt = resetReceipt
-                val receiptRoots = activeResetReceipt?.roots
-                    ?.associateBy { it.entityType to it.clientUuid }
-                    .orEmpty()
-                val preservePendingKeys = entities.mapNotNullTo(mutableSetOf()) { entity ->
-                    val root = receiptRoots[entity.type to entity.clientUuid]
-                        ?: return@mapNotNullTo null
-                    (entity.type to entity.clientUuid).takeIf {
-                        causalSettlement.shouldPreserveRecoveryIntent(
-                            resetRoot = root,
-                            crossingFamilyBoundary =
-                                activeResetReceipt?.crossingFamilyBoundary == true,
-                        )
-                    }
+            stagedLogMediaBytes = SyncPerformanceProbe.measure(SyncPerformanceStage.StageMediaDownload) {
+                stageLogMediaDownloads(session, entities, parsedMediaWires, ownedDownloads)
+            }
+            val mediaUuids = entities.filter { it.type == "media" }.map { it.clientUuid }
+            val currentMedia = mediaDao.getByClientUuids(mediaUuids)
+            val mediaWritePaths = (
+                stagedLogMediaBytes.values.map { it.localUri } + currentMedia.map { it.localUri }
+                ).filter(String::isNotBlank).toSet()
+            val replacementPaths = currentMedia.mapNotNull { media ->
+                val staged = stagedLogMediaBytes[media.clientUuid] ?: return@mapNotNull null
+                media.localUri.takeIf { it.isNotBlank() && it != staged.localUri }
+            }.toSet()
+            // Recovery takes this mutex before path gates too. In particular, a recovery
+            // lease captured earlier must finish before we re-arm the same owner marker.
+            withDownloadRecoveryPathLocks(mediaWritePaths) {
+                replacementPaths.forEach { path ->
+                    mediaFiles.retainForReplacement(path) { ownedDownloads.add(it) }
                 }
-                entities.filter { it.type to it.clientUuid in preservePendingKeys }
-                    .forEach { entity ->
-                        causalSettlement.rebaseRecoveryPendingIntent(
-                            entityType = entity.type,
-                            clientUuid = entity.clientUuid,
-                            remoteVersionId = entity.versionId,
-                        )
-                    }
-                fun force(entity: SyncEntity): Boolean =
-                    forceAuthority && entity.type to entity.clientUuid !in preservePendingKeys
-                val capacityDeferredCustomItems = customItemCapacityDeferredUuids(
-                    existing = customItemDao.listAllIncludingDeleted(),
-                    incoming = entities,
-                )
-                if (replaceMemberAuthoritySet && session.role == FamilyRole.Member) {
-                    babyDao.clearFamilyAuthority()
-                }
-                fun collectUnresolved(entity: SyncEntity, verdict: ApplyVerdict) {
-                    if (verdict is ApplyVerdict.Deferred) {
-                        unresolved += UnresolvedPull(entity, verdict.reason)
-                    }
-                }
-                for (entity in entities.filter { it.type == "baby" }) {
-                    collectUnresolved(
-                        entity,
-                        applyBaby(session, entity, forceAuthority = force(entity)),
-                    )
-                }
-                for (entity in entities.filter { it.type == "custom_item" }) {
-                    collectUnresolved(
-                        entity,
-                        if (entity.clientUuid in capacityDeferredCustomItems) {
-                            applyDeferred(
-                                gate = DeferredGate.CustomItemCapacityExceeded,
-                                missingEntityType = "custom_item",
-                                missingClientUuid = entity.clientUuid,
-                                localSnapshot = "family_live_capacity=10",
-                            )
-                        } else {
-                            applyCustomItem(session, entity, forceAuthority = force(entity))
-                        },
-                    )
-                }
-                // Fulfillment full-set: record(+photos) before completed care_plan before
-                // fulfillment_candidate. Incomplete sets leave cursor unmoved (unresolved).
-                for (entity in entities.filter { it.type == "record" }) {
-                    collectUnresolved(entity, applyRecord(entity, forceAuthority = force(entity)))
-                }
-                for (entity in entities.filter { it.type == "wake_observation" }) {
-                    collectUnresolved(
-                        entity,
-                        applyWakeObservation(entity, forceAuthority = force(entity)),
-                    )
-                }
-                for (entity in entities.filter { it.type == "care_plan" }) {
-                    val verdict = applyCarePlan(
-                        session,
-                        entity,
-                        discardedLocalMediaPaths,
-                        forceAuthority = force(entity),
-                    )
-                    if (verdict is ApplyVerdict.Deferred) {
-                        unresolved += UnresolvedPull(entity, verdict.reason)
-                    } else {
-                        appliedCarePlanUuids += entity.clientUuid
-                    }
-                }
-                for (entity in entities.filter { it.type == "media" }) {
-                    collectUnresolved(
-                        entity,
-                        applyMedia(
-                            session,
-                            entity,
-                            deletedMediaClientUuids,
-                            stagedLogMediaBytes,
-                            mediaEditGuard,
-                            forceAuthority = force(entity),
-                            parsedMediaWires = parsedMediaWires,
-                        ),
-                    )
-                }
-                for (entity in entities.filter { it.type == "fulfillment_candidate" }) {
-                    collectUnresolved(
-                        entity,
-                        applyFulfillmentCandidate(
-                            entity,
-                            forceAuthority = force(entity),
-                        ),
-                    )
-                }
-                // Reference-unready entities no longer abort the page: a thrown
-                // error rolls this transaction back (including any diagnostic
-                // receipt written inside it) and keeps the cursor unmoved, which
-                // turns any permanently dangling reference into an infinite
-                // pull retry loop. The caller defers these entities instead:
-                // dependencies arriving on later pages still get a second
-                // chance, and true holes are journaled durably and skipped so
-                // the cursor can converge.
-                val unresolvedKeys = unresolved
-                    .map { it.entity.type to it.entity.clientUuid }
-                    .toSet()
-                val applied = entities.filter { (it.type to it.clientUuid) !in unresolvedKeys }
-                // Root projection and conflict receipt converge in this same page
-                // transaction. An explicit no-conflict entity removes every stale
-                // summary/snapshot for that root instead of leaving a ghost badge.
-                applied.filter { it.type in CAUSAL_ROOT_TYPES }.forEach { entity ->
-                    causalSettlement.applyPullConflictSummary(
-                        entityType = entity.type,
-                        clientUuid = entity.clientUuid,
-                        summary = entity.conflictSummary?.takeIfOpenBranches(),
-                        updatedAt = entity.updatedAt,
-                    )
-                }
-                // Full page applied: re-link each affected plan to the deterministic
-                // authority (independent of care_plan LWW / push arrival order).
-                val planUuidsForResolve = buildSet {
-                    applied.filter { it.type == "fulfillment_candidate" }.forEach { entity ->
-                        runCatching {
-                            Json.parseToJsonElement(entity.payloadJson).jsonObject
-                                .string("care_plan_client_uuid")
-                        }.getOrNull()?.let { add(it) }
-                    }
-                    applied.filter { it.type == "care_plan" }.forEach { add(it.clientUuid) }
-                }
-                for (planUuid in planUuidsForResolve) {
-                    fulfillmentAuthoritySettlement.settle(planUuid)
-                }
-                applied.filter { it.type == "care_plan" }
-                    .map { it.clientUuid }
-                    .let { uuids ->
-                        if (uuids.isEmpty()) {
-                            emptyList()
-                        } else {
-                            carePlanDao.getByClientUuids(uuids).map(CarePlanEntity::babyId)
+                // A reused donor may disappear between the reuse scan and this gate.
+                // Check after acquiring the same gate as deletion, before Room publication.
+                withContext(Dispatchers.IO) {
+                    stagedLogMediaBytes.values.forEach { staged ->
+                        check(mediaFiles.statLength(staged.localUri) != null) {
+                            "待采用媒体已不可读，请重试同步"
                         }
                     }
-                    .distinct()
-                    .forEach { babyId ->
-                        appliedCarePlanUuids += healDuplicateOpenNextFeedPlans(session, babyId)
-                    }
-                (
-                    applied.filter { it.type == "baby" }
-                        .map { it.clientUuid }
-                        .let { uuids ->
-                            if (uuids.isEmpty()) {
-                                emptyList()
-                            } else {
-                                babyDao.getByClientUuids(uuids).map(BabyEntity::id)
+                }
+                SyncPerformanceProbe.measure(SyncPerformanceStage.ApplyPage) {
+                    transactionRunner.run {
+                        val activeResetReceipt = resetReceipt
+                        val receiptRoots = activeResetReceipt?.roots
+                            ?.associateBy { it.entityType to it.clientUuid }
+                            .orEmpty()
+                        val preservePendingKeys = entities.mapNotNullTo(mutableSetOf()) { entity ->
+                            val root = receiptRoots[entity.type to entity.clientUuid]
+                                ?: return@mapNotNullTo null
+                            (entity.type to entity.clientUuid).takeIf {
+                                causalSettlement.shouldPreserveRecoveryIntent(
+                                    resetRoot = root,
+                                    crossingFamilyBoundary =
+                                        activeResetReceipt?.crossingFamilyBoundary == true,
+                                )
                             }
-                        } +
-                        applied.filter { it.type == "media" }
+                        }
+                        entities.filter { it.type to it.clientUuid in preservePendingKeys }
+                            .forEach { entity ->
+                                causalSettlement.rebaseRecoveryPendingIntent(
+                                    entityType = entity.type,
+                                    clientUuid = entity.clientUuid,
+                                    remoteVersionId = entity.versionId,
+                                )
+                            }
+                        fun force(entity: SyncEntity): Boolean =
+                            forceAuthority && entity.type to entity.clientUuid !in preservePendingKeys
+                        val capacityDeferredCustomItems = customItemCapacityDeferredUuids(
+                            existing = customItemDao.listAllIncludingDeleted(),
+                            incoming = entities,
+                        )
+                        if (replaceMemberAuthoritySet && session.role == FamilyRole.Member) {
+                            babyDao.clearFamilyAuthority()
+                        }
+                        fun collectUnresolved(entity: SyncEntity, verdict: ApplyVerdict) {
+                            if (verdict is ApplyVerdict.Deferred) {
+                                unresolved += UnresolvedPull(entity, verdict.reason)
+                            }
+                        }
+                        for (entity in entities.filter { it.type == "baby" }) {
+                            collectUnresolved(
+                                entity,
+                                applyBaby(session, entity, forceAuthority = force(entity)),
+                            )
+                        }
+                        for (entity in entities.filter { it.type == "custom_item" }) {
+                            collectUnresolved(
+                                entity,
+                                if (entity.clientUuid in capacityDeferredCustomItems) {
+                                    applyDeferred(
+                                        gate = DeferredGate.CustomItemCapacityExceeded,
+                                        missingEntityType = "custom_item",
+                                        missingClientUuid = entity.clientUuid,
+                                        localSnapshot = "family_live_capacity=10",
+                                    )
+                                } else {
+                                    applyCustomItem(session, entity, forceAuthority = force(entity))
+                                },
+                            )
+                        }
+                        // Fulfillment full-set: record(+photos) before completed care_plan before
+                        // fulfillment_candidate. Incomplete sets leave cursor unmoved (unresolved).
+                        for (entity in entities.filter { it.type == "record" }) {
+                            collectUnresolved(entity, applyRecord(entity, forceAuthority = force(entity)))
+                        }
+                        for (entity in entities.filter { it.type == "wake_observation" }) {
+                            collectUnresolved(
+                                entity,
+                                applyWakeObservation(entity, forceAuthority = force(entity)),
+                            )
+                        }
+                        for (entity in entities.filter { it.type == "care_plan" }) {
+                            val verdict = applyCarePlan(
+                                session,
+                                entity,
+                                discardedLocalMediaPaths,
+                                forceAuthority = force(entity),
+                            )
+                            if (verdict is ApplyVerdict.Deferred) {
+                                unresolved += UnresolvedPull(entity, verdict.reason)
+                            } else {
+                                appliedCarePlanUuids += entity.clientUuid
+                            }
+                        }
+                        for (entity in entities.filter { it.type == "media" }) {
+                            collectUnresolved(
+                                entity,
+                                applyMedia(
+                                    session,
+                                    entity,
+                                    deletedMediaClientUuids,
+                                    discardedLocalMediaPaths,
+                                    stagedLogMediaBytes,
+                                    mediaEditGuard,
+                                    forceAuthority = force(entity),
+                                    parsedMediaWires = parsedMediaWires,
+                                    mediaWritePaths = mediaWritePaths,
+                                ),
+                            )
+                        }
+                        for (entity in entities.filter { it.type == "fulfillment_candidate" }) {
+                            collectUnresolved(
+                                entity,
+                                applyFulfillmentCandidate(
+                                    entity,
+                                    forceAuthority = force(entity),
+                                ),
+                            )
+                        }
+                        // Reference-unready entities no longer abort the page: a thrown
+                        // error rolls this transaction back (including any diagnostic
+                        // receipt written inside it) and keeps the cursor unmoved, which
+                        // turns any permanently dangling reference into an infinite
+                        // pull retry loop. The caller defers these entities instead:
+                        // dependencies arriving on later pages still get a second
+                        // chance, and true holes are journaled durably and skipped so
+                        // the cursor can converge.
+                        val unresolvedKeys = unresolved
+                            .map { it.entity.type to it.entity.clientUuid }
+                            .toSet()
+                        val applied = entities.filter { (it.type to it.clientUuid) !in unresolvedKeys }
+                        // Root projection and conflict receipt converge in this same page
+                        // transaction. An explicit no-conflict entity removes every stale
+                        // summary/snapshot for that root instead of leaving a ghost badge.
+                        applied.filter { it.type in CAUSAL_ROOT_TYPES }.forEach { entity ->
+                            causalSettlement.applyPullConflictSummary(
+                                entityType = entity.type,
+                                clientUuid = entity.clientUuid,
+                                summary = entity.conflictSummary?.takeIfOpenBranches(),
+                                updatedAt = entity.updatedAt,
+                            )
+                        }
+                        // Full page applied: re-link each affected plan to the deterministic
+                        // authority (independent of care_plan LWW / push arrival order).
+                        val planUuidsForResolve = buildSet {
+                            applied.filter { it.type == "fulfillment_candidate" }.forEach { entity ->
+                                runCatching {
+                                    Json.parseToJsonElement(entity.payloadJson).jsonObject
+                                        .string("care_plan_client_uuid")
+                                }.getOrNull()?.let { add(it) }
+                            }
+                            applied.filter { it.type == "care_plan" }.forEach { add(it.clientUuid) }
+                        }
+                        for (planUuid in planUuidsForResolve) {
+                            fulfillmentAuthoritySettlement.settle(planUuid)
+                        }
+                        applied.filter { it.type == "care_plan" }
                             .map { it.clientUuid }
                             .let { uuids ->
                                 if (uuids.isEmpty()) {
                                     emptyList()
                                 } else {
-                                    mediaDao.getByClientUuids(uuids)
-                                        .mapNotNull(MediaAssetEntity::babyId)
+                                    carePlanDao.getByClientUuids(uuids).map(CarePlanEntity::babyId)
                                 }
                             }
-                    )
-                    .distinct()
-                    .forEach {
-                        refreshBabyAvatar(it, mediaEditGuard)
+                            .distinct()
+                            .forEach { babyId ->
+                                appliedCarePlanUuids += healDuplicateOpenNextFeedPlans(session, babyId)
+                            }
+                        (
+                            applied.filter { it.type == "baby" }
+                                .map { it.clientUuid }
+                                .let { uuids ->
+                                    if (uuids.isEmpty()) {
+                                        emptyList()
+                                    } else {
+                                        babyDao.getByClientUuids(uuids).map(BabyEntity::id)
+                                    }
+                                } +
+                                applied.filter { it.type == "media" }
+                                    .map { it.clientUuid }
+                                    .let { uuids ->
+                                        if (uuids.isEmpty()) {
+                                            emptyList()
+                                        } else {
+                                            mediaDao.getByClientUuids(uuids)
+                                                .mapNotNull(MediaAssetEntity::babyId)
+                                        }
+                                    }
+                            )
+                            .distinct()
+                            .forEach {
+                                refreshBabyAvatar(it, mediaEditGuard)
+                            }
                     }
+                }
             }
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+            throw failure
         } finally {
-            cleanupUnownedStagedMedia(stagedLogMediaBytes.values.map { it.localUri }.toSet())
+            withContext(NonCancellable + Dispatchers.IO) {
+                try {
+                    releaseOwnedDownloads(ownedDownloads.toList())
+                    cleanupUnownedStagedMedia(stagedLogMediaBytes.values.map { it.localUri }.toSet())
+                } catch (cleanupFailure: Throwable) {
+                    if (primaryFailure != null) {
+                        if (primaryFailure !== cleanupFailure) primaryFailure.addSuppressed(cleanupFailure)
+                    } else throw cleanupFailure
+                }
+            }
         }
-        mediaFileCleanup.cleanupTombstones(deletedMediaClientUuids.toSet())
+        SyncPerformanceProbe.measure(SyncPerformanceStage.CleanupMedia) {
+            mediaFileCleanup.cleanupTombstones(deletedMediaClientUuids.toSet())
+        }
         cleanupDiscardedLocalMedia(discardedLocalMediaPaths)
         // Side effects only after full package apply — never during partial download.
         if (appliedCarePlanUuids.isNotEmpty()) {
@@ -826,12 +903,54 @@ internal class ReplicaSyncEngine(
         return unresolved
     }
 
+    private suspend fun recoverDownloadsBestEffort() {
+        try {
+            recoverOwnedDownloads()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // Retry before the next real download; media-free sync can still converge.
+        }
+    }
+
+    private suspend fun <T> withDownloadRecoveryPathLocks(paths: Set<String>, block: suspend () -> T): T =
+        downloadRecoveryMutex.withLock {
+            mediaFileCleanup.withPathLocks(paths, block)
+        }
+
+    private suspend fun recoverOwnedDownloads() = withContext(Dispatchers.IO) {
+        downloadRecoveryMutex.withLock {
+            releaseOwnedDownloads(mediaFiles.pendingDownloads())
+        }
+    }
+
+    private suspend fun releaseOwnedDownloads(downloads: List<MediaDownloadOwnership>) {
+        var failure: Throwable? = null
+        for (download in downloads) {
+            try {
+                download.release { path ->
+                    SyncPerformanceProbe.measure(SyncPerformanceStage.CleanupMedia) {
+                        mediaFileCleanup.cleanupUnreferencedPaths(setOf(path))
+                    }
+                }
+            } catch (error: Throwable) {
+                if (failure == null) failure = error
+                else if (failure !== error) failure.addSuppressed(error)
+            }
+        }
+        failure?.let { throw it }
+    }
+
     private suspend fun cleanupUnownedStagedMedia(paths: Set<String>) {
-        mediaFileCleanup.cleanupUnreferencedPaths(paths)
+        SyncPerformanceProbe.measure(SyncPerformanceStage.CleanupMedia) {
+            mediaFileCleanup.cleanupUnreferencedPaths(paths)
+        }
     }
 
     private suspend fun cleanupDiscardedLocalMedia(paths: List<String>) {
-        mediaFileCleanup.cleanupUnreferencedPaths(paths.toSet())
+        SyncPerformanceProbe.measure(SyncPerformanceStage.CleanupMedia) {
+            mediaFileCleanup.cleanupUnreferencedPaths(paths.toSet())
+        }
     }
 
     /**
@@ -1677,6 +1796,7 @@ internal class ReplicaSyncEngine(
         session: SyncSession,
         entities: List<SyncEntity>,
         parsedMediaWires: MutableMap<String, MediaWire>,
+        ownedDownloads: MutableList<MediaDownloadOwnership>,
     ): Map<String, StagedLogMedia> {
         val staged = linkedMapOf<String, StagedLogMedia>()
         val expectedDigests = collectCausalMediaDigests(entities)
@@ -1727,6 +1847,7 @@ internal class ReplicaSyncEngine(
             pending += PendingDownload(entity, wire, expected)
         }
         if (pending.isEmpty()) return staged
+        recoverOwnedDownloads()
         // One download unit per unique causal identity (keyed by the first
         // page item carrying it); items without an identity — older pages
         // without a causal manifest — cannot share bytes, exactly like the
@@ -1749,20 +1870,20 @@ internal class ReplicaSyncEngine(
                     getSlots.withPermit {
                         requireRemoteAllowed(session)
                         requireForegroundCycleBudgetRemaining()
-                        val identity = item.expected
-                        val bytes = backend.getMedia(session, item.entity.clientUuid)
-                        val digest = requireDownloadedMatchesExpected(bytes, identity)
-                        val localUri = mediaFiles.saveDownloaded(
+                        val target = mediaFiles.beginDownload(
                             item.entity.clientUuid,
                             item.wire.kind,
-                            bytes,
                             item.wire.mime,
-                        )
-                        StagedLogMedia(
-                            localUri = localUri,
-                            sha256 = digest,
-                            byteSize = bytes.size.toLong(),
-                        )
+                        ) { ownedDownloads.add(it) }
+                        target.use {
+                            val receipt = backend.downloadMedia(session, item.entity.clientUuid, target.output)
+                            val digest = requireDownloadedMatchesExpected(receipt, item.expected)
+                            StagedLogMedia(
+                                localUri = target.complete(receipt),
+                                sha256 = digest,
+                                byteSize = receipt.byteCount,
+                            )
+                        }
                     }
                 }
             }.awaitAll()
@@ -1855,12 +1976,13 @@ internal class ReplicaSyncEngine(
     }
 
     private fun requireDownloadedMatchesExpected(
-        bytes: ByteArray,
+        receipt: MediaDownloadReceipt,
         expected: MediaContentIdentity?,
     ): String {
-        val digest = MediaContentDigest.ofBytes(bytes)
+        val digest = MediaContentDigest.requireValid(receipt.sha256)
+        require(receipt.byteCount > 0) { "家庭服务器返回了空媒体" }
         if (expected != null) {
-            require(digest == expected.sha256 && bytes.size.toLong() == expected.byteSize) {
+            require(digest == expected.sha256 && receipt.byteCount == expected.byteSize) {
                 when (expected.origin) {
                     MediaDigestOrigin.CausalManifest ->
                         "下载的照片内容与因果清单不符，保留 cursor 以便重试"
@@ -1885,10 +2007,12 @@ internal class ReplicaSyncEngine(
         session: SyncSession,
         entity: SyncEntity,
         deletedMediaClientUuids: MutableList<String>,
+        discardedLocalMediaPaths: MutableList<String>,
         stagedLogMediaBytes: Map<String, StagedLogMedia> = emptyMap(),
         mediaEditGuard: LocalMediaEditGuard? = null,
         forceAuthority: Boolean = false,
         parsedMediaWires: MutableMap<String, MediaWire> = linkedMapOf(),
+        mediaWritePaths: Set<String>,
     ): ApplyVerdict {
         requireCanonicalUuid(entity.clientUuid, "media client_uuid")
         val wire = parsedMediaWires.getOrPut(entity.clientUuid) {
@@ -1931,6 +2055,9 @@ internal class ReplicaSyncEngine(
         }
         if (!forceAuthority && existing != null && existing.updatedAt == entity.updatedAt) {
             val keepLocalDelete = existing.deletedAt != null && entity.deletedAt == null
+            if (existing.localUri.isNotBlank() && existing.localUri !in mediaWritePaths) {
+                return applyDeferred(DeferredGate.MediaEditGuard, "media", entity.clientUuid, "media.pathChanged=true")
+            }
             val acknowledged = existing.copy(
                 remoteUri = session.receiptFor(entity.clientUuid),
                 deletedAt = if (keepLocalDelete) existing.deletedAt else entity.deletedAt ?: existing.deletedAt,
@@ -1992,6 +2119,9 @@ internal class ReplicaSyncEngine(
                 localSnapshot = "media.stagedBytes=absent",
             )
         }
+        if (existing != null && existing.localUri.isNotBlank() && existing.localUri !in mediaWritePaths) {
+            return applyDeferred(DeferredGate.MediaEditGuard, "media", entity.clientUuid, "media.pathChanged=true")
+        }
         val applied = MediaAssetEntity(
                 id = existing?.id ?: 0,
                 recordId = recordId,
@@ -2013,6 +2143,11 @@ internal class ReplicaSyncEngine(
                 sha256 = stagedLocal?.sha256 ?: existing?.sha256,
         )
         val appliedId = mediaDao.upsert(applied)
+        if (existing != null && existing.localUri.isNotBlank() && existing.localUri != applied.localUri) {
+            // Owned-layout paths were durably armed before this transaction. This
+            // best-effort list also handles legacy paths; shared rows/holders protect both.
+            discardedLocalMediaPaths += existing.localUri
+        }
         mediaEditGuard?.mediaRefreshed(applied.copy(id = existing?.id ?: appliedId))
         if (entity.deletedAt != null && !existing?.localUri.isNullOrBlank()) {
             // Keep the exact path on the tombstoned row until physical cleanup
@@ -2207,14 +2342,18 @@ internal class ReplicaSyncEngine(
         if (current.role == FamilyRole.Member) {
             settleMemberLocalOnlySubtrees()
         }
-        val captured = captureLocalChanges(current)
+        val captured = SyncPerformanceProbe.measure(SyncPerformanceStage.CaptureLocalChanges) {
+            captureLocalChanges(current)
+        }
         if (captured.pendingCreatorAcknowledgements.isNotEmpty()) {
             preferences.updateCreatorAcknowledgements(
                 add = captured.pendingCreatorAcknowledgements,
             )
             current = preferences.session.first()
         }
-        settleAndPublish(current, captured.candidates, captured.mediaRepair)
+        SyncPerformanceProbe.measure(SyncPerformanceStage.SettlePublish) {
+            settleAndPublish(current, captured.candidates, captured.mediaRepair)
+        }
         current = preferences.session.first()
         val recovered = pullAllPages(
             initial = current,
@@ -2418,7 +2557,9 @@ internal class ReplicaSyncEngine(
             }
             requireRemoteAllowed(current)
             val pageRequest = pullTransport.page(pageCount)
-            val pulled = backend.pull(current, pageRequest).requireValidPage(pageRequest)
+            val pulled = SyncPerformanceProbe.measure(SyncPerformanceStage.PullRequest) {
+                backend.pull(current, pageRequest).requireValidPage(pageRequest)
+            }
             headCensus = pulled.liveCensus
             if (pulled.liveCensus != null) lastPulledLiveCensus = pulled.liveCensus
             pageCount++
@@ -3723,7 +3864,9 @@ internal class ReplicaSyncEngine(
                 }
             }
         }
-        mediaFileCleanup.cleanupUnreferencedPaths(orphanPaths)
+        SyncPerformanceProbe.measure(SyncPerformanceStage.CleanupMedia) {
+            mediaFileCleanup.cleanupUnreferencedPaths(orphanPaths)
+        }
         return wrote
     }
 
@@ -3891,10 +4034,8 @@ internal class ReplicaSyncEngine(
      * Historical missing-media backfill (foreground/pull-to-refresh cycles).
      * 0.5 W4: media GETs run with bounded parallelism — at most
      * [HISTORICAL_MISSING_MEDIA_PARALLELISM] responses in flight (peak heap ≈
-     * 3 × 10 MiB: two in-flight responses plus one being adopted). Caps,
-     * failure and budget semantics are identical to the former serial loop.
-     * The page staging section is deliberately NOT parallelized (atomic
-     * receive contract; suspended ticket 10).
+     * two bounded streaming buffers; complete files remain private until adoption).
+     * Caps, failure and budget semantics match the former byte-array loop.
      */
     private suspend fun downloadMissingMedia(
         session: SyncSession,
@@ -3910,13 +4051,15 @@ internal class ReplicaSyncEngine(
             for (media in missing) {
                 launch {
                     getSlots.withPermit {
-                        downloadOneMissingMedia(
-                            session = session,
-                            mediaEditGuard = mediaEditGuard,
-                            media = media,
-                            attempted = attempted,
-                            decodedBytes = decodedBytes,
-                        )
+                        SyncPerformanceProbe.measure(SyncPerformanceStage.MissingMediaDownload) {
+                            downloadOneMissingMedia(
+                                session = session,
+                                mediaEditGuard = mediaEditGuard,
+                                media = media,
+                                attempted = attempted,
+                                decodedBytes = decodedBytes,
+                            )
+                        }
                     }
                 }
             }
@@ -3973,38 +4116,58 @@ internal class ReplicaSyncEngine(
         // server, and transport failures fail the whole cycle so they cannot
         // be reported as a successful sync. (Ticket 04 attaches the durable
         // `media-404:<clientUuid>` journal marker at this single branch.)
-        val bytes = try {
-            backend.getMedia(session, media.clientUuid)
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: SyncHttpException) {
-            if (error.statusCode == 404) {
-                markMissingMediaNotFound(media.clientUuid)
+        recoverOwnedDownloads()
+        val ownedDownloads = mutableListOf<MediaDownloadOwnership>()
+        var primaryFailure: Throwable? = null
+        try {
+            val target = try {
+                mediaFiles.beginDownload(media.clientUuid, media.kind, media.mime) { ownedDownloads.add(it) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                markMissingMediaSaveFailed(media.clientUuid)
                 return
             }
-            throw error
-        }
-        decodedBytes.addAndGet(bytes.size.toLong())
-        val digest = requireDownloadedMatchesExpected(bytes, expected)
-        val localUri = try {
-            mediaFiles.saveDownloaded(
-                media.clientUuid,
-                media.kind,
-                bytes,
-                media.mime,
-            )
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Exception) {
-            // Local save failed (disk full / permission): previously an
-            // invisible swallow — every cycle re-GETted the bytes and the row
-            // vetoed tip-skip forever. Journal the condition durably (the
-            // marker only informs the tip-skip seam; retries continue).
-            markMissingMediaSaveFailed(media.clientUuid)
-            return
-        }
-        if (!adoptHistoricalLocalBytes(media, localUri, digest, mediaEditGuard)) {
-            mediaFiles.delete(localUri)
+            target.use {
+                val receipt = try {
+                    backend.downloadMedia(session, media.clientUuid, target.output)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: MediaDownloadWriteException) {
+                    markMissingMediaSaveFailed(media.clientUuid)
+                    return
+                } catch (error: SyncHttpException) {
+                    if (error.statusCode == 404) {
+                        markMissingMediaNotFound(media.clientUuid)
+                        return
+                    }
+                    throw error
+                }
+                decodedBytes.addAndGet(receipt.byteCount)
+                val digest = requireDownloadedMatchesExpected(receipt, expected)
+                val localUri = try {
+                    target.complete(receipt)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    markMissingMediaSaveFailed(media.clientUuid)
+                    return
+                }
+                adoptHistoricalLocalBytes(media, localUri, digest, mediaEditGuard)
+            }
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+            throw failure
+        } finally {
+            withContext(NonCancellable + Dispatchers.IO) {
+                try {
+                    releaseOwnedDownloads(ownedDownloads)
+                } catch (cleanupFailure: Throwable) {
+                    if (primaryFailure != null) {
+                        if (primaryFailure !== cleanupFailure) primaryFailure.addSuppressed(cleanupFailure)
+                    } else throw cleanupFailure
+                }
+            }
         }
     }
 
@@ -4015,25 +4178,30 @@ internal class ReplicaSyncEngine(
         mediaEditGuard: LocalMediaEditGuard?,
     ): Boolean {
         var adopted = false
-        transactionRunner.run {
-            val current = mediaDao.getByClientUuid(media.clientUuid) ?: return@run
-            if (current != media || mediaEditGuard?.canReplace(current) == false) return@run
-            val next = current.copy(
-                localUri = localUri,
-                sha256 = current.sha256 ?: sha256,
-            )
-            mediaDao.update(next)
-            mediaEditGuard?.mediaRefreshed(next)
-            current.babyId?.let { babyId ->
-                refreshBabyAvatar(babyId, mediaEditGuard)
+        mediaFileCleanup.withPathLocks(listOf(media.localUri, localUri)) {
+            if (withContext(Dispatchers.IO) { mediaFiles.statLength(localUri) } == null) {
+                return@withPathLocks
             }
-            adopted = true
-            // 0.5 ticket 04: the bytes are back — the confirmed-404 and
-            // save-failed markers die in the same transaction as the adoption.
-            clearMissingMediaNotFound(media.clientUuid)
-            conflictSnapshotCacheDao?.deleteTransportJournal(
-                MEDIA_SAVE_FAILED_JOURNAL_KEY_PREFIX + media.clientUuid,
-            )
+            transactionRunner.run {
+                val current = mediaDao.getByClientUuid(media.clientUuid) ?: return@run
+                if (current != media || mediaEditGuard?.canReplace(current) == false) return@run
+                val next = current.copy(
+                    localUri = localUri,
+                    sha256 = current.sha256 ?: sha256,
+                )
+                mediaDao.update(next)
+                mediaEditGuard?.mediaRefreshed(next)
+                current.babyId?.let { babyId ->
+                    refreshBabyAvatar(babyId, mediaEditGuard)
+                }
+                adopted = true
+                // 0.5 ticket 04: the bytes are back — the confirmed-404 and
+                // save-failed markers die in the same transaction as the adoption.
+                clearMissingMediaNotFound(media.clientUuid)
+                conflictSnapshotCacheDao?.deleteTransportJournal(
+                    MEDIA_SAVE_FAILED_JOURNAL_KEY_PREFIX + media.clientUuid,
+                )
+            }
         }
         return adopted
     }

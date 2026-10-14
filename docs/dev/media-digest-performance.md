@@ -1,5 +1,7 @@
 # Android 媒体摘要：有界内存与重复工作对比
 
+当前整合状态与验收边界见[2026-10-13 整合交接](../handoff/2026-10-13-integration-acceptance.md)；本文保留其历史切片的范围与测量结果。
+
 ## 变更与边界
 
 - `MediaContentDigest.hex` 用固定十六进制字符表编码两个半字节，移除每字节一次

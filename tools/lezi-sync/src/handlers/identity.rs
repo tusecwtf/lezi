@@ -4,6 +4,8 @@
 //! domain paths (`handlers::identity::create_family`, …). Nested under `handlers`,
 //! so this is not the same `pub(super)` surface as flat [`crate::members`].
 
+use crate::diagnostics::Stage;
+use crate::run_observed;
 use std::fs;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -105,7 +107,7 @@ pub(crate) async fn create_family(
     // provisioning paths. Recheck both predicates under one process-wide lock so concurrent
     // requests cannot both pass their initial read-only gates.
     let provisioning_lock = state.family_lock(crate::PROVISIONING_LOCK_KEY).await;
-    let _provisioning_guard = provisioning_lock.lock().await;
+    let _provisioning_guard = provisioning_lock.lock_owned().await;
     // Do not preempt Store's strict create_request_id replay here: a retry after a lost
     // response must still receive its original credentials. Store atomically rejects any
     // different request once a family exists.
@@ -114,13 +116,14 @@ pub(crate) async fn create_family(
     let now = state.now();
     let owner_root_fingerprint = state.owner_root_fingerprint.as_deref().map(str::to_owned);
     let signing_state = state.clone();
-    let result = run_blocking(move || {
+    let probe = state.performance_probe.as_ref();
+    let (result, _provisioning_guard) = run_observed(probe, Stage::FamilyCreate, move || {
         if disaster_restore::has_active_batch(&data_root, now)? {
             return Err(ApiError::conflict(
                 "Family creation is unavailable while disaster restore is active",
             ));
         }
-        Ok(store.create_family(
+        let result = store.create_family(
             CreateFamilyInput {
                 now,
                 create_request_id: &request.create_request_id,
@@ -133,7 +136,8 @@ pub(crate) async fn create_family(
             move |request_hash, family_id, device_id| {
                 signing_state.owner_tokens(request_hash, family_id, device_id)
             },
-        ))
+        );
+        Ok((result, _provisioning_guard))
     })
     .await?;
     let issued = match result {
@@ -708,9 +712,9 @@ pub(crate) async fn delete_family(
     require_owner_root_password(&state, &headers, source)?;
     let confirmed_family_name = json_body(body)?.validate()?;
     let family_lock = state.family_lock(&principal.family_id).await;
-    let _guard = family_lock.lock().await;
+    let _guard = family_lock.lock_owned().await;
     let blocking_state = state.clone();
-    run_blocking(move || {
+    let _guard = run_blocking(move || {
         let family_media = blocking_state.media_root.join(&principal.family_id);
         match blocking_state
             .store
@@ -746,7 +750,7 @@ pub(crate) async fn delete_family(
                 }
             }
         }
-        Ok(())
+        Ok(_guard)
     })
     .await?;
     Ok(Json(json!({"ok": true})))

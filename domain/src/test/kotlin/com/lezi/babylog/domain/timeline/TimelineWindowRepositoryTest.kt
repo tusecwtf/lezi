@@ -820,6 +820,16 @@ private class FakeTimelineWindowDao(
         rootClientUuids: List<String>,
     ): List<RecordEntity> = records.filter { it.clientUuid in rootClientUuids }
 
+    override suspend fun listSearchSleepRoots(babyId: Long, rootClientUuids: List<String>): List<RecordEntity> =
+        records.filter {
+            it.babyId == babyId && it.type == "sleep" && it.deletedAt == null && it.clientUuid in rootClientUuids
+        }
+
+    override suspend fun listSearchSleepWakes(babyId: Long, rootClientUuids: List<String>): List<WakeObservationEntity> {
+        val roots = listSearchSleepRoots(babyId, rootClientUuids).mapTo(hashSetOf()) { it.clientUuid }
+        return wakes.filter { it.sleepRecordClientUuid in roots }
+    }
+
     override suspend fun listWakeObservationsForRoots(
         sleepRootClientUuids: List<String>,
     ): List<WakeObservationEntity> {

@@ -16,6 +16,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
 
 use super::media::media_entity_is_pullable;
+use crate::diagnostics::{Phase, Stage};
 use crate::readiness::is_ready;
 use crate::store::{
     CausalMediaItem, CausalMutation, ConflictDetailPage, ConflictDetailPageRequest,
@@ -23,8 +24,8 @@ use crate::store::{
     WithdrawConflictInput, LIVE_CENSUS_ENTITY_TYPES, MAX_CAUSAL_UNITS,
 };
 use crate::{
-    authenticate, json_body, require_supported_client, run_blocking, ApiError, AppState,
-    AUTHENTICATED_SYNC_HANDSHAKE_CAPABILITIES, PULL_MAX_PAGES, PULL_PAGE_ENTITY_LIMIT,
+    authenticate, json_body, require_supported_client, run_blocking, run_observed, ApiError,
+    AppState, AUTHENTICATED_SYNC_HANDSHAKE_CAPABILITIES, PULL_MAX_PAGES, PULL_PAGE_ENTITY_LIMIT,
     PULL_PAGE_MAX_ENCODED_BYTES, PULL_PAGE_TARGET_BYTES, SETUP_PROTOCOL_VERSION,
 };
 
@@ -220,19 +221,26 @@ pub(crate) async fn heartbeat(
         ));
     }
     let family_lock = state.family_lock(&principal.family_id).await;
-    let guard = family_lock.lock().await;
+    let probe = state.performance_probe.as_ref();
+    let lock_wait = probe.map(|probe| probe.span(Stage::HeartbeatRead, Phase::FamilyLockWait));
+    let guard = family_lock.lock_owned().await;
+    drop(lock_wait);
+    let lock_hold = probe.map(|probe| probe.span(Stage::HeartbeatRead, Phase::FamilyLockHold));
     let blocking_state = state.clone();
     let family_id = principal.family_id.clone();
-    let (head_rev, directory_generation) = run_blocking(move || {
-        // One short connection under the lock: the watermark row and the
-        // bounded directory digest (family-scale, recomputed on demand).
-        blocking_state
-            .store
-            .head_and_directory_generation(&family_id)
-            .map_err(ApiError::from)
-    })
-    .await?;
+    let ((head_rev, directory_generation), guard, lock_hold) =
+        run_observed(probe, Stage::HeartbeatRead, move || {
+            // One short connection under the lock: the watermark row and the
+            // bounded directory digest (family-scale, recomputed on demand).
+            blocking_state
+                .store
+                .head_and_directory_generation(&family_id)
+                .map_err(ApiError::from)
+                .map(|result| (result, guard, lock_hold))
+        })
+        .await?;
     drop(guard);
+    drop(lock_hold);
     tracing::debug!(
         family_id = %principal.family_id,
         device_id = %principal.device_id,
@@ -588,11 +596,15 @@ pub(crate) async fn causal_commit(
     }
     let units = parse_causal_units(request)?;
     let family_lock = state.family_lock(&principal.family_id).await;
-    let guard = family_lock.lock().await;
+    let probe = state.performance_probe.as_ref();
+    let lock_wait = probe.map(|probe| probe.span(Stage::CommitDurable, Phase::FamilyLockWait));
+    let guard = family_lock.lock_owned().await;
+    drop(lock_wait);
+    let lock_hold = probe.map(|probe| probe.span(Stage::CommitDurable, Phase::FamilyLockHold));
     let blocking_state = state.clone();
     let generation = state.generation.clone();
     let family_id = principal.family_id.clone();
-    let dispatch = run_blocking(move || {
+    let (dispatch, guard, lock_hold) = run_observed(probe, Stage::CommitDurable, move || {
         // Causal commit preserves each fact; duplicate grouping is an explicit relation.
         blocking_state
             .store
@@ -618,6 +630,7 @@ pub(crate) async fn causal_commit(
                 }
                 other => Err(other.into()),
             })
+            .map(|result| (result, guard, lock_hold))
     })
     .await?;
     let commit = match dispatch {
@@ -633,10 +646,11 @@ pub(crate) async fn causal_commit(
     // publication may hash/copy/fsync large objects and must not retain the
     // same-family commit mutex while the response waits for that repair.
     drop(guard);
+    drop(lock_hold);
     let result = if commit.requires_media_promotion() {
         let blocking_state = state.clone();
         let blocking_hook = state.causal_media_commit_blocking_hook.clone();
-        run_blocking(move || {
+        run_observed(probe, Stage::CommitPublish, move || {
             let result = blocking_state
                 .store
                 .publish_causal_commit_with_hook(commit, blocking_hook.as_deref())?;
@@ -692,9 +706,9 @@ pub(crate) async fn conflict_detail(
         }
     };
     let family_lock = state.family_lock(&principal.family_id).await;
-    let _guard = family_lock.lock().await;
+    let _guard = family_lock.lock_owned().await;
     let blocking_state = state.clone();
-    let detail = run_blocking(move || {
+    let (detail, _guard) = run_blocking(move || {
         blocking_state
             .store
             .conflict_detail_page(&principal, &conflict_id, page_request, blocking_state.now())
@@ -723,6 +737,7 @@ pub(crate) async fn conflict_detail(
                 }
                 other => other.into(),
             })
+            .map(|detail| (detail, _guard))
     })
     .await?;
     Ok(Json(detail))
@@ -753,10 +768,10 @@ pub(crate) async fn resolve_conflict(
         choices: request.choices,
     };
     let family_lock = state.family_lock(&principal.family_id).await;
-    let guard = family_lock.lock().await;
+    let guard = family_lock.lock_owned().await;
     let family_id = principal.family_id.clone();
     let blocking_state = state.clone();
-    let result = run_blocking(move || {
+    let (result, guard) = run_blocking(move || {
         blocking_state
             .store
             .resolve_conflict(&principal, &conflict_id, input, blocking_state.now())
@@ -764,6 +779,7 @@ pub(crate) async fn resolve_conflict(
                 StoreError::ConflictNotFound => ApiError::not_found("conflict not found"),
                 other => other.into(),
             })
+            .map(|result| (result, guard))
     })
     .await?;
     drop(guard);
@@ -899,10 +915,10 @@ pub(crate) async fn withdraw_conflict_branches(
         expected_branch_version_ids: request.expected_branch_version_ids,
     };
     let family_lock = state.family_lock(&principal.family_id).await;
-    let guard = family_lock.lock().await;
+    let guard = family_lock.lock_owned().await;
     let family_id = principal.family_id.clone();
     let blocking_state = state.clone();
-    let result = run_blocking(move || {
+    let (result, guard) = run_blocking(move || {
         blocking_state
             .store
             .withdraw_conflict_branches(&principal, &conflict_id, input, blocking_state.now())
@@ -910,6 +926,7 @@ pub(crate) async fn withdraw_conflict_branches(
                 StoreError::ConflictNotFound => ApiError::not_found("conflict not found"),
                 other => other.into(),
             })
+            .map(|result| (result, guard))
     })
     .await?;
     drop(guard);
@@ -972,13 +989,14 @@ pub(crate) async fn declare_source_relation(
         expected_other_version: request.expected_other_version,
     };
     let family_lock = state.family_lock(&principal.family_id).await;
-    let _guard = family_lock.lock().await;
+    let _guard = family_lock.lock_owned().await;
     let blocking_state = state.clone();
-    let result = run_blocking(move || {
+    let (result, _guard) = run_blocking(move || {
         blocking_state
             .store
             .declare_source_relation(&principal, input, blocking_state.now())
             .map_err(map_source_relation_error)
+            .map(|result| (result, _guard))
     })
     .await?;
     Ok(Json(result))
@@ -1007,13 +1025,14 @@ pub(crate) async fn resolve_source_relation_group(
         expected_versions,
     };
     let family_lock = state.family_lock(&principal.family_id).await;
-    let _guard = family_lock.lock().await;
+    let _guard = family_lock.lock_owned().await;
     let blocking_state = state.clone();
-    let result = run_blocking(move || {
+    let (result, _guard) = run_blocking(move || {
         blocking_state
             .store
             .resolve_source_relation_group(&principal, input, blocking_state.now())
             .map_err(map_source_relation_error)
+            .map(|result| (result, _guard))
     })
     .await?;
     Ok(Json(result))
@@ -1245,17 +1264,21 @@ pub(crate) async fn pull_entities(
     }
     let response_encoding = negotiated_pull_response_encoding(&headers)?;
     let family_lock = state.family_lock(&principal.family_id).await;
-    let guard = family_lock.lock().await;
+    let probe = state.performance_probe.as_ref();
+    let lock_wait = probe.map(|probe| probe.span(Stage::PullRead, Phase::FamilyLockWait));
+    let guard = family_lock.lock_owned().await;
+    drop(lock_wait);
+    let lock_hold = probe.map(|probe| probe.span(Stage::PullRead, Phase::FamilyLockHold));
     let blocking_state = state.clone();
     let family_id = principal.family_id.clone();
     let cursor = query.cursor;
     let include_live_census = query.include_live_census;
     let include_live_keys = query.include_live_keys;
     let live_key_types = parse_live_key_types(query.live_key_types.as_deref());
-    let page = run_blocking(move || {
+    let (page, guard, lock_hold) = run_observed(probe, Stage::PullRead, move || {
         // One connection for the pull read, publication probe, and census keys.
         // Statements stay autocommit under the family lock, same as separate connects.
-        blocking_state.store.with_connection(|connection| {
+        let page_result = blocking_state.store.with_connection(|connection| {
             let generation = blocking_state.generation.clone();
             let key_types = if include_live_keys {
                 live_key_types
@@ -1364,13 +1387,15 @@ pub(crate) async fn pull_entities(
                 page.entity_wire = kept_wire;
             }
             Ok(page)
-        })
+        });
+        page_result.map(|page| (page, guard, lock_hold))
     })
     .await?;
     drop(guard);
+    drop(lock_hold);
     let generation = state.generation.clone();
     let page_index = query.page_index;
-    let (encoded, is_gzip) = run_blocking(move || {
+    let (encoded, is_gzip) = run_observed(probe, Stage::PullEncode, move || {
         // Splice the planning-pass entity bytes instead of re-serializing the
         // whole page a second time. `entities` is PullResponse's first field,
         // so the frame is the literal prefix {"entities":[, the standalone

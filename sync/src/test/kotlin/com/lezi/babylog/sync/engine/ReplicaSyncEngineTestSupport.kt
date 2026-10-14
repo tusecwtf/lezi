@@ -74,6 +74,7 @@ internal fun serverStampedStableRootJson(
 internal class ReplicaEngineRig(
     session: SyncSession,
     backend: RecordingSyncBackend = RecordingSyncBackend(),
+    val mediaFiles: TestMediaFileStore = TestMediaFileStore(),
 ) {
     val backend = backend
     val preferences = MemorySyncPreferences(session)
@@ -83,7 +84,6 @@ internal class ReplicaEngineRig(
     val babies = MemoryBabyDao()
     val media = MemoryMediaDao()
     val customItems = MemoryCustomItemDao()
-    val mediaFiles = TestMediaFileStore()
     val immutableMediaSpool = TestImmutableMediaSpool(mediaFiles)
     val transactions = RecordingTransactionRunner()
     val fulfillmentAuthoritySettlement =
@@ -92,9 +92,10 @@ internal class ReplicaEngineRig(
             fulfillmentCandidateDao = fulfillmentCandidates,
             transactionRunner = transactions,
         )
+    val mediaReferences = MemoryMediaReferenceDao()
     val mediaFileCleanup = ReferenceAwareMediaFileCleanup(
         mediaDao = media,
-        mediaReferenceDao = MemoryMediaReferenceDao(),
+        mediaReferenceDao = mediaReferences,
         mediaFiles = mediaFiles,
         transactionRunner = transactions,
         pathGate = MediaLocalPathGate(),

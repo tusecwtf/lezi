@@ -28,13 +28,33 @@ import kotlinx.coroutines.sync.withLock
  */
 @Singleton
 class MediaLocalPathGate @Inject constructor() {
-    private val locks = ConcurrentHashMap<String, Mutex>()
+    private class PathLock {
+        val mutex = Mutex()
+        // Accessed only inside the map's per-key compute; includes queued users.
+        var users = 0
+    }
+
+    private val locks = ConcurrentHashMap<String, PathLock>()
+
+    internal val retainedPathCount: Int
+        get() = locks.size
 
     suspend fun <T> withLock(path: String, block: suspend () -> T): T {
         val key = path.trim()
         require(key.isNotEmpty()) { "media path lock requires a non-blank path" }
-        val mutex = locks.getOrPut(key) { Mutex() }
-        return mutex.withLock { block() }
+        val lock = locks.compute(key) { _, existing ->
+            (existing ?: PathLock()).also { it.users++ }
+        }!!
+        try {
+            return lock.mutex.withLock { block() }
+        } finally {
+            // withLock has already unlocked (or acquisition was cancelled). Retain
+            // the entry until every owner/waiter is done so a new arrival cannot
+            // use a different mutex while an existing user still owns this path.
+            locks.compute(key) { _, existing ->
+                existing?.takeIf { --it.users > 0 }
+            }
+        }
     }
 
     /**

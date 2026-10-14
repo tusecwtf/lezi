@@ -1,0 +1,44 @@
+{
+  "binaries": {
+    "baseline": {
+      "path": "baseline-tests",
+      "sha256": "0dbd7020b13a8fab5c0d8f1fc771d8aaa78fa95472666342ce50f93684a3f0c0"
+    },
+    "candidate": {
+      "path": "integrated-release-lib-tests",
+      "sha256": "93c47dc9fa7cbd0a0b2f3779da2b7c31c8651001dd0c23d43d26213274334ed3"
+    }
+  },
+  "rounds": 15,
+  "records": [
+    0,
+    1000,
+    10000
+  ],
+  "initialization_only": true,
+  "cpu": "AMD EPYC 9V74 80-Core Processor",
+  "fixtures": {
+    "0": {
+      "database_sha256": "a620996b7990a7ff9d7933467c939939f122660ef2a3fa2a6eea4c3738c44d61",
+      "database_bytes": 393216
+    },
+    "1000": {
+      "database_sha256": "6d4f0ff5f1527daac3d6a4de7279c66fe9a8d6fa50666950bb8d010ac14b217d",
+      "database_bytes": 4366336
+    },
+    "10000": {
+      "database_sha256": "7802eb86f2e91b186f8b44a58821257f7013d4e79a9667660beea274b3f03632",
+      "database_bytes": 40103936
+    }
+  },
+  "source_head": "c5e541b595079fd915f44d0250417db3e10dd5de",
+  "baseline_source": "Public 9e47fd6c9111eb5352cef585f4672a71fb578af4-equivalent runtime source plus the tracked test-only hotpath harness",
+  "candidate_source": "Integrated server: schema-only cache plus opt-in bounded diagnostics and existing-lock ownership correction. No production limiter changes.",
+  "rust_toolchain": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "profile": "release opt-level=z, lto=true, codegen-units=1, strip=true",
+  "cargo_lock_sha256": "4ef0c669c6bed5af00e4d9087eecdb5188bbba74a15bfec506fa0e56c6796e5d",
+  "runner_sha256": "a2d2a45772d3aa7308d31a2aa447445a458e2bcf9c3d071f14ce0e38c947921b",
+  "raw_csv_verified_against_summary": true,
+  "runtime_equivalent_through": "cf787d7a16dc6520a6fcab60b3e5221999c0d76c",
+  "sanitization": "Absolute executable paths replaced with basenames; private-history baseline alias removed. Samples, summaries, hashes and numerical metadata are unchanged."
+}

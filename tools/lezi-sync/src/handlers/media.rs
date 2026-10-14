@@ -6,6 +6,8 @@
 //! - [`collect_orphan_family_media`] / [`retry_committed_pending_bundle_media_cleanup`]
 //!   — startup cleanup on the media root, invoked from `build_apps` (not HTTP)
 
+use crate::diagnostics::Stage;
+use crate::run_observed;
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::{BufReader, Read};
@@ -398,14 +400,16 @@ pub(crate) async fn get_media(
     let principal = authenticate(&state, &headers).await?;
     require_supported_client(&state, &headers).await?;
     let family_lock = state.family_lock(&principal.family_id).await;
-    let _guard = family_lock.lock().await;
+    let _guard = family_lock.lock_owned().await;
     let store = state.store.clone();
     let family_id = principal.family_id.clone();
     let media_id = client_uuid.to_string();
-    let metadata =
+    let (metadata, _guard) =
         run_blocking(
             move || match store.media_metadata_if_published(&family_id, &media_id)? {
-                crate::store::MediaMetadataIfPublished::Metadata(metadata) => Ok(metadata),
+                crate::store::MediaMetadataIfPublished::Metadata(metadata) => {
+                    Ok((metadata, _guard))
+                }
                 crate::store::MediaMetadataIfPublished::Unpublished => {
                     Err(ApiError::not_found("Media bytes are not published"))
                 }
@@ -468,9 +472,10 @@ pub(crate) async fn stage_bundle(
         ));
     }
     let family_lock = state.family_lock(&principal.family_id).await;
-    let _guard = family_lock.lock().await;
+    let _guard = family_lock.lock_owned().await;
     let blocking_state = state.clone();
-    let status = run_blocking(move || {
+    let probe = state.performance_probe.as_ref();
+    let (status, _guard) = run_observed(probe, Stage::MediaStage, move || {
         let expired = blocking_state.store.expire_open_staging_bundles(
             &principal.family_id,
             blocking_state
@@ -503,6 +508,7 @@ pub(crate) async fn stage_bundle(
                 blocking_state.now(),
             )
             .map_err(map_stage_bundle_store_error)
+            .map(|status| (status, _guard))
     })
     .await?;
     Ok(Json(status))
@@ -516,12 +522,13 @@ pub(crate) async fn get_bundle(
     let principal = authenticate(&state, &headers).await?;
     require_supported_client(&state, &headers).await?;
     let family_lock = state.family_lock(&principal.family_id).await;
-    let _guard = family_lock.lock().await;
+    let _guard = family_lock.lock_owned().await;
     let store = state.store.clone();
     let family_id = principal.family_id;
     let bundle_id = bundle_id.to_string();
-    run_blocking(move || Ok(store.bundle_status(&family_id, &bundle_id)?))
-        .await?
+    let (status, _guard) =
+        run_blocking(move || Ok((store.bundle_status(&family_id, &bundle_id)?, _guard))).await?;
+    status
         .map(Json)
         .ok_or_else(|| ApiError::not_found("Bundle not found"))
 }
@@ -544,9 +551,10 @@ pub(crate) async fn commit_bundle(
         ));
     }
     let family_lock = state.family_lock(&principal.family_id).await;
-    let _guard = family_lock.lock().await;
+    let _guard = family_lock.lock_owned().await;
+    let probe = state.performance_probe.clone();
     let state = state.clone();
-    let result = run_blocking(move || {
+    let (result, _guard) = run_observed(probe.as_ref(), Stage::MediaCommit, move || {
         let bundle = state
             .store
             .load_bundle(&principal.family_id, &bundle_id.to_string())?
@@ -693,7 +701,7 @@ pub(crate) async fn commit_bundle(
         // Best-effort staging cleanup; failed/abandoned dirs are bounded by open-bundle limits.
         let _ = fs::remove_dir_all(state.bundle_stage_dir(&principal.family_id, &bundle_id)?);
 
-        Ok(result)
+        Ok((result, _guard))
     })
     .await?;
     Ok(Json(result))

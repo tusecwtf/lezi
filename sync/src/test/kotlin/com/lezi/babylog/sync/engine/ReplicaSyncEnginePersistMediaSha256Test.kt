@@ -4,6 +4,8 @@ import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.sync.SyncTrigger
+import com.lezi.babylog.sync.TestMediaFileStore
+import com.lezi.babylog.sync.media.LocalMediaInfo
 import com.lezi.babylog.sync.backend.CausalCommitBatchResult
 import com.lezi.babylog.sync.backend.CausalCommitStatus
 import com.lezi.babylog.sync.backend.CausalCommitUnitResult
@@ -60,7 +62,23 @@ class ReplicaSyncEnginePersistMediaSha256Test {
     @Test
     fun laterDownloadForSameUuidUsesItsOwnBytesDigest() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 1)
-        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val directory = java.nio.file.Files.createTempDirectory("fresh-download-digest").toFile()
+        val files = object : TestMediaFileStore() {
+            override fun statLength(localUri: String): Long? = readableFile(localUri)?.length()
+
+            override suspend fun inspect(localUri: String): LocalMediaInfo? =
+                readableFile(localUri)?.let { LocalMediaInfo(it.length(), "image/jpeg", null, null) }
+
+            override suspend fun saveDownloaded(
+                clientUuid: String,
+                kind: String,
+                bytes: ByteArray,
+                mime: String?,
+            ): String = File.createTempFile("downloaded-", ".jpg", directory).apply {
+                writeBytes(bytes)
+            }.absolutePath
+        }
+        val rig = ReplicaEngineRig(session, mediaFiles = files).also { it.backend.enableCausal = true }
         val babyUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee12"
         rig.babies.seed(
             localReplicaBaby().copy(
@@ -72,6 +90,7 @@ class ReplicaSyncEnginePersistMediaSha256Test {
         )
         val recordUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee13"
         val mediaUuid = "11111111-1111-4111-8111-111111111112"
+        try {
         for ((index, bytesAndDigest) in listOf(
             byteArrayOf(1, 2, 3, 4) to KNOWN_BYTES_1234_SHA256,
             byteArrayOf(8, 6, 7, 5) to KNOWN_BYTES_8675_SHA256,
@@ -93,10 +112,14 @@ class ReplicaSyncEnginePersistMediaSha256Test {
             val stored = requireNotNull(rig.media.getByClientUuid(mediaUuid))
             assertThat(stored.sha256).isEqualTo(expectedDigest)
             assertThat(stored.byteSize).isEqualTo(bytes.size.toLong())
+            assertThat(File(stored.localUri).readBytes()).isEqualTo(bytes)
             assertThat(stored.syncDirty).isFalse()
             assertThat(rig.preferences.current().pullCursor).isEqualTo(2L + index)
         }
         assertThat(rig.backend.mediaGets).containsExactly(mediaUuid, mediaUuid)
+        } finally {
+            directory.deleteRecursively()
+        }
     }
 
     @Test

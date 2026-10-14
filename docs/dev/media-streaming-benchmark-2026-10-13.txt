@@ -1,0 +1,79 @@
+extracted_source=baseline InputStream.readBytesUpTo,sha256=877397644bcd3ea6c1d70455dbe6f76c37d9ca6cf32fb88947597e4efdd10d37
+extracted_source=baseline AndroidSyncMediaFileStore.saveDownloaded,sha256=952433c50881db251aa67a074c4026debf6abf8b1d6e61922fd5a4c011ce5684
+extracted_source=current HttpExchange streaming copy/hash loop,sha256=f5ca5f9e3380ea5c3118393c34fa4211d4c511d12cfe4c6599f81034129093ab
+baseline=c7461bcd8b2d52c482d14746aba380295626be25
+candidate=b44412f0a2ded5fef28e1bd22944d7f9559e4d30
+ab5e8378e34b4e96c282d322388f022fbcc8de293c4ca24a5595c4a3905d9b9e  scripts/benchmark-media-streaming.sh
+5b60f8ad3a707fe2961e6090c7629db375b060f73f1f9597095be2f23fbe10c2  scripts/benchmarks/MediaStreamingBenchmark.kt
+80e06f8374157266ab777231e384ba1444635486be5565d029bfddc71dac22b7  core/common/src/main/kotlin/com/lezi/babylog/core/common/MediaContentDigest.kt
+6278c314d6bd4b08e4f331c33ae83c9422a797babe547b0ba147a4cc929b17fe  sync/src/main/kotlin/com/lezi/babylog/sync/backend/HttpSyncBackend.kt
+66cd27a9fbd4e1f3d74388732d7ab5f494cd7bc3832d12d642812a6164a89f18  sync/src/main/kotlin/com/lezi/babylog/sync/backend/MediaDownloadReceipt.kt
+dfd75d3caf301d28c131c2bd860c24d27e104756cca271d374cf09ae1863bb36  sync/src/main/kotlin/com/lezi/babylog/sync/media/OwnedMediaDownloadStore.kt
+scope=host successful response-body-to-adopted-file; excludes HTTP/TLS/Room/device
+java=21.0.12.1+1-1-deb13u1-Debian
+jvm_flags=-Xms256m -Xmx256m -XX:+UseSerialGC
+input_bytes=8388608,input_sha256=d5ccfe2e08fcdb0b0767261cc1c180ac5ae84284106739a16d2e344781ad4dc8
+rounds=30,warmups_per_variant=10,iterations_per_sample=1,allocation=current_IO_thread_bytes
+variant,round,nanos,allocated_bytes,thread_id
+baseline,1,12726088,16797496,15
+current,1,10201707,20920,15
+current,2,9946672,20920,15
+baseline,2,12235347,16797496,15
+baseline,3,11988323,16797360,15
+current,3,10204382,20880,15
+current,4,9131454,20920,15
+baseline,4,11802381,16797360,15
+baseline,5,11794148,16797320,15
+current,5,10953844,20920,15
+current,6,9531141,20920,15
+baseline,6,12805956,16797496,15
+baseline,7,12651219,16797320,15
+current,7,10146767,20920,15
+current,8,9181208,20920,15
+baseline,8,11807578,16797496,15
+baseline,9,12369355,16797360,15
+current,9,10064555,20920,15
+current,10,9881407,20880,15
+baseline,10,12281866,16797360,15
+baseline,11,13489831,16797496,15
+current,11,10055522,20920,15
+current,12,9124674,20920,15
+baseline,12,11599663,16797320,15
+baseline,13,11753438,16797536,15
+current,13,9869129,20880,15
+current,14,9127989,20920,15
+baseline,14,12221938,16797360,15
+baseline,15,11993501,16797320,15
+current,15,9836501,20920,15
+current,16,9789261,20920,15
+baseline,16,11836311,16797496,15
+baseline,17,11883240,16797320,15
+current,17,9860596,20920,15
+current,18,9280033,20920,15
+baseline,18,12246503,16797320,15
+baseline,19,11941225,16797536,15
+current,19,9736704,20920,15
+current,20,9063334,20880,15
+baseline,20,11771154,16797536,15
+baseline,21,12113377,16797320,15
+current,21,10193095,20920,15
+current,22,9818704,20920,15
+baseline,22,12505123,16797776,15
+baseline,23,12719319,16797536,15
+current,23,9787839,20880,15
+current,24,9749312,20920,15
+baseline,24,12350026,16797536,15
+baseline,25,12359400,16797496,15
+current,25,10333190,20920,15
+current,26,9684818,20920,15
+baseline,26,12241246,16797320,15
+baseline,27,12082862,16797320,15
+current,27,9920834,20920,15
+current,28,9218031,20920,15
+baseline,28,11964950,16797496,15
+baseline,29,12589156,16797360,15
+current,29,11639461,20920,15
+current,30,16246098,20880,15
+baseline,30,15053119,16797360,15
+summary,baseline,median_ns=12228642.5,p25_ns=11897736.3,p75_ns=12471181.0,min_ns=11599663.0,max_ns=15053119.0,median_allocated_bytes=16797360.0
+summary,current,median_ns=9848548.5,p25_ns=9569560.3,p75_ns=10126214.0,min_ns=9063334.0,max_ns=16246098.0,median_allocated_bytes=20920.0
