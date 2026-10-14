@@ -1,14 +1,15 @@
 # 乐记 0.5.5 整合交接与验收
 
-状态截点：2026-10-13，整合源码 `cf787d7a16dc6520a6fcab60b3e5221999c0d76c`。替换旧owned文件的持久回收修复已集成；尚需最终Android、双侧与设备证据后才能签收。以下未执行的命令是验收步骤，不表示已经发布、运行ADB或执行NAS操作。
+状态截点：2026-10-14。完整整合已发布至 [PR 11](https://github.com/tusecwtf/lezi/pull/11)，已核验的公开头为 `199b131624d54dce5e75a76b44c2ccb3d1d8d940`，Android 与 Rust CI 均成功；尚未合并。下述设备、Room instrumentation 执行、NAS 与私有源回流仍未验收，手动命令不表示已经执行。
 
 ## 当前结论
 
-- 已实现：首批交互修补、搜索查询投影复用、摘要计算优化、固定容量双侧计时、不可变 schema 期望缓存、有界媒体流式落盘、blocking 工作持有原有锁、媒体路径 gate 回收。
-- 已验证：整合 Rust `c5e541b595079fd915f44d0250417db3e10dd5de` 的 fmt、582 项测试和 warnings-as-errors Clippy；6 个常规忽略的计时测试另行执行。其 Rust 文件至上述整合源码不变。主机SQLite合同7项、最新owned-store21项（从cf787d7实际生产源码独立重跑）、probe8项、path-gate/ownership17项分别有证据；旧store+probe22项被21+8覆盖，不重复累加，不能合计为Android全套。
-- 未完成：4项新增持久回收引擎回归实际执行、最终Android 全套/Room构建/同源双侧、完整制品清单、新发布与 CI、私有源回流、设备体验/PSS与 Android fsync 验收。
-- 当前公开 master 仍为 `9e47fd6c9111eb5352cef585f4672a71fb578af4`；PR11 头 `c7461bcd8b2d52c482d14746aba380295626be25` 仅包含摘要首切片。该头 Android run 38349801373 的新 fixture 失败已有本地修复：整合提交 `bb52353c4ff31072248dfb7f375f13a3891e0137`，尚未发布/重获绿灯。
-- 整合尚未发布，新CI尚未验证；私有回流未验证，必须保留私有未发布工作。没有 ADB/模拟器/NAS执行证据，未部署。
+- 已实现并发布：首批交互修补、搜索共享投影、摘要优化、固定容量双侧计时、不可变 schema 期望缓存、有界媒体流式落盘、blocking 工作持有原有锁、媒体路径 gate 回收，以及替换旧 owned 文件的持久回收。
+- 已验证：[Android run 38536562501](https://github.com/tusecwtf/lezi/actions/runs/38536562501) 和 [Rust run 38536562564](https://github.com/tusecwtf/lezi/actions/runs/38536562564) 均成功。Android 制品为 802 份 XML、5,832 项 JVM 测试，failures/errors/skipped 均为 0；所有选中的有测试 JVM 任务均实际执行，没有 `FROM-CACHE`/`UP-TO-DATE`。app debug 与各模块 instrumentation APK 编译/打包成功，包含 KSP/Room 编译及计时器 fixture API 修复。Rust 为 582 项通过、0失败，6 项 timing-only 测试按设计忽略，Clippy 与打包/TLS隔离 smoke 通过。
+- 双侧 isolated seams、opt-in quiet sampler 和新增 owned-media 引擎回归已纳入上述 Android 运行。源码、merge-ref、测试结果及服务二进制哈希的完整对应见 [公开 CI 证据](../dev/evidence/integrated-2026-10-14/ci-report.md)。这是主机/loopback 证据，未运行设备 instrumentation。
+- 本轮修复还包括文件边界承担阻塞 I/O、跨协程保持 fault sentinel 身份、历史空媒体保留原重试策略、计时器测试适配 `tickState`、仅强制 CI JVM 测试刷新而保留编译缓存。32 处安全 Kotlin warning 修复已验证；另两处 instrumentation `arrayOf<Any>` 类型修复待下一提交 CI。现有 AndroidX 加密存储弃用及 JVM/工具链提示仍单列，不声称零 warning。
+- 尚未完成：最终交付头及合并后 master 的对应 CI、发布制品完整清单与签名/哈希、私有源回流、设备体验/Room instrumentation/PSS、Android fsync 和 NAS 验收。便携补丁须按最终交付树重新生成和验证；旧补丁不是当前整合凭据。未运行 ADB，未部署 NAS。
+- 此次交接更新本身仅改文档。既有绿灯只绑定上述公开头；另两处 fixture 修复及任何后续提交的结果必须另记，不能将旧 run 改称新头或合并后 master 的结果。
 
 版本仍为 Android 0.5.5/code35、服务端0.5.5、wire0.4.0、Room29/本地合同6、server schema13/floor21。FULL、hash、鉴权/TLS、整页原子apply、媒体完整发布、本地优先和两模板等价合同不能为性能让步。
 
@@ -18,7 +19,7 @@
 
 [原15组验收表](2026-10-13-integration-checklist.md)逐项区分实现、测试、发布与设备待验收；[Rust整合报告和原始数据](../dev/evidence/integrated-2026-10-13/integrated-server-report.md)保留测量口径。
 
-原1–6/8–9的生产与测试代码已在公开基线中核对存在；历史提交记录不能单独证明当前整树已测试。第7大字/IME、第10设备PSS、第15总交付仍开放。
+原1–6/8–9的生产与测试代码已在公开基线中核对存在，当前整合又通过上述 JVM 与编译门禁；设备执行不能由此替代。第7大字/IME、第10设备PSS、第15总交付仍开放。
 
 ## 性能证据与限制
 
@@ -34,7 +35,7 @@
 
 ## 最终源码与制品冻结
 
-以下运行时基点已经包含持久回收修复，4项新增引擎回归尚未执行。正式验收时记录实际完整40位SHA，确认干净树，再执行下列命令。所有日志、XML、基准raw、APK及服务端SHA必须归属于该SHA。若后续仅文档变化，注明运行时文件哈希等价；若运行时变化，补跑受影响门禁。
+已核验运行的公开头为 `199b131624d54dce5e75a76b44c2ccb3d1d8d940`；实际 checkout 为 PR merge-ref `057d65172bb47aa4d4963422f0953d4f634e29ae`，两者 tree 均为 `9bde7bb2b326550e799f8bfc28ca2b0462de5749`。4项新增持久回收引擎回归已经实际执行。以下命令保留给最终交付与复验：记录实际完整40位SHA和干净树，将所有日志、XML、基准raw、APK及服务端SHA归属于该SHA。仅文档变化可注明运行时文件等价；运行时或测试变化仍须补跑相应门禁。
 
 ```bash
 set -euo pipefail
@@ -71,7 +72,7 @@ find app core designsystem domain feature -path '*/build/outputs/apk/*' -name '*
 
 不要设置NAS环境变量；isolated harness仅使用合成临时数据根。full Gradle与分组重跑XML可能覆盖，应在每组后分别归档。核对每组实际test count/failures/errors/skipped；缺二进制/openssl造成跳过必须补齐重跑。采样打印的source SHA应等于真实checkout，PR merge-ref的GITHUB_SHA另记，不能替换。CI制品当前保留3天，应及时下载保全。
 
-根目录不带项目路径的assembleDebugAndroidTest会选择各子项目中存在的同名任务，仅编译/打包instrumentation，不运行或安装到设备。后续本地提交 `5631ec1721103c217834581330f9aa49a67cbb27` 已配置CI执行 `./gradlew test :app:assembleDebug assembleDebugAndroidTest`，尚未发布/执行，仍保留原workers和45分钟上限，需观察内存与耗时。手动命令中的max-workers=2只是低并发选择，不冒称CI配置。设备测试APK必须记录实际manifest package/targetPackage、runner、SHA；app debug为com.lezi.babylog.debug，库测试APK不能当产品包。以上构建命令未证明instrumentation运行成功，也不证明已签名release可部署。
+根目录不带项目路径的assembleDebugAndroidTest会选择各子项目中存在的同名任务，仅编译/打包instrumentation，不运行或安装到设备。上述 Android CI 已成功执行 `./gradlew test :app:assembleDebug assembleDebugAndroidTest`，保留原workers和45分钟上限；Gradle耗时10分27秒。手动命令中的max-workers=2只是低并发选择，不冒称CI配置。设备测试APK仍须记录实际manifest package/targetPackage、runner、SHA；app debug为com.lezi.babylog.debug，库测试APK不能当产品包。成功构建不证明instrumentation运行成功，也不证明已签名release可部署；当前workflow上传诊断日志/报告，不上传完整APK交付清单。
 
 ## 用户手动设备验收
 
@@ -163,6 +164,6 @@ Android目录FileChannel.force与崩溃/重启恢复另列验收：在隔离fixt
 5. 私有回流后执行适配后的同等Android/Rust/双侧门禁；若需要通过原pre-push隐私过滤发布，先验证脱敏snapshot与预期公开运行时代码一致。不要普通push私有全历史到公开仓库。
 6. 最终记录私有提交、公开快照、PR/merge SHA、两套CI run、服务二进制和APK哈希之间映射。未获完整可核对映射前，状态仍为“回流未验证”。
 
-补丁应用成功仅是可携带性，不能代替编译、Room、双侧或设备验收。尚未完成私有回流或发布验证。
+补丁应用成功仅是可携带性，不能代替编译、Room、双侧或设备验收。公开 PR 与该头双 CI 已验证；最终便携补丁重生/校验、私有回流、合并及发布制品验证仍未完成。
 
 构建环境补充：当前AGP8.7.3没有显式buildToolsVersion，默认SDK Build Tools34.0.0，应确认预装或可自动下载；compileSdk35与Build Tools版本不是同一概念。无需设备镜像、NDK/CMake或release签名材料来完成上述debug构建。依据：[Gradle多项目task selector](https://docs.gradle.org/current/userguide/command_line_interface.html#sec:executing_tasks_in_multi_project_builds)、[AGP8.7兼容表](https://developer.android.com/build/releases/agp-8-7-0-release-notes?hl=en)。
