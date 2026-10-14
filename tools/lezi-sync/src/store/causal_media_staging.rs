@@ -1038,6 +1038,7 @@ impl Store {
         Uuid::parse_str(media_uuid).map_err(|_| StoreError::InvalidCausalMediaStaging)?;
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::causal::require_current_principal(&tx, principal)?;
         tx.execute(
             "INSERT OR IGNORE INTO causal_media_gc_state(family_id) VALUES (?1)",
             params![principal.family_id],
@@ -1139,6 +1140,7 @@ impl Store {
 
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::causal::require_current_principal(&tx, principal)?;
         if let Some(row) = load_row(&tx, &principal.family_id, media_uuid)? {
             if row.status == StagingStatus::GcPending
                 || (row.expires_at <= now && row.status != StagingStatus::Consumed)
@@ -1248,6 +1250,7 @@ impl Store {
 
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::causal::require_current_principal(&tx, principal)?;
         if let Some(row) = load_row(&tx, &principal.family_id, media_uuid)? {
             let receipt = replay_empty_existing_row(
                 &self.database_path,

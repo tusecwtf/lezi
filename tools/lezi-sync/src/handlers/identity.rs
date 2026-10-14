@@ -331,10 +331,9 @@ pub(crate) async fn list_member_login_requests(
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value == OPEN_MEMBER_REQUEST_VIEW);
     let store = state.store.clone();
-    let family_id = principal.family_id;
     let now = state.now();
     let mut requests =
-        run_blocking(move || Ok(store.pending_member_login_requests(&family_id, now)?)).await?;
+        run_blocking(move || Ok(store.pending_member_login_requests(&principal, now)?)).await?;
     if !include_approved {
         requests.retain(|request| request.status == "pending");
     }
@@ -350,12 +349,11 @@ pub(crate) async fn approve_new_member_login_request(
     let principal = require_owner(&state, &headers).await?;
     let _ = json_body(body)?;
     let store = state.store.clone();
-    let family_id = principal.family_id;
     let request_id = request_id.to_string();
     let now = state.now();
     run_blocking(move || {
         store
-            .approve_new_member_login_request(&family_id, &request_id, now)
+            .approve_new_member_login_request(&principal, &request_id, now)
             .map_err(map_member_request_error)
     })
     .await?;
@@ -372,12 +370,11 @@ pub(crate) async fn bind_existing_member_login_request(
     let request = json_body(body)?;
     let membership_id = request.validate()?;
     let store = state.store.clone();
-    let family_id = principal.family_id;
     let request_id = request_id.to_string();
     let now = state.now();
     run_blocking(move || {
         store
-            .bind_existing_member_login_request(&family_id, &request_id, &membership_id, now)
+            .bind_existing_member_login_request(&principal, &request_id, &membership_id, now)
             .map_err(map_member_request_error)
     })
     .await?;
@@ -393,12 +390,11 @@ pub(crate) async fn reject_member_login_request(
     let principal = require_owner(&state, &headers).await?;
     let _ = json_body(body)?;
     let store = state.store.clone();
-    let family_id = principal.family_id;
     let request_id = request_id.to_string();
     let now = state.now();
     run_blocking(move || {
         store
-            .reject_member_login_request(&family_id, &request_id, now)
+            .reject_member_login_request(&principal, &request_id, now)
             .map_err(map_member_request_error)
     })
     .await?;
@@ -446,13 +442,12 @@ pub(crate) async fn create_member_login_grant(
     let membership_id = request.validate()?;
     let grant = secure_session_token();
     let store = state.store.clone();
-    let family_id = principal.family_id;
     let blocking_grant = grant.clone();
     let now = state.now();
     let created = run_blocking(move || {
         store
             .create_member_login_grant(
-                &family_id,
+                &principal,
                 &membership_id,
                 &blocking_grant,
                 now,
@@ -657,9 +652,8 @@ pub(crate) async fn rename_family(
     let request = json_body(body)?;
     let family_name = request.validate()?;
     let store = state.store.clone();
-    let family_id = principal.family_id;
     let blocking_family_name = family_name.clone();
-    run_blocking(move || Ok(store.rename_family(&family_id, &blocking_family_name)?)).await?;
+    run_blocking(move || Ok(store.rename_family(&principal, &blocking_family_name)?)).await?;
     Ok(Json(json!({
         "ok": true,
         "family_name": family_name,
@@ -679,10 +673,9 @@ pub(crate) async fn leave(
         ));
     }
     let store = state.store.clone();
-    let family_id = principal.family_id;
-    let membership_id = principal.membership_id;
+    let membership_id = principal.membership_id.clone();
     let now = state.now();
-    run_blocking(move || Ok(store.hard_delete_membership(&family_id, &membership_id, now)?))
+    run_blocking(move || Ok(store.hard_delete_membership(&principal, &membership_id, now)?))
         .await?;
     Ok(Json(json!({"ok": true})))
 }
@@ -695,10 +688,9 @@ pub(crate) async fn logout_current_device(
     let principal = authenticate(&state, &headers).await?;
     let _ = json_body(body)?;
     let store = state.store.clone();
-    let family_id = principal.family_id;
-    let device_id = principal.device_id;
+    let device_id = principal.device_id.clone();
     let now = state.now();
-    run_blocking(move || Ok(store.revoke_family_device(&family_id, &device_id, now)?)).await?;
+    run_blocking(move || Ok(store.revoke_family_device(&principal, &device_id, now)?)).await?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -718,7 +710,7 @@ pub(crate) async fn delete_family(
         let family_media = blocking_state.media_root.join(&principal.family_id);
         match blocking_state
             .store
-            .delete_family(&principal.family_id, &confirmed_family_name)
+            .delete_family(&principal, &confirmed_family_name)
         {
             Ok(()) => {}
             Err(StoreError::FamilyNameMismatch) => {

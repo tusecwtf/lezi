@@ -164,6 +164,7 @@ impl Store {
         let fingerprint = request_fingerprint("author_declare", &input)?;
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::causal::require_current_principal(&tx, principal)?;
         if let Some(receipt) =
             replay_mutation_receipt(&tx, &principal.family_id, &input.mutation_id, &fingerprint)?
         {
@@ -365,6 +366,7 @@ impl Store {
 
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::causal::require_current_principal(&tx, principal)?;
         if let Some(receipt) =
             replay_mutation_receipt(&tx, &principal.family_id, &input.mutation_id, &fingerprint)?
         {

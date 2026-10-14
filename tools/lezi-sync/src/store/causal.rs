@@ -3199,6 +3199,7 @@ impl Store {
             tx_result.as_ref().ok().map(|tx| &**tx),
         )?;
         let tx = tx_result?;
+        require_current_principal(&tx, principal)?;
         let exact_replay = batch_is_exact_replay(&tx, principal, &units)?;
         if !exact_replay {
             let admission = self.causal_commit_limiter.check_and_record_in(
@@ -3485,6 +3486,7 @@ impl Store {
             tx_result.as_ref().ok().map(|tx| &**tx),
         )?;
         let tx = tx_result?;
+        require_current_principal(&tx, principal)?;
         let projection = match load_conflict_heads(
             &tx,
             &self.database_path,
@@ -3550,6 +3552,7 @@ impl Store {
             tx_result.as_ref().ok().map(|tx| &**tx),
         )?;
         let tx = tx_result?;
+        require_current_principal(&tx, principal)?;
         #[cfg(test)]
         super::conflict_snapshots::test_hook::resolution_entered(&principal.family_id);
         let request_hash = resolution_request_hash(&input)?;
@@ -4013,6 +4016,7 @@ impl Store {
         }
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        require_current_principal(&tx, principal)?;
         let metadata: Option<(String, String, String, String, String)> = tx
             .query_row(
                 "SELECT status, stable_version_id, entity_type, client_uuid, kind
@@ -4235,4 +4239,40 @@ impl<'de> serde::Deserialize<'de> for CausalUnitResult {
             reason: raw.reason,
         })
     }
+}
+
+/// An earlier HTTP authentication cannot authorize a write after identity removal wins the transaction.
+pub(super) fn require_current_principal(
+    tx: &Transaction<'_>,
+    principal: &Principal,
+) -> Result<(), StoreError> {
+    let family: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM families WHERE id=?1)",
+        [&principal.family_id],
+        |row| row.get(0),
+    )?;
+    if !family {
+        return Err(StoreError::FamilyDeleted);
+    }
+    let membership: Option<String> = tx.query_row("SELECT role FROM memberships WHERE family_id=?1 AND membership_id=?2 AND left_at IS NULL",params![principal.family_id,principal.membership_id],|row|row.get(0)).optional()?;
+    let Some(role) = membership else {
+        return Err(StoreError::MembershipDeleted);
+    };
+    if role != principal.role {
+        return Err(StoreError::AuthenticationInvalid);
+    }
+    let device: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM devices WHERE device_id=?1 AND membership_id=?2 AND status='active')",params![principal.device_id,principal.membership_id],|row|row.get(0))?;
+    if !device {
+        // Principal deliberately carries no credential. Never turn an ambiguous
+        // session history or takeover into the client's destructive removal code.
+        let explicit_removal: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM device_sessions WHERE device_id=?1 AND revoked_reason='device_removed') AND NOT EXISTS(SELECT 1 FROM device_sessions WHERE device_id=?1 AND (revoked_reason IS NULL OR revoked_reason != 'device_removed'))",
+            [&principal.device_id], |row| row.get(0))?;
+        return Err(if explicit_removal {
+            StoreError::DeviceRemoved
+        } else {
+            StoreError::AuthenticationInvalid
+        });
+    }
+    Ok(())
 }

@@ -130,6 +130,7 @@ impl Fx {
             membership_id: "m-member".to_owned(),
             device_id: "d-member".to_owned(),
         };
+        register_test_principal(&store, &member);
         Self {
             store,
             _dir: dir,
@@ -280,7 +281,7 @@ impl Fx {
             family_id: self.family_id.clone(),
             role: "owner".to_owned(),
             membership_id,
-            device_id: "d-real-owner".to_owned(),
+            device_id: self.owner.device_id.clone(),
         }
     }
 

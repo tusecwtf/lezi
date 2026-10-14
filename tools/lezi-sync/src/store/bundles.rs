@@ -1843,6 +1843,7 @@ impl Store {
         }
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::causal::require_current_principal(&transaction, principal)?;
 
         // Canonicalize every server-owned field before hashing so forged client
         // claims never become part of the durable package identity.
@@ -2070,6 +2071,7 @@ impl Store {
         } = principal;
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::causal::require_current_principal(&transaction, principal)?;
         let row = load_bundle_row(&transaction, family_id, bundle_id)?
             .ok_or(StoreError::BundleNotFound)?;
 

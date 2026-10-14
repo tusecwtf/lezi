@@ -182,6 +182,7 @@ impl Store {
         for media_uuid in media_uuids {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            super::causal::require_current_principal(&transaction, principal)?;
             let Some(_row) = load_open_staging_bundle_for_membership(
                 &transaction,
                 family_id,

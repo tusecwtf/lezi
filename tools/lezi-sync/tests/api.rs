@@ -11626,17 +11626,33 @@ async fn causal_protocol_smoke_create_pull_branch_and_resolve() {
     assert_eq!(status, StatusCode::OK, "{retry_after_gc_failure}");
     assert_eq!(retry_after_gc_failure["replay"], true);
 
-    let compacted: (i64, i64) = Connection::open(&database_path)
-        .unwrap()
-        .query_row(
-            "SELECT
+    // The response intentionally does not await best-effort retention. Observe
+    // its persisted result rather than assuming the spawned sweep already ran.
+    let mut last_compacted = None;
+    let compacted = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let compacted: (i64, i64) = Connection::open(&database_path)
+                .unwrap()
+                .query_row(
+                    "SELECT
                 (SELECT COUNT(*) FROM conflict_branches WHERE conflict_id = ?1),
                 (SELECT COUNT(*) FROM mutation_receipts
                   WHERE membership_id = '__conflict_snapshot_v2__' AND conflict_id = ?1)",
-            [&conflict_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
+                    [&conflict_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            last_compacted = Some(compacted);
+            if compacted == (0, 0) {
+                break compacted;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("background retention did not compact the repaired receipt: {last_compacted:?}")
+    });
     assert_eq!(compacted, (0, 0));
 
     let restarted = rig.restart("generation-a");

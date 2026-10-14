@@ -48,7 +48,8 @@ fn expired_auth_cache_entries_are_dropped_and_not_accepted() {
 fn owner_request_list_keeps_unexpired_approved_requests_with_their_status() {
     let directory = TempDir::new().unwrap();
     let store = Store::open(directory.path().join("lezi.db")).unwrap();
-    let family_id = family(&store);
+    family(&store);
+    let owner = store.authenticate("owner-access", 2).unwrap().unwrap();
     let request = store
         .create_member_login_request(CreateMemberLoginRequestInput {
             now: 10,
@@ -62,10 +63,10 @@ fn owner_request_list_keeps_unexpired_approved_requests_with_their_status() {
         .unwrap();
 
     store
-        .approve_new_member_login_request(&family_id, &request.request_id, 11)
+        .approve_new_member_login_request(&owner, &request.request_id, 11)
         .unwrap();
 
-    let visible = store.pending_member_login_requests(&family_id, 12).unwrap();
+    let visible = store.pending_member_login_requests(&owner, 12).unwrap();
     assert_eq!(visible.len(), 1);
     assert_eq!(visible[0].request_id, request.request_id);
     assert_eq!(
@@ -74,10 +75,10 @@ fn owner_request_list_keeps_unexpired_approved_requests_with_their_status() {
     );
 
     store
-        .reject_member_login_request(&family_id, &request.request_id, 13)
+        .reject_member_login_request(&owner, &request.request_id, 13)
         .unwrap();
     assert!(store
-        .pending_member_login_requests(&family_id, 14)
+        .pending_member_login_requests(&owner, 14)
         .unwrap()
         .is_empty());
 
@@ -93,7 +94,7 @@ fn owner_request_list_keeps_unexpired_approved_requests_with_their_status() {
         })
         .unwrap();
     store
-        .approve_new_member_login_request(&family_id, &replacement.request_id, 16)
+        .approve_new_member_login_request(&owner, &replacement.request_id, 16)
         .unwrap();
 }
 
@@ -101,7 +102,8 @@ fn owner_request_list_keeps_unexpired_approved_requests_with_their_status() {
 fn approved_unclaimed_requests_still_count_toward_the_open_request_limit() {
     let directory = TempDir::new().unwrap();
     let store = Store::open(directory.path().join("lezi.db")).unwrap();
-    let family_id = family(&store);
+    family(&store);
+    let owner = store.authenticate("owner-access", 2).unwrap().unwrap();
     let approved = store
         .create_member_login_request(CreateMemberLoginRequestInput {
             now: 10,
@@ -114,7 +116,7 @@ fn approved_unclaimed_requests_still_count_toward_the_open_request_limit() {
         })
         .unwrap();
     store
-        .approve_new_member_login_request(&family_id, &approved.request_id, 11)
+        .approve_new_member_login_request(&owner, &approved.request_id, 11)
         .unwrap();
 
     let error = store
@@ -130,3 +132,7 @@ fn approved_unclaimed_requests_still_count_toward_the_open_request_limit() {
         .unwrap_err();
     assert!(matches!(error, StoreError::MemberRequestLimit));
 }
+
+mod auth_cache_barrier_tests;
+
+mod identity_transaction_tests;

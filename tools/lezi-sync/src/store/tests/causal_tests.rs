@@ -388,6 +388,7 @@ impl CausalFx {
             membership_id: "m-causal-member".to_owned(),
             device_id: "d-causal-member".to_owned(),
         };
+        register_test_principal(&store, &member);
         Self {
             store,
             _dir: dir,
@@ -482,7 +483,14 @@ fn custom_item_root(name: &str, icon_slot: i64, updated_at: i64) -> Map<String, 
 }
 
 fn deterministic_snapshot_payload(page: &ConflictDetailPage) -> Value {
-    let mut value = serde_json::to_value(page).unwrap();
+    let initial = serde_json::to_value(page).unwrap();
+    let owner = initial["stable"]["actor_id"].as_str().unwrap();
+    let device = initial["stable"]["device_id"].as_str().unwrap();
+    let raw = serde_json::to_string(&initial)
+        .unwrap()
+        .replace(owner, "synthetic-owner")
+        .replace(device, "synthetic-owner-device");
+    let mut value: Value = serde_json::from_str(&raw).unwrap();
     let root = value.as_object_mut().unwrap();
     for key in [
         "conflict_id",
@@ -592,6 +600,7 @@ fn three_branch_snapshot(order: [usize; 3]) -> ConflictDetailPage {
             device_id: device_id.to_owned(),
             ..fx.owner.clone()
         };
+        register_test_principal(&fx.store, &principal);
         let result = fx
             .commit(&principal, branch, 1_700_000_010 + index as i64)
             .unwrap();
@@ -629,6 +638,7 @@ fn causal_commit_principal_budget_exempts_exact_replay_and_resets_at_boundary() 
         device_id: "another-owner-device".to_owned(),
         ..fx.owner.clone()
     };
+    register_test_principal(&fx.store, &rotated_device);
     let saturated = fx
         .commit(
             &rotated_device,
@@ -2118,7 +2128,7 @@ fn conflict_retention_gc_is_two_phase_and_replay_safe_after_restart() {
             .unwrap(),
         0,
     );
-    super::super::conflict_retention::test_hook::fail_after_mark_once();
+    super::super::conflict_retention::test_hook::fail_after_mark_once(&fx.family_id);
     assert!(matches!(
         fx.store.gc_conflict_metadata(1_700_000_101 + 86_400),
         Err(StoreError::InvalidStoredPayload),
@@ -3969,6 +3979,7 @@ fn causal_member_acl_rejects_baby_and_foreign_record_edit() {
         membership_id: "m-member".to_owned(),
         device_id: "d-member".to_owned(),
     };
+    register_test_principal(&fx.store, &member);
     let baby_version = fx
         .store
         .pull(&fx.family_id, 0)
@@ -4036,6 +4047,14 @@ fn choice_only_resolution_keeps_baby_owner_only_after_author_downgrade() {
         role: "member".to_owned(),
         ..fx.owner.clone()
     };
+    fx.store
+        .connect()
+        .unwrap()
+        .execute(
+            "UPDATE memberships SET role='member' WHERE membership_id=?1",
+            params![fx.owner.membership_id],
+        )
+        .unwrap();
     let result = fx
         .store
         .resolve_conflict(
@@ -4238,8 +4257,8 @@ fn causal_commit_caps_open_branches_without_hiding_durable_branches() {
     let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
     let full_branch_statements = finish_statement_count(&fx.family_id);
     assert_eq!(detail.branches.len(), 16);
-    assert_eq!(one_branch_statements, 5);
-    assert_eq!(full_branch_statements, 4);
+    assert_eq!(one_branch_statements, 7);
+    assert_eq!(full_branch_statements, 6);
 
     let restarted = Store::open(fx._dir.path().join("lezi.db")).unwrap();
     assert_eq!(
@@ -5143,7 +5162,7 @@ fn causal_care_plan_client_brought_creator_stamp_is_ignored_and_re_stamped() {
     let legacy_version = legacy.results[0].stable_version_id.clone().unwrap();
     assert_eq!(
         stored_care_plan_payload(&fx, &legacy_version).get("created_by_membership_id"),
-        Some(&Value::String("m-owner".to_owned())),
+        Some(&Value::String(fx.owner.membership_id.clone())),
         "client-forged creator stamp must be re-stamped to the principal"
     );
 
@@ -5167,7 +5186,7 @@ fn causal_care_plan_client_brought_creator_stamp_is_ignored_and_re_stamped() {
     let current_version = current.results[0].stable_version_id.clone().unwrap();
     assert_eq!(
         stored_care_plan_payload(&fx, &current_version).get("created_by_membership_id"),
-        Some(&Value::String("m-owner".to_owned())),
+        Some(&Value::String(fx.owner.membership_id.clone())),
         "stamp-less mutation must still land a server-stamped stable root"
     );
 }
