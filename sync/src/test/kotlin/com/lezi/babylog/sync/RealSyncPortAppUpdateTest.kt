@@ -384,7 +384,6 @@ class RealSyncPortAppUpdateTest {
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
     }
 
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test
     fun reauthRetryCheckKeepsPackageUnknownForceShell() = runTest {
         val rig = SyncRig(
@@ -400,18 +399,21 @@ class RealSyncPortAppUpdateTest {
             .isEqualTo(ForcedAppUpdateState.PackageUnknown)
 
         rig.preferences.clearDeviceCredentialsForReauth()
-        runCurrent()
+        // The session observer runs on the port's real IO scope, so runCurrent()
+        // and a virtual timeout cannot synchronize it. Establish reauth first;
+        // the manual check must then preserve the already-published status.
+        withContext(Dispatchers.Default) {
+            withTimeout(1_000L) {
+                rig.port.status().first { it == SyncStatus.ReauthRequired }
+            }
+        }
         val result = rig.port.checkAppUpdate().getOrThrow()
 
         assertThat(result).isEqualTo(AppUpdateCheckResult.ForcedPackageUnknown)
         assertThat(rig.port.availableForcedAppUpdate().first())
             .isEqualTo(ForcedAppUpdateState.PackageUnknown)
         assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
-        assertThat(
-            withTimeout(1_000L) {
-                rig.port.status().first { it == SyncStatus.ReauthRequired }
-            },
-        ).isEqualTo(SyncStatus.ReauthRequired)
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.ReauthRequired)
     }
 
     @Test
