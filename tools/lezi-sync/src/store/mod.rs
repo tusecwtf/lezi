@@ -365,6 +365,8 @@ pub enum StoreError {
     DeviceNotFound,
     #[error("device was removed")]
     DeviceRemoved,
+    #[error("authentication is no longer current")]
+    AuthenticationInvalid,
     #[error("family membership was deleted")]
     MembershipDeleted,
     #[error("family was deleted")]
@@ -391,6 +393,8 @@ pub enum StoreError {
     ForbiddenAnonymousFact,
     #[error("deleted custom item cannot be resurrected")]
     CustomItemTombstoneResurrection,
+    #[error("identity administration is forbidden for this actor")]
+    ForbiddenIdentityAdministration,
     #[error("deleted care plan cannot be resurrected")]
     CarePlanTombstoneResurrection,
     #[error("deleted care record cannot be resurrected")]
@@ -525,6 +529,9 @@ pub(in crate::store) struct CachedSession {
     pub last_used_synced_at: i64,
 }
 
+#[cfg(test)]
+type AuthCacheReadHook = Arc<dyn Fn() + Send + Sync>;
+
 #[derive(Clone)]
 pub struct Store {
     database_path: PathBuf,
@@ -540,6 +547,9 @@ pub struct Store {
     /// reaches every handle; see `live_census_cache` for the contract.
     live_census_cache: Arc<live_census_cache::LiveCensusCache>,
     pub(in crate::store) auth_cache: Arc<std::sync::RwLock<HashMap<String, CachedSession>>>,
+    auth_cache_generation: Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(test)]
+    pub(in crate::store) auth_cache_read_hook: Arc<std::sync::Mutex<Option<AuthCacheReadHook>>>,
     /// Tests opt in; production always auto-aligns after a successful record commit.
     #[cfg(test)]
     pub(crate) auto_align_enabled: Arc<AtomicBool>,
@@ -630,9 +640,13 @@ impl Store {
         Ok(())
     }
     pub fn invalidate_auth_cache(&self) {
-        if let Ok(mut cache) = self.auth_cache.write() {
-            cache.clear();
-        }
+        let mut cache = self
+            .auth_cache
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.auth_cache_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        cache.clear();
     }
 
     /// Test probe: the head rev a live cache entry claims for this family, or

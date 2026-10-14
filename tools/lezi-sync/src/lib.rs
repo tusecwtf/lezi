@@ -1733,6 +1733,19 @@ impl IntoResponse for ApiError {
 impl From<StoreError> for ApiError {
     fn from(error: StoreError) -> Self {
         match &error {
+            StoreError::ForbiddenIdentityAdministration => {
+                Self::forbidden("Cannot administer this family identity")
+            }
+            StoreError::MembershipDeleted => {
+                Self::unauthorized_code("membership_deleted", "Membership was deleted")
+            }
+            StoreError::AuthenticationInvalid => Self::unauthorized(),
+            StoreError::FamilyDeleted => {
+                Self::unauthorized_code("family_deleted", "Family was deleted")
+            }
+            StoreError::DeviceRemoved => {
+                Self::unauthorized_code("device_removed", "Device was removed")
+            }
             StoreError::InvalidStoredPayload => {
                 tracing::error!(
                     code = "invalid_stored_payload",
@@ -1760,6 +1773,27 @@ impl From<std::io::Error> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stale_identity_errors_preserve_terminal_cleanup_classification() {
+        for (error, expected) in [
+            (StoreError::AuthenticationInvalid, None),
+            (StoreError::FamilyDeleted, Some("family_deleted")),
+            (StoreError::MembershipDeleted, Some("membership_deleted")),
+            (StoreError::DeviceRemoved, Some("device_removed")),
+        ] {
+            let error = ApiError::from(error);
+            assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+            assert_eq!(error.code, expected);
+            let response = error.into_response();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let json: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json.get("code").and_then(Value::as_str), expected);
+        }
+    }
 
     #[test]
     fn tokens_match_hmac_contract() {

@@ -397,7 +397,7 @@ fn live_candidate_may_reference_tombstoned_record() {
     let connection = rusqlite::Connection::open(fx._directory.path().join("lezi.db")).unwrap();
     connection
         .execute(
-            "INSERT INTO memberships(membership_id, family_id, role, display_name, display_name_key)
+            "INSERT OR IGNORE INTO memberships(membership_id, family_id, role, display_name, display_name_key)
              VALUES ('m-member', ?1, 'member', '成员', '成员')",
             rusqlite::params![fx.family_id],
         )

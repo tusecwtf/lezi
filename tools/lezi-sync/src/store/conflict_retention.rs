@@ -477,7 +477,7 @@ impl Store {
         batch_limit: usize,
     ) -> Result<usize, StoreError> {
         #[cfg(test)]
-        if test_hook::take_fail_after_mark() {
+        if test_hook::take_fail_after_mark(family_id) {
             return Err(StoreError::InvalidStoredPayload);
         }
 
@@ -596,15 +596,27 @@ pub(super) fn terminal_metadata_was_compacted(
 
 #[cfg(test)]
 pub(super) mod test_hook {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
 
-    static FAIL_AFTER_MARK: AtomicBool = AtomicBool::new(false);
-
-    pub(crate) fn fail_after_mark_once() {
-        FAIL_AFTER_MARK.store(true, Ordering::SeqCst);
+    fn failures() -> &'static Mutex<HashSet<String>> {
+        static FAILURES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+        FAILURES.get_or_init(|| Mutex::new(HashSet::new()))
     }
 
-    pub(super) fn take_fail_after_mark() -> bool {
-        FAIL_AFTER_MARK.swap(false, Ordering::SeqCst)
+    pub(crate) fn fail_after_mark_once(family_id: &str) {
+        failures().lock().unwrap().insert(family_id.to_owned());
+    }
+
+    pub(super) fn take_fail_after_mark(family_id: &str) -> bool {
+        failures().lock().unwrap().remove(family_id)
+    }
+
+    #[test]
+    fn injected_failure_is_consumed_only_by_its_family() {
+        fail_after_mark_once("synthetic-injected-family");
+        assert!(!take_fail_after_mark("synthetic-unrelated-family"));
+        assert!(take_fail_after_mark("synthetic-injected-family"));
+        assert!(!take_fail_after_mark("synthetic-injected-family"));
     }
 }
