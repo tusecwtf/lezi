@@ -1069,6 +1069,7 @@ internal class MemorySyncPreferences(
     override val pendingGenerationResync = MutableStateFlow(false)
     private var pendingReplicaResetPrevious: SyncSession? = null
     private var pendingReplicaResetSession: SyncSession? = null
+    val deviceRemovalClearCompleted = CompletableDeferred<Unit>()
     val membershipDeletionClearCompleted = CompletableDeferred<Unit>()
     val familyDeletionClearCompleted = CompletableDeferred<Unit>()
     override val session: Flow<SyncSession> = state
@@ -1401,6 +1402,7 @@ internal class MemorySyncPreferences(
 
     override suspend fun clearPendingDeviceRemovalClear() {
         pendingDeviceRemovalClear = false
+        deviceRemovalClearCompleted.complete(Unit)
     }
 
     override val deviceRemovedReceipt: Flow<DeviceRemovedCleanupReceipt?> =

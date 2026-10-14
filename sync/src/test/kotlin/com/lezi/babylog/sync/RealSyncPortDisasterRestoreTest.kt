@@ -638,6 +638,9 @@ class RealSyncPortDisasterRestoreTest {
             },
         )
         rig.awaitStartupRecovery()
+        // Inspect restore receipt retirement before the commit-triggered
+        // foreground round can legitimately publish the newer local edit.
+        rig.foreground.setForeground(false)
         val babyId = rig.babies.seed(localBaby())
         rig.records.seed(
             localRecord(babyId).copy(
