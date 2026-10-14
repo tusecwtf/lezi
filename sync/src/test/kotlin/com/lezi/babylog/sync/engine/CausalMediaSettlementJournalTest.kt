@@ -189,6 +189,62 @@ class CausalMediaSettlementJournalTest {
             .isEqualTo(CausalMediaSettlementPhase.CommitUnknown)
     }
 
+    @Test
+    fun expiredReceiptReplacement_keepsFrozenUnknownEnvelope() = runTest {
+        val rig = JournalRig()
+        rig.bindPending()
+        rig.owner.recordPrepared(MUTATION_ID, receipt())
+        rig.owner.markCommitUnknown(MUTATION_ID)
+        val expected = rig.owner.expiredCommitSnapshot(MUTATION)
+        val renewed = receipt().copy(expiresAtEpochSeconds = 20_000)
+
+        rig.owner.replaceExpiredCommitReceipts(expected, listOf(renewed))
+
+        val current = rig.owner.expiredCommitSnapshot(MUTATION)
+        assertThat(current).isEqualTo(expected.copy(receipts = listOf(renewed)))
+        assertThat(rig.spool.discardedMutationIds).isEmpty()
+    }
+
+    @Test
+    fun expiredReceiptReplacement_rejectsChangedJournalAndInvalidReceiptSet() = runTest {
+        val rig = JournalRig()
+        rig.bindPending()
+        rig.owner.recordPrepared(MUTATION_ID, receipt())
+        rig.owner.markCommitUnknown(MUTATION_ID)
+        val expected = rig.owner.expiredCommitSnapshot(MUTATION)
+        for (receipts in listOf(
+            emptyList(),
+            listOf(receipt(), receipt()),
+            listOf(receipt().copy(sha256 = "ff".repeat(32))),
+            listOf(receipt().copy(byteSize = 4)),
+            listOf(receipt().copy(expiresAtEpochSeconds = 0)),
+        )) {
+            assertThat(runCatching {
+                rig.owner.replaceExpiredCommitReceipts(expected, receipts)
+            }.exceptionOrNull()).isInstanceOf(IllegalArgumentException::class.java)
+            assertThat(rig.owner.expiredCommitSnapshot(MUTATION)).isEqualTo(expected)
+        }
+        rig.owner.markTerminal(MUTATION_ID, terminal(MUTATION, CausalCommitStatus.ACCEPTED))
+        val terminalBefore = rig.cache.getFrozenMediaSpoolManifest(MUTATION_ID)
+        assertThat(runCatching {
+            rig.owner.replaceExpiredCommitReceipts(expected, listOf(receipt().copy(expiresAtEpochSeconds = 20_000)))
+        }.exceptionOrNull()).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(rig.cache.getFrozenMediaSpoolManifest(MUTATION_ID)).isEqualTo(terminalBefore)
+    }
+
+    @Test
+    fun expiredReceiptSnapshot_rejectsPendingAndDifferentMutation() = runTest {
+        val rig = JournalRig()
+        rig.bindPending()
+        rig.owner.recordPrepared(MUTATION_ID, receipt())
+        assertThat(runCatching { rig.owner.expiredCommitSnapshot(MUTATION) }.exceptionOrNull())
+            .isInstanceOf(IllegalArgumentException::class.java)
+        rig.owner.markCommitUnknown(MUTATION_ID)
+        assertThat(runCatching {
+            rig.owner.expiredCommitSnapshot(MUTATION.copy(rootJson = """{"changed":true}"""))
+        }.exceptionOrNull()).isInstanceOf(IllegalArgumentException::class.java)
+    }
+
     private class JournalRig {
         val cache = MemoryConflictSnapshotCacheDao()
         val spool = TestImmutableMediaSpool(TestMediaFileStore())

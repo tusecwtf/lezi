@@ -244,6 +244,8 @@ internal class CausalSettlement(
                 ?: (failure.cause as? CausalCommitRejectedException)
             if (rejected != null && isTerminalRejectionCode(rejected.code)) {
                 recordTerminalRejection(frozen, rejected)
+            } else if (rejected != null) {
+                repairDefinitivelyExpiredMedia(session, frozen, rejected)
             }
             throw failure
         }
@@ -309,6 +311,8 @@ internal class CausalSettlement(
                 ?: (failure.cause as? CausalCommitRejectedException)
             if (rejected != null && isTerminalRejectionCode(rejected.code)) {
                 recordTerminalRejection(frozen, rejected)
+            } else if (rejected != null) {
+                repairDefinitivelyExpiredMedia(session, frozen, rejected)
             }
             throw failure
         }
@@ -2079,6 +2083,37 @@ internal class CausalSettlement(
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * A definitive expiry rejection proves this exact mutation did not commit. Reprepare once,
+     * then leave CommitUnknown intact and let the next cycle replay commit first. Never infer
+     * rejection from the local clock or a lost response, and never unpin a newer local edit.
+     */
+    private suspend fun repairDefinitivelyExpiredMedia(
+        session: SyncSession,
+        frozen: List<FrozenCausalUnit>,
+        rejected: CausalCommitRejectedException,
+    ) {
+        if (rejected.code != "media_preimage_expired" || rejected.mutationId == null) return
+        val unit = frozen.singleOrNull { it.mutation.mutationId == rejected.mutationId }
+            ?.takeIf { it.mutation.media.isNotEmpty() } ?: return
+        try {
+            requireRemoteAllowed(session)
+            val journal = requireNotNull(mediaSettlementJournal)
+            val expected = journal.expiredCommitSnapshot(unit.mutation)
+            val receipts = expected.manifest.items.map { spoolItem ->
+                val item = unit.mutation.media.single { it.mediaUuid == spoolItem.mediaUuid }
+                putCausalMediaPreimageOrBind(session, unit.mutation.mutationId, item, spoolItem)
+            }
+            journal.replaceExpiredCommitReceipts(expected, receipts)
+        } catch (failure: Throwable) {
+            // Preserve reauthentication/cancellation handling and retain the triggering proof.
+            if (failure !is CancellationException && failure !== rejected) {
+                failure.addSuppressed(rejected)
+            }
+            throw failure
         }
     }
 

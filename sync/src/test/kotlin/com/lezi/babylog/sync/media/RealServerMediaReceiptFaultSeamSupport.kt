@@ -115,6 +115,24 @@ internal class RealServerMediaReceiptFaultFixture private constructor(
         sourceRelationDao = sourceRelations,
     )
 
+    /** Keep the already synchronized replica, but authenticate the edit as another real member. */
+    suspend fun switchToNewMember() {
+        val request = backend.requestMemberLogin(proxy.endpoint, "爸爸", "Media Member Phone")
+        backend.approveNewMemberLogin(session, request.requestId)
+        val joined = backend.claimMemberLogin(proxy.endpoint, request.pendingSecret)
+        session = preferences.current().copy(
+            familyId = joined.familyId,
+            membershipId = joined.membershipId,
+            deviceId = joined.deviceId,
+            accessToken = joined.accessToken,
+            refreshToken = joined.refreshToken,
+            accessExpiresAtEpochSeconds = joined.accessExpiresAtEpochSeconds,
+            role = joined.role,
+            pullGeneration = joined.generation,
+        )
+        preferences.saveSession(session)
+    }
+
     data class SeededMedia(
         val recordUuid: String,
         val mediaUuid: String,

@@ -169,6 +169,29 @@ internal class CausalMediaSettlementJournalOwner(
         ).also { updated -> persist(updated) }
     }
 
+    /** Snapshot for a repair authorized only by a definitive, mutation-bound server expiry. */
+    suspend fun expiredCommitSnapshot(mutation: CausalMutationUnit): CausalMediaSettlementJournal =
+        loadRequired(mutation.mutationId).also { journal ->
+            require(journal.phase == CausalMediaSettlementPhase.CommitUnknown) {
+                "expired media repair requires durable commit-attempt evidence"
+            }
+            require(journal.mutation == mutation) { "expired media repair mutation drift" }
+        }
+
+    /** Keep commit-first recovery even when a newer local edit supersedes this frozen epoch. */
+    suspend fun replaceExpiredCommitReceipts(
+        expected: CausalMediaSettlementJournal,
+        receipts: List<CausalMediaPreimageReceipt>,
+    ): Unit = transactionRunner.run {
+        require(expected.phase == CausalMediaSettlementPhase.CommitUnknown) {
+            "expired media repair cannot change a pending or terminal journal"
+        }
+        val current = loadRequired(expected.binding.mutationId)
+        require(current == expected) { "media journal changed during expired receipt repair" }
+        // persist validates exact UUID set, digest, length and positive expiry before writing.
+        persist(current.copy(receipts = receipts.sortedBy(CausalMediaPreimageReceipt::mediaUuid)))
+    }
+
     /** Must commit before the network commit begins; crash after this point replays commit first. */
     suspend fun markCommitUnknown(mutationId: String): CausalMediaSettlementJournal =
         transactionRunner.run {
