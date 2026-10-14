@@ -15,7 +15,7 @@ No wire/schema/capability/signing change is involved.
 | Owner marker | Empty strict-name `.sync-download-owners/*.owner`, `CREATE_NEW`; marker and owner directory forced before opening target | Retained until reference-aware cleanup succeeds; only adopted bytes or successfully reclaimed bytes permit marker removal |
 | Replacement marker | Before Room replaces an existing strict owned-layout URI, re-arm its empty marker under recovery mutex → path gate, outside the write lease | Registered before cancellable IO return; rollback/no-op/shared holders retain bytes, failed cleanup retains the marker for recovery |
 | New media file | Fixed `media.jpg/png/webp`, `CREATE_NEW`, no symlink following | `complete` checks positive bounded receipt, SHA syntax, write count and physical size, forces file and closes it before publishing URI |
-| In-process lease | Registered in the page-owned collection inside IO creation, before cancellable dispatcher return | Every child exits before page `finally`; `NonCancellable + IO` releases all leases, preserving the primary error |
+| In-process lease | Registered in the page-owned collection inside IO creation, before cancellable dispatcher return | Every child exits before page `finally`; `NonCancellable` releases all leases; concrete file operations dispatch to IO, preserving the primary error |
 | Room reference | Path gate acquired for staged and currently owned paths; readable paths rechecked before short page transaction | Cleanup takes the same path gate and rechecks active rows plus media-reference holders before filesystem deletion |
 
 The marker name contains two canonical UUIDs and a closed extension; its contents
@@ -40,15 +40,36 @@ before that mutex. Every filesystem operation remains outside the Room write lea
 its empty exclusive parent. Local clear uses the existing shared sync/session barrier
 and recursively sweeps the product roots, including the new directories and markers.
 
+## Dispatcher ownership
+
+The engine owns orchestration and cancellation boundaries, not a global I/O dispatcher.
+The suspend file-store APIs own their blocking work: production `pendingDownloads`
+scans markers on IO, the disk-backed `statLength` dispatches its readability/length
+probe, and owned-file release dispatches close, validation and marker retirement.
+The reference-aware Room/path-gate callback remains on the caller's context; physical
+deletion already dispatches inside `AndroidSyncMediaFileStore.delete`. In-memory
+stores can therefore complete a round entirely on a coroutine test scheduler, without
+racing real IO threads or spending a virtual deadline while fake work is elsewhere.
+Non-cancellable release, registration before cancellable return, recovery-before-path
+lock ordering, and filesystem work outside the Room write lease remain unchanged.
+
 ## Evidence and limits
 
-- `OwnedMediaDownloadStoreTest`: 21 real-filesystem tests directly compiled from the
+- `OwnedMediaDownloadStoreTest`: 22 real-filesystem tests directly compiled from the
   production Kotlin source and run on Linux/JRE21; covers exclusive collisions,
   partial/restart recovery, active lease exclusion, referenced retention, delete retry,
   symlinks, capacity, invalid receipt, actual write-byte cap and eventual empty-directory removal.
   Seven added tests cover replacement restart/delete retry, still-referenced precommit retention,
   existing-marker idempotence, doubled-capacity admission/overflow, URI aliases, replacement
-  symlinks and exact relative avatar keys.
+  symlinks and exact relative avatar keys. The dispatcher regression additionally verifies
+  that the ownership callback retains its caller context while physical retirement uses IO.
+- `SyncMediaFileStoreDispatcherTest` plus `SyncMediaFileStoreSweepTest`: four host tests
+  compile the actual file-store source with Android graphics/context/annotation type stubs;
+  verify off-caller disk stat and retained sweep behavior. Bitmap/Android runtime behavior
+  is not exercised by those stubs.
+- `ReplicaSyncEngineDispatcherTest`: checks caller-dispatcher recovery, staged-file stat,
+  and ownership release through the production engine with in-memory stores. Added for CI;
+  full engine execution remains blocked locally by the Gradle distribution download.
 - `ReplicaSyncEngineOwnedMediaStreamingTest`: production engine plus production owned
   store with buffered entry points forbidden; page adoption, concurrent failure,
   cancellation/dispatcher handoff, initial-join restart, disk-write journal/retry,

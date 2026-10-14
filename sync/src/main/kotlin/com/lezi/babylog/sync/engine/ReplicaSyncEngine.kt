@@ -91,7 +91,6 @@ import com.lezi.babylog.sync.backend.MediaDownloadReceipt
 import com.lezi.babylog.sync.backend.MediaDownloadWriteException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import com.lezi.babylog.sync.media.SyncMediaFileStore
@@ -679,11 +678,9 @@ internal class ReplicaSyncEngine(
                 }
                 // A reused donor may disappear between the reuse scan and this gate.
                 // Check after acquiring the same gate as deletion, before Room publication.
-                withContext(Dispatchers.IO) {
-                    stagedLogMediaBytes.values.forEach { staged ->
-                        check(mediaFiles.statLength(staged.localUri) != null) {
-                            "待采用媒体已不可读，请重试同步"
-                        }
+                stagedLogMediaBytes.values.forEach { staged ->
+                    check(mediaFiles.statLength(staged.localUri) != null) {
+                        "待采用媒体已不可读，请重试同步"
                     }
                 }
                 SyncPerformanceProbe.measure(SyncPerformanceStage.ApplyPage) {
@@ -877,7 +874,7 @@ internal class ReplicaSyncEngine(
             primaryFailure = failure
             throw failure
         } finally {
-            withContext(NonCancellable + Dispatchers.IO) {
+            withContext(NonCancellable) {
                 try {
                     releaseOwnedDownloads(ownedDownloads.toList())
                     cleanupUnownedStagedMedia(stagedLogMediaBytes.values.map { it.localUri }.toSet())
@@ -918,7 +915,7 @@ internal class ReplicaSyncEngine(
             mediaFileCleanup.withPathLocks(paths, block)
         }
 
-    private suspend fun recoverOwnedDownloads() = withContext(Dispatchers.IO) {
+    private suspend fun recoverOwnedDownloads() {
         downloadRecoveryMutex.withLock {
             releaseOwnedDownloads(mediaFiles.pendingDownloads())
         }
@@ -3743,7 +3740,7 @@ internal class ReplicaSyncEngine(
         // replaced file (restore drift, corruption) must re-enter repair so
         // mergePreparedMetadata can realign the stored probe fields. A
         // same-length replacement still escapes — the length stat is the bound.
-        fun backingFileChanged(snapshot: MediaAssetEntity): Boolean =
+        suspend fun backingFileChanged(snapshot: MediaAssetEntity): Boolean =
             mediaFiles.statLength(snapshot.localUri) != snapshot.byteSize
         val candidates = snapshots.filter { snapshot ->
             if (snapshot.kind == "wake") return@filter false
@@ -4159,7 +4156,7 @@ internal class ReplicaSyncEngine(
             primaryFailure = failure
             throw failure
         } finally {
-            withContext(NonCancellable + Dispatchers.IO) {
+            withContext(NonCancellable) {
                 try {
                     releaseOwnedDownloads(ownedDownloads)
                 } catch (cleanupFailure: Throwable) {
@@ -4179,7 +4176,7 @@ internal class ReplicaSyncEngine(
     ): Boolean {
         var adopted = false
         mediaFileCleanup.withPathLocks(listOf(media.localUri, localUri)) {
-            if (withContext(Dispatchers.IO) { mediaFiles.statLength(localUri) } == null) {
+            if (mediaFiles.statLength(localUri) == null) {
                 return@withPathLocks
             }
             transactionRunner.run {

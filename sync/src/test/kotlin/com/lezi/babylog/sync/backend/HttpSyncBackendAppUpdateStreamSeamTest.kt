@@ -4,6 +4,7 @@ import java.io.ByteArrayOutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.security.MessageDigest
+import kotlin.io.path.createTempDirectory
 import kotlin.concurrent.thread
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
@@ -53,7 +54,7 @@ class HttpSyncBackendAppUpdateStreamSeamTest {
             }
         }
 
-        val cacheDir = createTempDir(prefix = "lezi-apk-stream-ok")
+        val cacheDir = createTempDirectory(prefix = "lezi-apk-stream-ok").toFile()
         try {
             val stagingFile = appUpdateStagingApk(cacheDir)
             appUpdateStagingDir(cacheDir).mkdirs()
@@ -111,7 +112,7 @@ class HttpSyncBackendAppUpdateStreamSeamTest {
             }
         }
 
-        val cacheDir = createTempDir(prefix = "lezi-apk-over-cap")
+        val cacheDir = createTempDirectory(prefix = "lezi-apk-over-cap").toFile()
         try {
             val stagingFile = appUpdateStagingApk(cacheDir)
             appUpdateStagingDir(cacheDir).mkdirs()

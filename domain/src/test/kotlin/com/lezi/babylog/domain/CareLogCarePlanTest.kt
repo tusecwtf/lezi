@@ -1483,6 +1483,7 @@ class CareLogCarePlanTest {
         assertThat(fakes.reminders.scheduledCarePlanIds).doesNotContain(planId)
         assertThat(fakes.reminders.cancelledCarePlanIds).contains(planId)
     }
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test
     fun editingCalendarReadyPlanNeverPublishesNoOwnerHandoffState() = runTest {
         val fakes = Fakes()

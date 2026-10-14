@@ -226,22 +226,28 @@ internal class OwnedMediaDownloadStore(
 
         override suspend fun release(reclaimUnreferenced: suspend (String) -> Unit) {
             try {
-                close()
                 val exclusive = checkNotNull(target.parent)
-                requireDirectory(checkNotNull(exclusive.parent))
-                if (Files.exists(exclusive, NOFOLLOW_LINKS)) requireDirectory(exclusive)
-                requireDirectory(checkNotNull(marker.parent))
-                if (Files.exists(target, NOFOLLOW_LINKS)) {
-                    check(Files.isRegularFile(target, NOFOLLOW_LINKS)) { "下载媒体文件无效" }
+                withContext(Dispatchers.IO) {
+                    close()
+                    requireDirectory(checkNotNull(exclusive.parent))
+                    if (Files.exists(exclusive, NOFOLLOW_LINKS)) requireDirectory(exclusive)
+                    requireDirectory(checkNotNull(marker.parent))
+                    if (Files.exists(target, NOFOLLOW_LINKS)) {
+                        check(Files.isRegularFile(target, NOFOLLOW_LINKS)) { "下载媒体文件无效" }
+                    }
                 }
+                // The Room/path-gate callback stays on the caller's context. Its
+                // concrete file store dispatches deletion, outside the write lease.
                 reclaimUnreferenced(localUri)
-                if (Files.exists(exclusive, NOFOLLOW_LINKS) && children(exclusive).isEmpty()) {
-                    Files.delete(exclusive)
-                    syncDirectory(checkNotNull(exclusive.parent))
+                withContext(Dispatchers.IO) {
+                    if (Files.exists(exclusive, NOFOLLOW_LINKS) && children(exclusive).isEmpty()) {
+                        Files.delete(exclusive)
+                        syncDirectory(checkNotNull(exclusive.parent))
+                    }
+                    // A failed Room check or file delete leaves this marker for retry.
+                    Files.deleteIfExists(marker)
+                    syncDirectory(checkNotNull(marker.parent))
                 }
-                // A failed Room check or file delete leaves this marker for retry.
-                Files.deleteIfExists(marker)
-                syncDirectory(checkNotNull(marker.parent))
             } finally {
                 relinquishActiveLease()
             }

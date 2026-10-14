@@ -4,7 +4,6 @@ import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.performance.SyncPerformanceProbe
 import com.lezi.babylog.sync.performance.SyncPerformanceStage
-import java.io.IOException
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Before
@@ -46,7 +45,7 @@ class ReplicaSyncEnginePerformanceProbeTest {
     fun handshakeFailureIsTimedAndPropagatedBeforePullOrPublication() = runTest {
         val session = joinedReplicaSession()
         val rig = ReplicaEngineRig(session)
-        val expected = IOException("synthetic handshake failure")
+        val expected = IdentityPreservingIOException("synthetic handshake failure")
         rig.backend.handshakeFailure = expected
         SyncPerformanceProbe.startCapture()
 
@@ -93,7 +92,7 @@ class ReplicaSyncEnginePerformanceProbeTest {
         val session = joinedReplicaSession()
         val rig = ReplicaEngineRig(session)
         rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
-        val expected = IOException("synthetic media failure")
+        val expected = IdentityPreservingIOException("synthetic media failure")
         rig.backend.getMediaFailure = expected
         val recordId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee62"
         val mediaId = "11111111-1111-4111-8111-111111111162"

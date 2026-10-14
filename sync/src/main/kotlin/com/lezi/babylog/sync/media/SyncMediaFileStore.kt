@@ -67,6 +67,10 @@ class PreparedMedia(
     }
 }
 
+/**
+ * Suspend operations are main-safe: concrete disk stores own their I/O dispatch.
+ * The engine keeps orchestration and in-memory adapters on the caller's dispatcher.
+ */
 interface SyncMediaFileStore {
     /**
      * Resolves [localUri] to a readable regular file. Default is an absolute
@@ -84,7 +88,9 @@ interface SyncMediaFileStore {
      * Cheap length-only probe for repair pre-filters: one stat, no decode.
      * Null when the file is absent or unreadable. Default rides [readableFile].
      */
-    fun statLength(localUri: String): Long? = readableFile(localUri)?.length()
+    suspend fun statLength(localUri: String): Long? = withContext(Dispatchers.IO) {
+        readableFile(localUri)?.length()
+    }
 
     suspend fun inspect(localUri: String): LocalMediaInfo?
     suspend fun prepareUpload(localUri: String): PreparedMedia
@@ -111,7 +117,7 @@ interface SyncMediaFileStore {
     ) = Unit
 
     /** Only files with strict durable ownership markers may be recovered. */
-    fun pendingDownloads(): List<MediaDownloadOwnership> = emptyList()
+    suspend fun pendingDownloads(): List<MediaDownloadOwnership> = emptyList()
 
     /**
      * Deletes a local media file when present (missing = success).
@@ -162,7 +168,9 @@ class AndroidSyncMediaFileStore @Inject constructor(
         Unit
     }
 
-    override fun pendingDownloads(): List<MediaDownloadOwnership> = downloads.pending()
+    override suspend fun pendingDownloads(): List<MediaDownloadOwnership> = withContext(Dispatchers.IO) {
+        downloads.pending()
+    }
 
     override fun readableFile(localUri: String): File? =
         resolve(localUri)?.takeIf { it.isFile && it.canRead() }

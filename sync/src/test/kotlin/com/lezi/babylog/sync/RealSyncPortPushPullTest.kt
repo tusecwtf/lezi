@@ -163,6 +163,7 @@ class RealSyncPortPushPullTest {
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
     }
 
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test
     fun concurrentPullToRefreshCallsNeverOverlapRemotePulls() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))

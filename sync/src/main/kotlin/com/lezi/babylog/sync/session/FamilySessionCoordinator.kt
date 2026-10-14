@@ -918,6 +918,7 @@ internal class FamilySessionCoordinator(
      * If [Mutex.lock] wins in the same instant as the wait timeout, unlock so the
      * next approve / reconcile is not stuck in [FamilyHttpFailureKind.HouseholdSyncing].
      */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private suspend fun tryAcquireBarrier(): Boolean {
         if (barrier.tryLock()) return true
         return coroutineScope {

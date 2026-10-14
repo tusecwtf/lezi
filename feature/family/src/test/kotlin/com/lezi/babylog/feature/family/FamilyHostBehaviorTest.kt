@@ -190,6 +190,7 @@ class FamilyHostBehaviorTest {
         assertThat(approved).isEqualTo("req-approve")
     }
 
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test
     fun wizardQrVerifyThinDelegatesOntoFamilyWizardController() = runTest {
         val endpoint = TrustedEndpointProfile.systemPki("https://192.168.77.4:8765")

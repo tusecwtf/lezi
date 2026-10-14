@@ -35,6 +35,7 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlin.io.path.createTempDirectory
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -1514,7 +1515,7 @@ internal open class TestMediaFileStore : SyncMediaFileStore {
      * constant [inspect] reports, so rows whose byteSize matches stay clean
      * under the repair pre-filter exactly like on-device files.
      */
-    override fun statLength(localUri: String): Long? =
+    override suspend fun statLength(localUri: String): Long? =
         if (localUri.isBlank() || localUri in missing) null else 12L
 
     override suspend fun inspect(localUri: String): LocalMediaInfo? {
@@ -1732,7 +1733,7 @@ internal class SyncRig(
     clientAppVersion: ClientAppVersion = ClientAppVersion.FALLBACK,
     appUpdateInstaller: AppUpdateInstaller = NoOpAppUpdateInstaller,
     apkIdentityReader: AppUpdateApkIdentityReader = FakeAppUpdateApkIdentityReader(),
-    appUpdateCacheDir: java.io.File = createTempDir(prefix = "lezi-app-update-rig"),
+    appUpdateCacheDir: java.io.File = createTempDirectory(prefix = "lezi-app-update-rig").toFile(),
     awaitPiggybackAppUpdateDiscovery: Boolean = true,
 ) {
     val backend = RecordingSyncBackend()

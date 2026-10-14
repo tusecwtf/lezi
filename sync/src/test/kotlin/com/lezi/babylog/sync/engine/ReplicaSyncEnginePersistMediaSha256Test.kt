@@ -64,7 +64,7 @@ class ReplicaSyncEnginePersistMediaSha256Test {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 1)
         val directory = java.nio.file.Files.createTempDirectory("fresh-download-digest").toFile()
         val files = object : TestMediaFileStore() {
-            override fun statLength(localUri: String): Long? = readableFile(localUri)?.length()
+            override suspend fun statLength(localUri: String): Long? = readableFile(localUri)?.length()
 
             override suspend fun inspect(localUri: String): LocalMediaInfo? =
                 readableFile(localUri)?.let { LocalMediaInfo(it.length(), "image/jpeg", null, null) }

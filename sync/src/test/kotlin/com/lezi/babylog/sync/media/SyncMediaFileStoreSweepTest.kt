@@ -58,7 +58,7 @@ class SyncMediaFileStoreSweepTest {
             sweepUnreferencedProductMedia(filesDir, LocalDataClearScope.RecordsOnly, setOf(adopted.absolutePath))
             assertThat(orphan.exists()).isFalse()
             assertThat(marker.exists()).isFalse()
-            assertThat(orphan.parentFile.exists()).isFalse()
+            assertThat(checkNotNull(orphan.parentFile).exists()).isFalse()
             assertThat(adopted.exists()).isTrue()
             assertThat(avatar.exists()).isTrue()
             sweepUnreferencedProductMedia(filesDir, LocalDataClearScope.AllLocalData, emptySet())

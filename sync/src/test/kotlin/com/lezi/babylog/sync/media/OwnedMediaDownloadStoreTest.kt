@@ -7,6 +7,8 @@ import com.lezi.babylog.sync.backend.MediaDownloadReceipt
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
+import kotlin.coroutines.ContinuationInterceptor
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertThrows
 import org.junit.Rule
@@ -88,6 +90,25 @@ class OwnedMediaDownloadStoreTest {
         assertThat(File(uri).readBytes()).isEqualTo(bytes)
         assertThat(store.pending()).hasSize(1)
         store.pending().single().release { check(File(it).delete()) }
+        assertThat(store.pending()).isEmpty()
+    }
+
+    @Test fun ownershipCheckKeepsCallerDispatcherWhileFileRetirementUsesIo() = runTest {
+        val store = OwnedMediaDownloadStore(temporary.root)
+        val target = store.begin(uuid, "log", null)
+        target.output.write(bytes)
+        val uri = target.complete(receipt)
+        val callerDispatcher = currentCoroutineContext()[ContinuationInterceptor]
+        var checked = false
+
+        target.release { path ->
+            assertThat(currentCoroutineContext()[ContinuationInterceptor]).isSameInstanceAs(callerDispatcher)
+            assertThat(path).isEqualTo(uri)
+            checked = true
+        }
+
+        assertThat(checked).isTrue()
+        assertThat(File(uri).readBytes()).isEqualTo(bytes)
         assertThat(store.pending()).isEmpty()
     }
 

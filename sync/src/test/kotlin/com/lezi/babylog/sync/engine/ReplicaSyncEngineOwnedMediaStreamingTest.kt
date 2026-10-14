@@ -95,7 +95,7 @@ class ReplicaSyncEngineOwnedMediaStreamingTest {
         val old = requireNotNull(rig.media.getByClientUuid(MEDIA_A))
         backend.serveReplacement()
         files.beforeRetain = { assertThat(rig.transactions.depth).isEqualTo(0) }
-        val expected = IOException("synthetic old-file delete failure")
+        val expected = IdentityPreservingIOException("synthetic old-file delete failure")
         files.beforeDelete = { throw expected }
 
         assertThat(runCatching {
@@ -224,7 +224,7 @@ class ReplicaSyncEngineOwnedMediaStreamingTest {
         val rig = newRig(files, backend)
         rig.engine.applyInitialEntities(session, page())
         val old = requireNotNull(rig.media.getByClientUuid(MEDIA_A))
-        val expected = IOException("synthetic page transaction failure")
+        val expected = IdentityPreservingIOException("synthetic page transaction failure")
         backend.stream = { _, output ->
             output.write(replacementBytes)
             // The next transaction is page apply, after the real owned file completes.
@@ -286,7 +286,7 @@ class ReplicaSyncEngineOwnedMediaStreamingTest {
         val rig = newRig(files, backend)
         val firstWriting = CompletableDeferred<Unit>()
         var writerExited = false
-        val expected = IOException("synthetic second response failed")
+        val expected = IdentityPreservingIOException("synthetic second response failed")
         backend.stream = { uuid, output ->
             if (uuid == MEDIA_A) {
                 try {
@@ -455,8 +455,8 @@ class ReplicaSyncEngineOwnedMediaStreamingTest {
         val files = OwnedFiles(temporary.root)
         val backend = StreamingBackend()
         val rig = newRig(files, backend)
-        val primary = IOException("synthetic response interrupted")
-        val cleanup = IOException("synthetic reclaim failure")
+        val primary = IdentityPreservingIOException("synthetic response interrupted")
+        val cleanup = IdentityPreservingIOException("synthetic reclaim failure")
         val secondWriting = CompletableDeferred<Unit>()
         backend.stream = { uuid, output ->
             output.write(bytes)
@@ -485,7 +485,7 @@ class ReplicaSyncEngineOwnedMediaStreamingTest {
         val files = OwnedFiles(temporary.root)
         val backend = StreamingBackend()
         val rig = newRig(files, backend)
-        val failure = IOException("shared synthetic failure")
+        val failure = IdentityPreservingIOException("shared synthetic failure")
         backend.stream = { _, output -> output.write(bytes); throw failure }
         files.beforeDelete = { throw failure }
         val actual = runCatching { rig.engine.applyInitialEntities(session, page()) }.exceptionOrNull()
@@ -593,13 +593,13 @@ class ReplicaSyncEngineOwnedMediaStreamingTest {
             if (cancelAfterRetain) currentCoroutineContext().cancel()
             Unit
         }
-        override fun pendingDownloads() = store.pending()
+        override suspend fun pendingDownloads() = store.pending()
         override suspend fun saveDownloaded(clientUuid: String, kind: String, bytes: ByteArray, mime: String?): String =
             error("The production owned store must not use the buffered adapter")
         override fun readableFile(localUri: String): File? = super.readableFile(localUri)?.also { file ->
             afterReadable?.also { afterReadable = null }?.invoke(file)
         }
-        override fun statLength(localUri: String): Long? = super.readableFile(localUri)?.length()
+        override suspend fun statLength(localUri: String): Long? = super.readableFile(localUri)?.length()
         override suspend fun inspect(localUri: String): LocalMediaInfo? = statLength(localUri)?.let {
             LocalMediaInfo(it, "image/jpeg", null, null)
         }

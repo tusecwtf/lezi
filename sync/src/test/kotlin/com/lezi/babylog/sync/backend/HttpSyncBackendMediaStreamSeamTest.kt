@@ -16,6 +16,7 @@ import kotlinx.coroutines.withTimeout
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.security.MessageDigest
+import kotlin.io.path.createTempDirectory
 import kotlin.concurrent.thread
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
@@ -62,7 +63,7 @@ class HttpSyncBackendMediaStreamSeamTest {
             }
         }
 
-        val cacheDir = createTempDir(prefix = "lezi-media-stream-ok")
+        val cacheDir = createTempDirectory(prefix = "lezi-media-stream-ok").toFile()
         try {
             val stagingFile = java.io.File(cacheDir, "media.jpg")
             stagingFile.outputStream().use { target ->
@@ -120,7 +121,7 @@ class HttpSyncBackendMediaStreamSeamTest {
             }
         }
 
-        val cacheDir = createTempDir(prefix = "lezi-media-over-cap")
+        val cacheDir = createTempDirectory(prefix = "lezi-media-over-cap").toFile()
         try {
             val stagingFile = java.io.File(cacheDir, "media.jpg")
             val failure = runCatching {
