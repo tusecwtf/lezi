@@ -417,7 +417,13 @@ family aggregate 512 MiB、TTL 24 小时。
 immutable spool manifest 持久绑定。commit 请求发出前先 durable 标记 `commit_unknown`；进程死亡或
 响应丢失后先 replay 同一 commit，不重复 PUT 已有 exact receipt。只有 accepted/merged 与本机 fact
 settlement 同事务落库后，spool 才可进入幂等 cleanup；branched/pending/unknown 永久保留到后续明确
-resolution/settlement。当前 Android 没有 media mutation abandon command，因此 pending 不存在隐式删除
+resolution/settlement。只有服务端明确返回 `media_preimage_expired` 且 `mutation_id` 精确匹配本次
+提交的一个含媒体冻结单元，Android 才在本轮对该单元完整 immutable manifest 尝试一次重新 prepare。
+成功后以原 journal snapshot 为 CAS 条件原子替换完整 receipts；mutation/hash/epoch/spool 与
+`commit_unknown` 均保持不变，本轮仍报告原拒绝，下一轮先 replay 原 commit。部分 prepare 失败、
+响应丢失或进程死亡不清除原 receipts，也不解除冻结；本机时钟到期、未知结果、缺失/不匹配 mutation ID
+不授权该恢复。其他单元与更新的本地编辑不受影响，GC/配额/身份限制仍可拒绝重新 prepare。
+当前 Android 没有 media mutation abandon command，因此 pending 不存在隐式删除
 入口；未来若增加显式 abandon，只有 commit 从未发出、用户确认且 pending fact 在同一事务解除绑定后才
 eligible。
 

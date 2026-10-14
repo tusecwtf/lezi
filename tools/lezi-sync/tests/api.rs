@@ -19163,3 +19163,6 @@ async fn causal_forced_min_supported_from_catalog_blocks_legacy_client() {
 
 #[path = "api/performance_observation.rs"]
 mod performance_observation;
+
+#[path = "api/staging_renewal.rs"]
+mod staging_renewal;

@@ -46,6 +46,7 @@ internal class DeterministicHttpsFaultProxy private constructor(
     var afterPrepareForward: (() -> Unit)? = null
 
     val prepareForwards = AtomicInteger(0)
+    val prepareBodySizes = ConcurrentLinkedQueue<Int>()
     val commitForwards = AtomicInteger(0)
     val droppedResponses = AtomicInteger(0)
     val forwardedPaths = ConcurrentLinkedQueue<String>()
@@ -82,7 +83,10 @@ internal class DeterministicHttpsFaultProxy private constructor(
         val method = request.requestLine.substringBefore(' ')
         val isPrepare = method == "PUT" && path.startsWith("/v1/causal/media/")
         val isCommit = method == "POST" && path == "/v1/causal/commit"
-        if (isPrepare) prepareForwards.incrementAndGet()
+        if (isPrepare) {
+            prepareForwards.incrementAndGet()
+            prepareBodySizes.add(request.body.size)
+        }
         if (isCommit) commitForwards.incrementAndGet()
         forwardedPaths.add("$method $path")
 

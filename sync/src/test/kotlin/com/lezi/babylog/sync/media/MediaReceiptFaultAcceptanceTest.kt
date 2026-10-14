@@ -372,7 +372,7 @@ class MediaReceiptFaultAcceptanceTest {
     }
 
     @Test
-    fun c6_expiredReceiptCommitRejection_failClosedRetainsCommitUnknown() = runTest {
+    fun c6_expiredReceiptCommitRejection_repreparesOnceAndRetainsCommitUnknown() = runTest {
         val fixture = seedRecordMedia(
             recordUuid = "record-h38-expired-commit",
             mediaUuid = MEDIA_EXPIRED,
@@ -405,7 +405,12 @@ class MediaReceiptFaultAcceptanceTest {
         )
         assertThat(journal.phase).isEqualTo(CausalMediaSettlementPhase.CommitUnknown)
         assertThat(journal.receipts).hasSize(1)
-        assertThat(rig.backend.causalMediaPreimageBytes.single().second).isEqualTo(frozenBytes)
+        assertThat(rig.backend.causalMediaPreimageBytes.map { it.first })
+            .containsExactly(MEDIA_EXPIRED, MEDIA_EXPIRED).inOrder()
+        rig.backend.causalMediaPreimageBytes.forEach { (_, bytes) ->
+            assertThat(bytes).isEqualTo(frozenBytes)
+        }
+        assertThat(rig.backend.causalCommittedUnits).hasSize(1)
         assertThat(rig.mediaFiles.prepareUploadCounts[localUri]).isEqualTo(1)
         assertThat(rig.immutableMediaSpool.discardedMutationIds).isEmpty()
         assertThat(rig.records.getByClientUuid("record-h38-expired-commit")?.syncDirty).isTrue()
@@ -413,9 +418,8 @@ class MediaReceiptFaultAcceptanceTest {
             rig.conflictDetails.getTerminalReceipt("record", "record-h38-expired-commit"),
         ).isNull()
 
-        // Expiry stays non-terminal: the next round still commits the same envelope
-        // (CommitUnknown replay). Production may skip a second PUT when a prepared
-        // receipt already exists; the occupancy lock is "not a terminal receipt".
+        // Definitive expiry authorizes exactly one frozen-byte reprepare. The next round
+        // must replay the same CommitUnknown envelope without another prepare or URI read.
         rig.backend.nextCausalCommitFailure = null
         var replayed = false
         rig.backend.onCausalCommit = { units ->
@@ -424,7 +428,9 @@ class MediaReceiptFaultAcceptanceTest {
         rig.backend.causalCommittedUnits.clear()
         rig.engine.synchronize(session, SyncTrigger.LocalWrite)
         assertThat(replayed).isTrue()
-        assertThat(rig.backend.causalCommittedUnits).isNotEmpty()
+        assertThat(rig.backend.causalCommittedUnits.single()).containsExactly(rejectedMutation)
+        assertThat(rig.backend.causalMediaPreimageBytes).hasSize(2)
+        assertThat(rig.mediaFiles.prepareUploadCounts[localUri]).isEqualTo(1)
         assertThat(
             rig.conflictDetails.getTerminalReceipt("record", "record-h38-expired-commit"),
         ).isNull()

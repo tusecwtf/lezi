@@ -86,6 +86,19 @@ fail closed）**、限流 `create/member_request/heartbeat`（心跳默认 30 �
   （展示版 + 来源）、作者声明 / Owner 组裁决（wire §12、ADR-0023）。
 - **媒体两阶段**（`causal_media_staging.rs` + `media.rs` + `bundles.rs`）：bundle stage →
   commit 原子发布；sha256 preimage（`putCausalMediaPreimage`）；staging GC。
+  过期但未被 GC 接管的私人 `writing/staged` 行，只有原 membership 在当前有效设备上
+  再次提交同 UUID/SHA/长度的完整验证 bytes 才可续期；空 PUT 不续期。
+  同一 Immediate 事务检查无 consumed/live/publication/version 引用并重新竞争容量，
+  保留创建时间及内容身份，以新 expiry 的 `writing` 日志完成文件安装、同步落盘，
+  再核验当前 principal 与精确 expiry 代次后提升为 `staged`。同代次完成幂等，
+  旧代次不得完成新代次；普通未过期 replay 不滑动 TTL，既有 consumed 语义不变。
+  保持流式入口、durable upload reservation 和失败清理；不增加整包内存缓冲。
+  已 consumed 的同家庭媒体允许其他当前成员通过空 PUT 取得原 exact receipt，
+  不改写行、文件或所有权；私人未消费 staging 与完整 PUT 的 ownership 限制保留。
+  服务端续期要求实际重发完整 PUT。Android 已缓存 receipt 时仍先 replay commit；
+  只有精确匹配冻结 mutation 的 `media_preimage_expired` 拒绝才授权一次重新 prepare，
+  保持 `commit_unknown` 并 CAS 替换完整 receipts，下一轮继续原 commit（见 wire §4.6.1）。
+  未知结果不授权续期恢复；GC、配额及权限限制仍可拒绝，不承诺全部长离线场景自动成功。
 - **拉取**（`pull.rs` + `live_census_cache.rs`）：分页 + 检查点 + 活集 census；census
   按 (family, head) 进程内缓存，同一 head O(1) 命中。失效只经 `advance_rev` 自增漏斗与
   绝对 rev 写入的无条件失效；只读 store 不安装缓存。`close_empty_open_conflicts` 不在
