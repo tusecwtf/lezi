@@ -96,7 +96,7 @@ test -z "$(git status --porcelain)"
 export LEZI_SYNC_SOURCE_SHA="$(git rev-parse HEAD)"
 (cd tools/lezi-sync && cargo build -p lezi-sync)
 export LEZI_SYNC_BIN="$PWD/tools/lezi-sync/target/debug/lezi-sync"
-LEZI_SYNC_PERF_SAMPLE=1 ./gradlew --rerun-tasks :sync:testDebugUnitTest \
+LEZI_SYNC_PERF_SAMPLE=1 ./gradlew :sync:testDebugUnitTest --rerun \
   --tests com.lezi.babylog.sync.performance.RealServerSyncPerformanceSampleTest
 ```
 
@@ -121,6 +121,37 @@ The measured quiet rounds assert that only handshake and pull requests reach the
 proxy. They do not invoke the port's heartbeat loop or its dedicated server-side
 rate limiter, create more accounts, or publish more mutations. The sample does
 not relax production limits or insert pacing sleeps to hide throttling.
+
+## Fresh CI evidence
+
+The Android workflow still runs the full `test` selector, debug APK build, and
+all debug test APK compilation. When GitHub sets `GITHUB_ACTIONS=true`, the root
+build disables both up-to-date reuse and build-cache reads/writes for every
+selected JVM `Test` task, including Android unit-test variants. Compilation and
+resource caches stay enabled. No test filters, exclusions, or skip rules are
+added; `--rerun-tasks` is unnecessary.
+
+The workflow builds the isolated Rust service from the same checkout, pins
+`LEZI_SYNC_BIN`, enables the live sample, and exports the checkout's full source
+SHA. Its retained Gradle log starts with `CI_TEST_CONTEXT` (checkout SHA,
+workflow SHA, run ID/attempt) and the service binary's SHA-256. A pull-request
+checkout may be GitHub's merge commit; record it separately from the PR head
+and never present an older run as evidence for a newer head.
+
+Proof after publishing: inspect the run for the exact new revision, then rerun
+it with warm Gradle caches. Both runs must execute all nonempty JVM test tasks
+(no `UP-TO-DATE` or `FROM-CACHE` outcomes for those tasks), and the live sample's
+JUnit XML must contain one passing, unskipped test with thirty raw rounds.
+Compare its `SYNC_PERF source_sha`, `workflow_sha`, and `server_sha256` with that
+run's retained context and binary digest. Compile/resource tasks may still be
+`UP-TO-DATE` or `FROM-CACHE`; modules with no tests may be `NO-SOURCE`.
+
+Outside GitHub Actions the normal Gradle caching policy is unchanged. The
+external service binary and sample environment variables are not declared
+Gradle task inputs: rebuilding the binary or changing those variables alone
+does not make a cached test report fresh. Use the task-scoped `--rerun` shown
+above for each live-test task (also `:domain:testDebugUnitTest` for domain seams).
+It reruns that task while allowing its compile dependencies to stay cached.
 
 Real-device photo/performance validation still requires the separately frozen
 APK/source, device/API/refresh rate, three-image byte counts and SHA-256 values,

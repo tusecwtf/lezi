@@ -72,7 +72,12 @@ jobs:
         run: |
           set -o pipefail
           export LEZI_SYNC_SOURCE_SHA="$(git rev-parse HEAD)"
-          ./gradlew test :app:assembleDebug assembleDebugAndroidTest --stacktrace --info --no-daemon 2>&1 | tee "$RUNNER_TEMP/android-unit-tests.log"
+          {
+            printf 'CI_TEST_CONTEXT source_sha=%s workflow_sha=%s run_id=%s attempt=%s\n' \
+              "$LEZI_SYNC_SOURCE_SHA" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            sha256sum "$LEZI_SYNC_BIN"
+            ./gradlew test :app:assembleDebug assembleDebugAndroidTest --stacktrace --info --no-daemon
+          } 2>&1 | tee "$RUNNER_TEMP/android-unit-tests.log"
 
       - name: Summarize unit test diagnostics
         if: always()

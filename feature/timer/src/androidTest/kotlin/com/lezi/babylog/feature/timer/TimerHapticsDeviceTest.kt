@@ -7,6 +7,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -38,6 +39,7 @@ class TimerHapticsDeviceTest {
     @Test
     fun eachCommittedStartPauseFlipEmitsExactlyOneConfirmHaptic() {
         val haptics = RecordingLeziHaptics()
+        val tickState = mutableLongStateOf(0L)
         var toggles = 0
         var state by mutableStateOf(TimerState())
         composeRule.setContent {
@@ -45,8 +47,7 @@ class TimerHapticsDeviceTest {
                 LeziTheme {
                     TimerSessionPane(
                         state = state,
-                        leftMs = 0L,
-                        rightMs = 0L,
+                        tickState = tickState,
                         viewportMode = TimerViewportMode.Spacious,
                         actionsEnabled = true,
                         onToggleLeft = { toggles += 1 },
@@ -81,14 +82,14 @@ class TimerHapticsDeviceTest {
     @Test
     fun sideButtonClickWithoutACommittedFlipStaysSilent() {
         val haptics = RecordingLeziHaptics()
+        val tickState = mutableLongStateOf(0L)
         var toggles = 0
         composeRule.setContent {
             CompositionLocalProvider(LocalLeziHaptics provides haptics) {
                 LeziTheme {
                     TimerSessionPane(
                         state = TimerState(),
-                        leftMs = 0L,
-                        rightMs = 0L,
+                        tickState = tickState,
                         viewportMode = TimerViewportMode.Spacious,
                         actionsEnabled = true,
                         onToggleLeft = { toggles += 1 },

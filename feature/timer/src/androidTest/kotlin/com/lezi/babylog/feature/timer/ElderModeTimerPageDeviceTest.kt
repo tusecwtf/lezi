@@ -8,6 +8,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -37,6 +38,7 @@ class ElderModeTimerPageDeviceTest {
     @Test
     fun elderTimerPageFits720pTo4k() {
         var viewport by mutableStateOf(LeziDeviceViewports.styled().first())
+        val tickState = mutableLongStateOf(0L)
         compose.setContent {
             val current = viewport
             val fontScale = when (current.elder) {
@@ -63,8 +65,7 @@ class ElderModeTimerPageDeviceTest {
                             )
                             TimerSessionPane(
                                 state = TimerState(),
-                                leftMs = 0,
-                                rightMs = 0,
+                                tickState = tickState,
                                 viewportMode = mode,
                                 actionsEnabled = true,
                                 onToggleLeft = {},
