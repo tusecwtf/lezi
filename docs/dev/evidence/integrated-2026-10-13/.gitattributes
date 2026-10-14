@@ -1,0 +1,2 @@
+# Preserve the benchmark CSV bytes, including its original CRLF line endings.
+samples.csv -text whitespace=cr-at-eol

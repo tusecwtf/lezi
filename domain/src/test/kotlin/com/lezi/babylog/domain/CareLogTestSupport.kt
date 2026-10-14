@@ -427,6 +427,8 @@ internal class FakeCareReadProjectionDao(
     private val wakes: FakeWakeObservationDao,
 ) : TimelineWindowDao {
     private val invalidations = MutableStateFlow(0L)
+    val searchReadRows = mutableListOf<Pair<String, Int>>()
+    val searchBindSizes = mutableListOf<Int>()
 
     override fun observeInvalidations(): Flow<Long> = invalidations
 
@@ -498,6 +500,29 @@ internal class FakeCareReadProjectionDao(
         records.listForBaby(babyId).filter { root ->
             root.type == RecordType.SLEEP.key && root.endTimestamp == null
         }.sortedWith(compareByDescending<RecordEntity> { it.timestamp }.thenByDescending { it.clientUuid })
+            .also { searchReadRows += "peers" to it.size }
+
+    override suspend fun listSearchSleepRoots(babyId: Long, rootClientUuids: List<String>): List<RecordEntity> =
+        searchRoots(babyId, rootClientUuids).also {
+            searchReadRows += "roots" to it.size
+            searchBindSizes += rootClientUuids.size
+        }
+
+    override suspend fun listSearchSleepWakes(babyId: Long, rootClientUuids: List<String>): List<WakeObservationEntity> =
+        searchWakes(babyId, rootClientUuids).also {
+            searchReadRows += "wakes" to it.size
+            searchBindSizes += rootClientUuids.size
+        }
+
+    private suspend fun searchRoots(babyId: Long, rootClientUuids: List<String>): List<RecordEntity> =
+        records.listForBaby(babyId).filter { it.type == "sleep" && it.clientUuid in rootClientUuids }
+
+    private suspend fun searchWakes(babyId: Long, rootClientUuids: List<String>): List<WakeObservationEntity> {
+        val roots = searchRoots(babyId, rootClientUuids).mapTo(hashSetOf()) { it.clientUuid }
+        return wakes.itemsSnapshot().filter { it.sleepRecordClientUuid in roots }
+            .sortedWith(compareBy<WakeObservationEntity> { it.sleepRecordClientUuid }
+                .thenBy { it.wakeTimestamp }.thenBy { it.clientUuid })
+    }
 
     override suspend fun listWakesForOpenSleepCandidates(babyId: Long): List<WakeObservationEntity> {
         val roots = listOpenSleepCandidateRoots(babyId)
@@ -528,7 +553,7 @@ internal class FakeCareReadProjectionDao(
             .mapTo(hashSetOf(), WakeObservationEntity::id)
         return media.listAllIncludingDeleted().filter {
             it.wakeObservationId in wakeIds && it.deletedAt == null && it.kind == "wake"
-        }
+        }.also { searchReadRows += "media" to it.size }
     }
 
     override suspend fun listPlanRoots(

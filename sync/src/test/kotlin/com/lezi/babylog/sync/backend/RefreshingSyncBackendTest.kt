@@ -18,6 +18,38 @@ import com.lezi.babylog.sync.MemorySyncPreferences
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class RefreshingSyncBackendTest {
     @Test
+    fun mediaDownloadRefreshesOnceWithoutBufferFallbackOrErrorBytes() = runTest {
+        val preferences = MemorySyncPreferences(joinedSession())
+        val delegate = RefreshRecordingBackend().apply { failFirstDownloadWith401 = true }
+        val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
+        val sink = ByteArrayOutputStream()
+
+        val receipt = backend.downloadMedia(preferences.current(), "media", sink)
+
+        assertThat(sink.toByteArray()).isEqualTo(RELEASE_APK_BYTES)
+        assertThat(receipt.sha256).isEqualTo(sha256Hex(RELEASE_APK_BYTES))
+        assertThat(delegate.refreshTokens).containsExactly("refresh-old")
+        assertThat(delegate.downloadTokens).containsExactly("access-old", "access-new").inOrder()
+    }
+
+    @Test
+    fun mediaDownloadRejectsSecond401WithoutThirdAttempt() = runTest {
+        val preferences = MemorySyncPreferences(joinedSession())
+        val delegate = RefreshRecordingBackend().apply { alwaysFailDownloadWith401 = true }
+        val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
+        val sink = ByteArrayOutputStream()
+
+        val failure = runCatching {
+            backend.downloadMedia(preferences.current(), "media", sink)
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(ReauthRequiredException::class.java)
+        assertThat(sink.size()).isEqualTo(0)
+        assertThat(delegate.downloadTokens).containsExactly("access-old", "access-new").inOrder()
+        assertThat(preferences.current().reauthRequired).isTrue()
+    }
+
+    @Test
     fun appUpdateDownloadDoesNotBlockOtherAuthenticatedRequests() = runTest {
         val preferences = MemorySyncPreferences(joinedSession())
         val delegate = RefreshRecordingBackend().apply {
@@ -389,6 +421,15 @@ class RefreshingSyncBackendTest {
 private val RELEASE_APK_BYTES = "release-apk".toByteArray()
 
 private class RefreshRecordingBackend : SyncBackend by FakeSyncBackend() {
+    override suspend fun downloadMedia(
+        session: SyncSession,
+        clientUuid: String,
+        target: OutputStream,
+    ): MediaDownloadReceipt {
+        val receipt = downloadAppUpdateApk(session, target)
+        return MediaDownloadReceipt(receipt.sha256, receipt.byteCount)
+    }
+
     val refreshTokens = mutableListOf<String>()
     val refreshRequestIds = mutableListOf<String>()
     val refreshEndpoints = mutableListOf<TrustedEndpointProfile>()

@@ -58,6 +58,12 @@ data class ProjectedRecordEntity(
     val wakeMedia: List<MediaAssetEntity>,
 )
 
+/** Search needs only the record and canonical interval; detail/media consumers use [ProjectedRecordEntity]. */
+data class SearchSleepRecordProjection(
+    val root: RecordEntity,
+    val sleepInterval: SleepIntervalProjection,
+)
+
 /**
  * Bounded Record + Wake read projection shared by Summary, detail and Timeline.
  *
@@ -81,6 +87,15 @@ interface RecordWakeProjectionDao {
     suspend fun loadRecordProjectionForRoots(
         rootClientUuids: List<String>,
     ): List<ProjectedRecordEntity>
+
+    /**
+     * Search-only multi-batch projection: one consistent peer context and bounded SQL bind sets.
+     * No media is loaded. The result is intentionally not the full detail projection shape.
+     */
+    suspend fun loadSearchSleepProjection(
+        babyId: Long,
+        rootClientUuids: List<String>,
+    ): List<SearchSleepRecordProjection>
 
     suspend fun loadOpenSleepProjection(babyId: Long): List<ProjectedRecordEntity>
 
@@ -451,6 +466,73 @@ interface TimelineWindowDao : RecordWakeProjectionDao {
         val wakeMedia = listActiveWakeMediaForRoots(requested)
         context.ensureActive()
         val projected = projectRecordRoots(records, wakes, wakeMedia).associateBy { it.root.clientUuid }
+        return requested.mapNotNull(projected::get)
+    }
+
+    /**
+     * Exact search roots; never append peers. Pin the existing UUID index so
+     * SQLite cannot rescan the baby's whole sleep index for every 64-root batch.
+     * Correlated adoption checks use the existing per-record index for the same reason.
+     */
+    @Query(
+        """
+        SELECT r.* FROM records r INDEXED BY index_records_clientUuid
+        WHERE r.babyId = :babyId AND r.type = 'sleep' AND r.deletedAt IS NULL
+          AND r.clientUuid IN (:rootClientUuids)
+          AND NOT EXISTS (
+              SELECT 1 FROM fulfillment_candidates f INDEXED BY index_fulfillment_candidates_recordClientUuid
+              WHERE f.recordClientUuid = r.clientUuid
+                AND f.adoptionStatus = 'conflict_not_adopted' AND f.deletedAt IS NULL
+          )
+        ORDER BY r.timestamp DESC, r.clientUuid DESC
+        """,
+    )
+    suspend fun listSearchSleepRoots(babyId: Long, rootClientUuids: List<String>): List<RecordEntity>
+
+    @Query(
+        """
+        SELECT w.* FROM wake_observations w
+        JOIN records r INDEXED BY index_records_clientUuid ON r.clientUuid = w.sleepRecordClientUuid
+        WHERE r.babyId = :babyId AND r.type = 'sleep' AND r.deletedAt IS NULL
+          AND r.clientUuid IN (:rootClientUuids)
+          AND NOT EXISTS (
+              SELECT 1 FROM fulfillment_candidates f INDEXED BY index_fulfillment_candidates_recordClientUuid
+              WHERE f.recordClientUuid = r.clientUuid
+                AND f.adoptionStatus = 'conflict_not_adopted' AND f.deletedAt IS NULL
+          )
+        ORDER BY w.sleepRecordClientUuid, w.wakeTimestamp, w.clientUuid
+        """,
+    )
+    suspend fun listSearchSleepWakes(babyId: Long, rootClientUuids: List<String>): List<WakeObservationEntity>
+
+    /**
+     * Search may select a whole sleep history. Repeating the capped detail read
+     * would append every raw-open peer on each batch, including Wake-closed
+     * modern roots. Read that peer context once, then exact bounded batches.
+     * Hidden source-role peers still participate in canonical overlap arbitration.
+     */
+    @Transaction
+    override suspend fun loadSearchSleepProjection(
+        babyId: Long,
+        rootClientUuids: List<String>,
+    ): List<SearchSleepRecordProjection> {
+        val requested = rootClientUuids.map(String::trim).filter(String::isNotEmpty).distinct()
+        if (requested.isEmpty()) return emptyList()
+        val context = currentCoroutineContext()
+        val roots = listOpenSleepCandidateRoots(babyId).associateByTo(linkedMapOf()) { it.clientUuid }
+        context.ensureActive()
+        val missing = requested.filterNot(roots::containsKey)
+        for (chunk in missing.chunked(MAX_EXPLICIT_PROJECTION_ROOTS)) {
+            listSearchSleepRoots(babyId, chunk).forEach { roots[it.clientUuid] = it }
+            context.ensureActive()
+        }
+        val wakes = mutableListOf<WakeObservationEntity>()
+        for (chunk in roots.keys.toList().chunked(MAX_EXPLICIT_PROJECTION_ROOTS)) {
+            wakes += listSearchSleepWakes(babyId, chunk)
+            context.ensureActive()
+        }
+        val projected = projectRecordRoots(roots.values.toList(), wakes, emptyList())
+            .associate { it.root.clientUuid to SearchSleepRecordProjection(it.root, requireNotNull(it.sleepInterval)) }
         return requested.mapNotNull(projected::get)
     }
 

@@ -449,3 +449,38 @@ fn current_version_with_nullable_membership_name_fails_without_mutation() {
         before_entries
     );
 }
+
+#[test]
+fn repeated_schema_checks_reject_changed_databases_after_valid_open() {
+    for mutation in [
+        "DROP INDEX entities_family_rev",
+        "CREATE INDEX unexpected_index ON families(created_at)",
+        "CREATE VIEW unexpected_view AS SELECT id FROM families",
+        "CREATE TRIGGER unexpected_trigger AFTER INSERT ON families BEGIN SELECT 1; END",
+        "PRAGMA user_version = 14",
+    ] {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("lezi.db");
+        drop(Store::open(&database_path).unwrap());
+        Store::preflight_existing_schema(&database_path).unwrap();
+        let connection = Connection::open(&database_path).unwrap();
+        connection.execute_batch(mutation).unwrap();
+        drop(connection);
+        let before = fs::read(&database_path).unwrap();
+        assert!(
+            Store::preflight_existing_schema(&database_path).is_err(),
+            "{mutation}"
+        );
+        assert!(Store::open(&database_path).is_err(), "{mutation}");
+        assert!(
+            Store::open_read_only_with_snapshot_key(&database_path, b"test-key").is_err(),
+            "{mutation}"
+        );
+        assert_eq!(fs::read(&database_path).unwrap(), before, "{mutation}");
+        // A rejected actual database must not poison validation of another DB.
+        let valid_path = directory.path().join("valid.db");
+        drop(Store::open(&valid_path).unwrap());
+        Store::preflight_existing_schema(&valid_path).unwrap();
+        drop(Store::open(&valid_path).unwrap());
+    }
+}

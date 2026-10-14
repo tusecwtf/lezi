@@ -127,6 +127,7 @@ import com.lezi.babylog.sync.backend.testPreparedMedia
 
 // Split from RealSyncPortTest kitchen sink by contract cluster (ticket 05).
 class RealSyncPortSessionLifecycleTest {
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test
     fun mediaCleanupLeavesPendingMarkerWhenReplicaBarrierIsHeld() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
@@ -278,6 +279,7 @@ class RealSyncPortSessionLifecycleTest {
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Disabled)
     }
 
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test
     fun foregroundPendingMemberCheckPublishesTheExactTerminalResultToOpenUi() = runTest {
         val initial = SyncSession(
@@ -304,6 +306,7 @@ class RealSyncPortSessionLifecycleTest {
         assertThat(preferences.pendingMemberLogin.first()).isNull()
     }
 
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test
     fun memberLoginChecksNeverBlockNetworkCompletionBehindSlowUiCollector() = runTest {
         val initial = SyncSession(
@@ -607,6 +610,7 @@ class RealSyncPortSessionLifecycleTest {
             .isEqualTo("membership-member")
     }
 
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test
     fun queuedNetworkChangeWaitsForDurableCreateWithoutExtendingCreateThroughFirstPull() = runTest {
         val configured = SyncSession(

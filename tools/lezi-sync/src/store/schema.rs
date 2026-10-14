@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use rusqlite::{Connection, TransactionBehavior};
@@ -534,10 +534,19 @@ fn normalize_schema_sql(sql: &str) -> String {
     sql.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn expected_schema_objects() -> Result<BTreeMap<(String, String), String>, StoreError> {
+fn expected_schema_objects() -> Result<&'static BTreeMap<(String, String), String>, StoreError> {
+    // Only the compile-time schema and bundled SQLite determine this map. Keep
+    // inspecting each actual database, including repeated preflight/open calls.
+    static EXPECTED: OnceLock<BTreeMap<(String, String), String>> = OnceLock::new();
+    if let Some(expected) = EXPECTED.get() {
+        return Ok(expected);
+    }
     let connection = Connection::open_in_memory()?;
     connection.execute_batch(CURRENT_SCHEMA_SQL)?;
-    normalized_schema_objects(&connection)
+    let expected = normalized_schema_objects(&connection)?;
+    // Failed construction is never cached. Concurrent first callers may build
+    // the same immutable map; only the successfully installed one is retained.
+    Ok(EXPECTED.get_or_init(|| expected))
 }
 
 fn inspect_schema(connection: &Connection) -> Result<SchemaState, StoreError> {
@@ -553,7 +562,7 @@ fn inspect_schema(connection: &Connection) -> Result<SchemaState, StoreError> {
             supported: DATABASE_SCHEMA_VERSION,
         });
     }
-    if objects != expected_schema_objects()? {
+    if &objects != expected_schema_objects()? {
         return Err(StoreError::IncompatibleSchema {
             supported: DATABASE_SCHEMA_VERSION,
         });

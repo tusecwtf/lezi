@@ -124,4 +124,14 @@ class RecordSearchTest {
         assertThat(typeTermMatchesQuery("ml", "m")).isTrue() // prefix
         assertThat(typeTermMatchesQuery("ml", "l")).isFalse()
     }
+
+    @Test
+    fun sleepDurationCandidateUsesCompactVisibleDurationSubstringsOnly() {
+        listOf("0", "30", "30m", "1h", "1h30m", "h30", "h", "m", "长 1h30m").forEach {
+            assertThat(it.mayMatchSleepDuration()).isTrue()
+        }
+        listOf("", "home", "mother", "30分钟", "30.0", "is_nap", "a_b").forEach {
+            assertThat(it.mayMatchSleepDuration()).isFalse()
+        }
+    }
 }

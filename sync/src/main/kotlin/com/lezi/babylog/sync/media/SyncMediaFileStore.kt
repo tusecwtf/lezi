@@ -6,7 +6,9 @@ import android.graphics.Matrix
 import androidx.exifinterface.media.ExifInterface
 import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.model.RecordPhotoResourcePolicy
+import com.lezi.babylog.sync.backend.MediaDownloadReceipt
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FilterOutputStream
 import java.io.InputStream
@@ -65,6 +67,10 @@ class PreparedMedia(
     }
 }
 
+/**
+ * Suspend operations are main-safe: concrete disk stores own their I/O dispatch.
+ * The engine keeps orchestration and in-memory adapters on the caller's dispatcher.
+ */
 interface SyncMediaFileStore {
     /**
      * Resolves [localUri] to a readable regular file. Default is an absolute
@@ -82,7 +88,9 @@ interface SyncMediaFileStore {
      * Cheap length-only probe for repair pre-filters: one stat, no decode.
      * Null when the file is absent or unreadable. Default rides [readableFile].
      */
-    fun statLength(localUri: String): Long? = readableFile(localUri)?.length()
+    suspend fun statLength(localUri: String): Long? = withContext(Dispatchers.IO) {
+        readableFile(localUri)?.length()
+    }
 
     suspend fun inspect(localUri: String): LocalMediaInfo?
     suspend fun prepareUpload(localUri: String): PreparedMedia
@@ -92,6 +100,24 @@ interface SyncMediaFileStore {
         bytes: ByteArray,
         mime: String?,
     ): String
+
+    /** Production uses an exclusive file; the adapter supports existing in-memory stores. */
+    suspend fun beginDownload(
+        clientUuid: String,
+        kind: String,
+        mime: String?,
+        registerOwnership: (MediaDownloadOwnership) -> Unit,
+    ): SyncMediaDownloadTarget =
+        BufferedMediaDownloadTarget(this, clientUuid, kind, mime).also(registerOwnership)
+
+    /** Re-arm owned replacement bytes before Room can forget their path. Legacy stores are unchanged. */
+    suspend fun retainForReplacement(
+        localUri: String,
+        registerOwnership: (MediaDownloadOwnership) -> Unit,
+    ) = Unit
+
+    /** Only files with strict durable ownership markers may be recovered. */
+    suspend fun pendingDownloads(): List<MediaDownloadOwnership> = emptyList()
 
     /**
      * Deletes a local media file when present (missing = success).
@@ -121,6 +147,31 @@ interface SyncMediaFileStore {
 class AndroidSyncMediaFileStore @Inject constructor(
     @ApplicationContext private val context: Context,
 ) : SyncMediaFileStore {
+    private val downloads by lazy { OwnedMediaDownloadStore(context.filesDir) }
+
+    override suspend fun beginDownload(
+        clientUuid: String,
+        kind: String,
+        mime: String?,
+        registerOwnership: (MediaDownloadOwnership) -> Unit,
+    ): SyncMediaDownloadTarget = withContext(Dispatchers.IO) {
+        // Register before withContext's cancellable return, so even a lost result
+        // has an owner whose finally closes/reclaims the file after all writers join.
+        downloads.begin(clientUuid, kind, mime).also(registerOwnership)
+    }
+
+    override suspend fun retainForReplacement(
+        localUri: String,
+        registerOwnership: (MediaDownloadOwnership) -> Unit,
+    ) = withContext(Dispatchers.IO) {
+        downloads.retainForReplacement(localUri)?.let(registerOwnership)
+        Unit
+    }
+
+    override suspend fun pendingDownloads(): List<MediaDownloadOwnership> = withContext(Dispatchers.IO) {
+        downloads.pending()
+    }
+
     override fun readableFile(localUri: String): File? =
         resolve(localUri)?.takeIf { it.isFile && it.canRead() }
 
@@ -327,6 +378,29 @@ class AndroidSyncMediaFileStore @Inject constructor(
     }
 }
 
+private class BufferedMediaDownloadTarget(
+    private val store: SyncMediaFileStore,
+    private val clientUuid: String,
+    private val kind: String,
+    private val mime: String?,
+) : SyncMediaDownloadTarget {
+    override val output = ByteArrayOutputStream()
+    private var localUri: String? = null
+
+    override suspend fun complete(receipt: MediaDownloadReceipt): String {
+        require(receipt.byteCount > 0) { "家庭服务器返回了空媒体" }
+        check(receipt.byteCount == output.size().toLong()) { "下载媒体长度与流式回执不符" }
+        return store.saveDownloaded(clientUuid, kind, output.toByteArray(), mime).also { localUri = it }
+    }
+
+    override fun close() = output.close()
+
+    override suspend fun release(reclaimUnreferenced: suspend (String) -> Unit) {
+        close()
+        localUri?.let { reclaimUnreferenced(it) }
+    }
+}
+
 /**
  * Scope-aware local-clear sweep for the two app-private product media roots.
  *
@@ -421,8 +495,9 @@ private fun Bitmap?.recycleIfNeeded() {
 }
 
 internal fun deleteExistingSyncMediaFile(file: File?) {
-    if (file?.isFile != true) return
-    check(file.delete() || !file.exists()) { "无法删除本地媒体文件" }
+    if (file == null) return
+    if (file.isFile) check(file.delete() || !file.exists()) { "无法删除本地媒体文件" }
+    removeEmptyOwnedDownloadDirectory(file)
 }
 
 internal data class ExifOrientationTransform(

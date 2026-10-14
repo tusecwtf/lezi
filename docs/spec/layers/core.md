@@ -30,7 +30,7 @@
 |------|------|----------------|
 | `CausalIdentity` | `CausalIdentity.kt` | UUIDv5 确定性身份：`WAKE_MIGRATION_NAMESPACE` / `VERSION_MIGRATION_NAMESPACE` **必须与 lezi-sync 字节一致**（wire §11 / offline_migrate） |
 | 失败分类 | `failure/FailureKind.kt`、`failure/FailureCatalog.kt`、`ProductUiError.kt`、`LocalOpFailureCopy.kt` | `FailureKind` 闭合 24 类 → 四段式产品文案（ui.md §9）；分类是产品文案的单一来源 |
-| `MediaContentDigest` | `MediaContentDigest.kt` | 媒体 sha256 身份 |
+| `MediaContentDigest` | `MediaContentDigest.kt` | 媒体 sha256 身份；小写 hex 逐半字节编码，流摘要使用固定大小 buffer，不随媒体大小分配完整字节数组 |
 | `LocalDataUpgrade` | `LocalDataUpgrade.kt` | 本地数据升级规划器（APK 原地替换门禁的纯逻辑半部；执行步骤在 `:app`） |
 | 其它原语 | `SingleFlightAction.kt`、`Uuid.kt`、`PersistentSideEffectActions.kt`、`WizardTrustCopy.kt`、`cancellation/`、`deadline/` | 单飞动作、UUID、持久副作用重放、向导信任文案、取消与截止策略 |
 

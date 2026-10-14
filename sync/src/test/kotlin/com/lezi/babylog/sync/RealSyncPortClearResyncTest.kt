@@ -146,6 +146,7 @@ class RealSyncPortClearResyncTest {
         assertThat(rig.pendingReplicaCleanup.pending).isNull()
     }
 
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test
     fun localRecordClearWaitsForPullThenDeletesTheAppliedRows() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))

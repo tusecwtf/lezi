@@ -30,6 +30,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.io.path.createTempDirectory
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -398,18 +399,21 @@ class RealSyncPortAppUpdateTest {
             .isEqualTo(ForcedAppUpdateState.PackageUnknown)
 
         rig.preferences.clearDeviceCredentialsForReauth()
-        runCurrent()
+        // The session observer runs on the port's real IO scope, so runCurrent()
+        // and a virtual timeout cannot synchronize it. Establish reauth first;
+        // the manual check must then preserve the already-published status.
+        withContext(Dispatchers.Default) {
+            withTimeout(1_000L) {
+                rig.port.status().first { it == SyncStatus.ReauthRequired }
+            }
+        }
         val result = rig.port.checkAppUpdate().getOrThrow()
 
         assertThat(result).isEqualTo(AppUpdateCheckResult.ForcedPackageUnknown)
         assertThat(rig.port.availableForcedAppUpdate().first())
             .isEqualTo(ForcedAppUpdateState.PackageUnknown)
         assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
-        assertThat(
-            withTimeout(1_000L) {
-                rig.port.status().first { it == SyncStatus.ReauthRequired }
-            },
-        ).isEqualTo(SyncStatus.ReauthRequired)
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.ReauthRequired)
     }
 
     @Test
@@ -990,7 +994,7 @@ class RealSyncPortAppUpdateTest {
             sha256 = sha256Hex(apkBytes),
         )
         val installer = RecordingAppUpdateInstaller()
-        val cacheDir = createTempDir(prefix = "lezi-app-update-ok")
+        val cacheDir = createTempDirectory(prefix = "lezi-app-update-ok").toFile()
         val rig = SyncRig(
             session = joinedSession("family-a"),
             clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
@@ -1012,6 +1016,7 @@ class RealSyncPortAppUpdateTest {
         assertThat(appUpdateStagingApk(cacheDir).exists()).isFalse()
     }
 
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test
     fun forceShellRetainedThroughReauthAndInstallProceedsAfterRejoin() = runTest {
         val apkBytes = "lezi-force-reauth-apk".toByteArray(Charsets.UTF_8)
@@ -1022,7 +1027,7 @@ class RealSyncPortAppUpdateTest {
             sha256 = sha256Hex(apkBytes),
         )
         val installer = RecordingAppUpdateInstaller()
-        val cacheDir = createTempDir(prefix = "lezi-force-reauth-install")
+        val cacheDir = createTempDirectory(prefix = "lezi-force-reauth-install").toFile()
         val original = joinedSession("family-a")
         val rig = SyncRig(
             session = original,
@@ -1082,7 +1087,7 @@ class RealSyncPortAppUpdateTest {
             sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
         val installer = RecordingAppUpdateInstaller()
-        val cacheDir = createTempDir(prefix = "lezi-app-update-bad")
+        val cacheDir = createTempDirectory(prefix = "lezi-app-update-bad").toFile()
         // Leave a stale staging file to prove cleanup on failure.
         appUpdateStagingDir(cacheDir).mkdirs()
         appUpdateStagingApk(cacheDir).writeText("stale")
@@ -1121,7 +1126,7 @@ class RealSyncPortAppUpdateTest {
             packageName = "com.evil.other",
             versionCode = 7,
         )
-        val cacheDir = createTempDir(prefix = "lezi-app-update-pkg")
+        val cacheDir = createTempDirectory(prefix = "lezi-app-update-pkg").toFile()
         appUpdateStagingDir(cacheDir).mkdirs()
         appUpdateStagingApk(cacheDir).writeText("stale")
         val rig = SyncRig(
@@ -1198,7 +1203,7 @@ class RealSyncPortAppUpdateTest {
             archiveCerts = setOf("bb".repeat(32)),
             installedCerts = setOf(TEST_APP_UPDATE_CERT_SHA256),
         )
-        val cacheDir = createTempDir(prefix = "lezi-app-update-sig")
+        val cacheDir = createTempDirectory(prefix = "lezi-app-update-sig").toFile()
         val rig = SyncRig(
             session = joinedSession("family-a"),
             clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
@@ -1231,7 +1236,7 @@ class RealSyncPortAppUpdateTest {
             packageName = "com.lezi.babylog",
             versionCode = 9,
         )
-        val cacheDir = createTempDir(prefix = "lezi-app-update-ver")
+        val cacheDir = createTempDirectory(prefix = "lezi-app-update-ver").toFile()
         val rig = SyncRig(
             session = joinedSession("family-a"),
             clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
@@ -1261,7 +1266,7 @@ class RealSyncPortAppUpdateTest {
         )
         val installer = RecordingAppUpdateInstaller()
         val identityReader = FakeAppUpdateApkIdentityReader(unreadable = true)
-        val cacheDir = createTempDir(prefix = "lezi-app-update-unreadable")
+        val cacheDir = createTempDirectory(prefix = "lezi-app-update-unreadable").toFile()
         val rig = SyncRig(
             session = joinedSession("family-a"),
             clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
@@ -1308,7 +1313,7 @@ class RealSyncPortAppUpdateTest {
     fun installAvailableAppUpdateDownloadFailureDoesNotPoisonSyncStatus() = runTest {
         val metadata = sampleAppUpdateMetadata(versionCode = 7, versionName = "0.3.1")
         val installer = RecordingAppUpdateInstaller()
-        val cacheDir = createTempDir(prefix = "lezi-app-update-dl-fail")
+        val cacheDir = createTempDirectory(prefix = "lezi-app-update-dl-fail").toFile()
         appUpdateStagingDir(cacheDir).mkdirs()
         appUpdateStagingApk(cacheDir).writeText("stale")
         val rig = SyncRig(
@@ -1335,7 +1340,7 @@ class RealSyncPortAppUpdateTest {
     fun installAvailableAppUpdateOverCapAbortCleansStagingWithoutInstalling() = runTest {
         val metadata = sampleAppUpdateMetadata(versionCode = 7, versionName = "0.3.1")
         val installer = RecordingAppUpdateInstaller()
-        val cacheDir = createTempDir(prefix = "lezi-app-update-over-cap")
+        val cacheDir = createTempDirectory(prefix = "lezi-app-update-over-cap").toFile()
         appUpdateStagingDir(cacheDir).mkdirs()
         appUpdateStagingApk(cacheDir).writeText("stale")
         val rig = SyncRig(
@@ -1370,7 +1375,7 @@ class RealSyncPortAppUpdateTest {
         val installer = RecordingAppUpdateInstaller(
             installFailure = IllegalStateException("PackageInstaller session failed"),
         )
-        val cacheDir = createTempDir(prefix = "lezi-app-update-pi-fail")
+        val cacheDir = createTempDirectory(prefix = "lezi-app-update-pi-fail").toFile()
         val rig = SyncRig(
             session = joinedSession("family-a"),
             clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
@@ -1423,7 +1428,7 @@ class RealSyncPortAppUpdateTest {
             sha256 = sha256Hex(apkBytes),
         )
         val installer = RecordingAppUpdateInstaller()
-        val cacheDir = createTempDir(prefix = "lezi-app-update-busy")
+        val cacheDir = createTempDirectory(prefix = "lezi-app-update-busy").toFile()
         val rig = SyncRig(
             session = joinedSession("family-a"),
             clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
@@ -1471,7 +1476,7 @@ class RealSyncPortAppUpdateTest {
             sha256 = sha256Hex(apkBytes),
         )
         val installer = RecordingAppUpdateInstaller()
-        val cacheDir = createTempDir(prefix = "lezi-app-update-busy-dismiss")
+        val cacheDir = createTempDirectory(prefix = "lezi-app-update-busy-dismiss").toFile()
         val rig = SyncRig(
             session = joinedSession("family-a"),
             clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
@@ -1515,7 +1520,7 @@ class RealSyncPortAppUpdateTest {
             sha256 = sha256Hex(apkBytes),
         )
         val installer = RecordingAppUpdateInstaller()
-        val cacheDir = createTempDir(prefix = "lezi-app-update-race")
+        val cacheDir = createTempDirectory(prefix = "lezi-app-update-race").toFile()
         val rig = SyncRig(
             session = joinedSession("family-a"),
             clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),

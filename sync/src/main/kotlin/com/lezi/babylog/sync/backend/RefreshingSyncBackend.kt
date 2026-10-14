@@ -140,6 +140,16 @@ internal class RefreshingSyncBackend(
     override suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray =
         authenticated(session) { delegate.getMedia(it, clientUuid) }
 
+    override suspend fun downloadMedia(
+        session: SyncSession,
+        clientUuid: String,
+        target: OutputStream,
+    ): MediaDownloadReceipt = authenticated(session) {
+        // HTTP errors are rejected before writing to the sink, so the existing
+        // one-time 401 refresh cannot concatenate an error body with media bytes.
+        delegate.downloadMedia(it, clientUuid, target)
+    }
+
     override suspend fun getAppUpdateMetadata(session: SyncSession): AppUpdateMetadata =
         authenticated(session, delegate::getAppUpdateMetadata)
 

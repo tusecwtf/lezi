@@ -336,6 +336,7 @@ class RealSyncPortIdentityClearTest {
         assertThat(rig.preferences.pendingDeviceRemovalClear).isFalse()
     }
 
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test
     fun terminalIdentityClearBlocksConcurrentSyncUntilLocalDataAndCredentialsAreRetired() =
         runTest {

@@ -1,3 +1,4 @@
+pub mod diagnostics;
 mod handlers;
 mod members;
 mod model;
@@ -186,6 +187,8 @@ pub struct ServerConfig {
     /// Deterministic readiness-probe seam for isolated concurrency tests.
     #[doc(hidden)]
     pub readiness_probe_blocking_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync + 'static>>,
+    /// Opt-in numeric observation for isolated performance runs. No HTTP export.
+    pub performance_probe: Option<Arc<diagnostics::PerformanceProbe>>,
     clock: Clock,
 }
 
@@ -221,6 +224,7 @@ impl ServerConfig {
             causal_media_prepare_blocking_hook: None,
             causal_media_commit_blocking_hook: None,
             readiness_probe_blocking_hook: None,
+            performance_probe: None,
             clock: Arc::new(system_epoch_seconds),
         }
     }
@@ -415,9 +419,13 @@ struct AppState {
     causal_media_commit_blocking_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync + 'static>>,
     readiness_probe_blocking_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync + 'static>>,
     maintenance_read_only: bool,
+    performance_probe: Option<Arc<diagnostics::PerformanceProbe>>,
 }
 
 impl AppState {
+    /// Blocking work must own its guard even when the caller stops awaiting.
+    /// Return the guard with a successful result to preserve the handler's
+    /// normal unlock point; errors/panics release it with the worker instead.
     async fn family_lock(&self, family_id: &str) -> Arc<Mutex<()>> {
         let mut locks = self.family_locks.lock().await;
         locks
@@ -838,6 +846,7 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
         signing_secret: Arc::new(signing_secret),
         generation,
         clock: config.clock,
+        performance_probe: config.performance_probe,
         family_locks: Arc::new(Mutex::new(HashMap::new())),
         causal_media_upload_admission: media::CausalMediaUploadAdmission::default(),
         restore_locks: RestoreLockPool::default(),
@@ -1176,6 +1185,32 @@ where
             tracing::error!(%error, "blocking server task failed to join");
             ApiError::internal("Internal server error")
         })?
+}
+
+/// Same work and cancellation semantics as `run_blocking`; the optional probe
+/// keeps the worker lifetime separate from the lifetime of its caller's await.
+pub(crate) async fn run_observed<T, F>(
+    probe: Option<&Arc<diagnostics::PerformanceProbe>>,
+    stage: diagnostics::Stage,
+    operation: F,
+) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, ApiError> + Send + 'static,
+{
+    let Some(probe) = probe else {
+        return run_blocking(operation).await;
+    };
+    let (mut awaiting, mut worker) = probe.blocking(stage);
+    let result = run_blocking(move || {
+        worker.start();
+        let result = operation();
+        drop(worker);
+        result
+    })
+    .await;
+    awaiting.returned();
+    result
 }
 
 fn require_bootstrap_secret(

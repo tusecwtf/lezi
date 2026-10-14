@@ -2,6 +2,7 @@ package com.lezi.babylog.sync.backend
 
 import java.io.OutputStream
 import java.security.MessageDigest
+import com.lezi.babylog.core.common.MediaContentDigest
 import com.lezi.babylog.sync.AppUpdateMetadata
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.conflict.ConflictSnapshotPageRequest
@@ -940,6 +941,21 @@ interface SyncBackend {
         rootPassword: String,
     )
     suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray
+
+    /**
+     * Writes one complete media response to a caller-owned sink. Production HTTP
+     * streams with the existing media byte cap; this adapter keeps lightweight
+     * in-memory backends source-compatible. A failure may leave partial bytes.
+     */
+    suspend fun downloadMedia(
+        session: SyncSession,
+        clientUuid: String,
+        target: OutputStream,
+    ): MediaDownloadReceipt {
+        val bytes = getMedia(session, clientUuid)
+        target.write(bytes)
+        return MediaDownloadReceipt(MediaContentDigest.ofBytes(bytes), bytes.size.toLong())
+    }
 
     /**
      * Stage root entity + media metadata for an atomic package.

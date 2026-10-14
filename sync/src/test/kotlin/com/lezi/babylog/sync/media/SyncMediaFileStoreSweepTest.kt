@@ -47,6 +47,26 @@ class SyncMediaFileStoreSweepTest {
         }
     }
 
+    @Test
+    fun localClearSweepsExclusiveDownloadsAndMarkersButKeepsAdoptedNestedMedia() {
+        withMediaRoot { filesDir ->
+            val prefix = "sync_11111111-1111-4111-8111-111111111111_22222222-2222-4222-8222-222222222222"
+            val orphan = filesDir.file("record-media/$prefix/media.jpg")
+            val marker = filesDir.file("record-media/.sync-download-owners/$prefix.jpg.owner")
+            val adopted = filesDir.file("record-media/${prefix.replace("22222222-2222", "33333333-3333")}/media.jpg")
+            val avatar = filesDir.file("baby_avatars/$prefix/media.jpg")
+            sweepUnreferencedProductMedia(filesDir, LocalDataClearScope.RecordsOnly, setOf(adopted.absolutePath))
+            assertThat(orphan.exists()).isFalse()
+            assertThat(marker.exists()).isFalse()
+            assertThat(checkNotNull(orphan.parentFile).exists()).isFalse()
+            assertThat(adopted.exists()).isTrue()
+            assertThat(avatar.exists()).isTrue()
+            sweepUnreferencedProductMedia(filesDir, LocalDataClearScope.AllLocalData, emptySet())
+            assertThat(adopted.exists()).isFalse()
+            assertThat(avatar.exists()).isFalse()
+        }
+    }
+
     private fun withMediaRoot(block: (File) -> Unit) {
         val root = createTempDirectory("lezi-media-sweep-").toFile()
         try {

@@ -19144,3 +19144,6 @@ async fn causal_forced_min_supported_from_catalog_blocks_legacy_client() {
     assert_eq!(status, StatusCode::OK, "{ok}");
     assert_eq!(ok["results"][0]["status"], "accepted", "{ok}");
 }
+
+#[path = "api/performance_observation.rs"]
+mod performance_observation;

@@ -1,5 +1,6 @@
 package com.lezi.babylog.sync.availability
 
+import com.lezi.babylog.sync.backend.MediaDownloadWriteException
 import com.lezi.babylog.sync.backend.SyncHttpException
 import com.lezi.babylog.sync.backend.deadline.FamilyHttpException
 import com.lezi.babylog.sync.backend.deadline.FamilyHttpFailureKind
@@ -30,7 +31,7 @@ internal fun Throwable.toAvailabilityUnavailableReason(): FamilyServerUnavailabl
 }
 
 internal fun Throwable.isAvailabilityTransportFailure(): Boolean = when {
-    causeChainContains<MediaPrepareException>() -> false
+    causeChainContains<MediaPrepareException>() || causeChainContains<MediaDownloadWriteException>() -> false
     this is SyncHttpException -> statusCode == 408 || statusCode in 500..599
     else -> causeChainContains<IOException>()
 }

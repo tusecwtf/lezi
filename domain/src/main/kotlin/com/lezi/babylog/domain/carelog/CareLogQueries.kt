@@ -191,34 +191,41 @@ internal class CareLogQueries(
                     type == RecordType.WEIGHT &&
                         queryNeedsConvertedWeightCandidate
                     ) ||
+                    (type == RecordType.SLEEP && normalizedQuery.mayMatchSleepDuration()) ||
                     type.candidateSearchTerms().any { term ->
                         typeTermMatchesQuery(term, normalizedQuery)
                     }
             }
             .map { it.key }
             .ifEmpty { listOf(NO_MATCHING_RECORD_TYPE) }
-        val hits = recordDao.searchCandidates(
+        val candidates = recordDao.searchCandidates(
             babyId = babyId,
             escapedPattern = normalizedQuery.payloadSearchNeedle().toSqlLikePattern(),
             matchingTypeKeys = matchingTypeKeys,
         ).asSequence()
             .map { it.toModel() }
             .filter { it.clientUuid !in hiddenSourceClientUuids }
-            .filter { it.matchesVisibleSearchText(normalizedQuery) }
+            // A Sleep root can still have no end after a Wake closes it. Match
+            // its current projection below, never the raw "进行中" summary.
+            .filter { it.type == RecordType.SLEEP || it.matchesVisibleSearchText(normalizedQuery) }
             .toList()
-        val sleepIds = hits.filter { it.type == RecordType.SLEEP }.map { it.clientUuid }
-        if (sleepIds.isEmpty()) return hits
-        // Explicit-root projection refuses more than MAX_EXPLICIT_PROJECTION_ROOTS
-        // ids. Search can match every sleep of a long history, so project in
-        // capped batches and keep hit order.
-        val projected = sleepIds
-            .chunked(MAX_EXPLICIT_PROJECTION_ROOTS)
-            .flatMap { chunk ->
-                recordWakeProjectionDao.loadRecordProjectionForRoots(chunk)
-            }
-            .map(ProjectedRecordEntity::toDomainRecord)
+        val sleepIds = candidates.filter { it.type == RecordType.SLEEP }.map { it.clientUuid }
+        if (sleepIds.isEmpty()) return candidates
+        // One transaction owns all batches and their shared open-Sleep peers;
+        // do not repeat the detail projection's full peer context per 64 roots.
+        val projected = recordWakeProjectionDao.loadSearchSleepProjection(babyId, sleepIds)
+            .map { it.root.toProjectedSleepRecord(it.sleepInterval) }
             .associateBy { it.clientUuid }
-        return hits.map { hit -> projected[hit.clientUuid] ?: hit }
+        return candidates.mapNotNull { candidate ->
+            if (candidate.type != RecordType.SLEEP) return@mapNotNull candidate
+            // A root removed/excluded between candidate selection and projection
+            // must not reappear by falling back to the stale candidate.
+            projected[candidate.clientUuid]
+                ?.takeIf {
+                    it.babyId == babyId && it.deletedAt == null &&
+                        it.matchesVisibleSearchText(normalizedQuery)
+                }
+        }
     }
 
     suspend fun recentCareSummary(

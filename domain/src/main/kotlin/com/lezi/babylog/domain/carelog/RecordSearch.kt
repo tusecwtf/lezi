@@ -72,7 +72,7 @@ internal fun RecordType.candidateSearchTerms(): List<String> = searchTerms() + w
         "小", "中", "大", "一点", "偏少", "正常", "偏多", "稀", "偏软", "偏硬",
         "白", "黄", "橙", "褐", "绿", "红", "黑",
     )
-    RecordType.SLEEP -> listOf("进行中", "不足1分", "分", "分钟")
+    RecordType.SLEEP -> listOf("进行中", "时长")
     RecordType.TEMPERATURE -> listOf("℃")
     RecordType.COUGH, RecordType.RASH, RecordType.VOMIT, RecordType.INJURY ->
         listOf("轻微", "一般", "明显")
@@ -90,6 +90,17 @@ internal fun RecordType.candidateSearchTerms(): List<String> = searchTerms() + w
     RecordType.VACCINE,
     RecordType.CUSTOM,
     -> emptyList()
+}
+
+/**
+ * Sleep duration is derived from the root and its wake projection, not JSON.
+ * Admit compact-duration substrings without making every word containing h/m
+ * fetch the baby's whole sleep history. Final visible-text matching still
+ * decides whether a candidate actually matches.
+ */
+internal fun String.mayMatchSleepDuration(): Boolean {
+    val duration = removePrefix("时长").removePrefix("长").trimStart()
+    return duration.isNotEmpty() && duration.all { it in '0'..'9' || it == 'h' || it == 'm' }
 }
 
 /**
