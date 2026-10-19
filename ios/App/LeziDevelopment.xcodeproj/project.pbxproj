@@ -1,0 +1,116 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+/* Begin PBXBuildFile section */
+		A00000000000000000000001 /* LeziDevelopmentApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000002 /* LeziDevelopmentApp.swift */; };
+		A00000000000000000000003 /* LeziUI in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000004 /* LeziUI */; };
+		A00000000000000000000005 /* LeziStorage in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000006 /* LeziStorage */; };
+		A00000000000000000000007 /* LeziCore in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000008 /* LeziCore */; };
+/* End PBXBuildFile section */
+/* Begin PBXFileReference section */
+		A00000000000000000000002 /* LeziDevelopmentApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LeziDevelopmentApp.swift; sourceTree = "<group>"; };
+		A00000000000000000000009 /* LeziDevelopment.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LeziDevelopment.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+/* Begin PBXFrameworksBuildPhase section */
+		A0000000000000000000000A /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000003, A00000000000000000000005, A00000000000000000000007,); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+/* Begin PBXGroup section */
+		A0000000000000000000000B = {isa = PBXGroup; children = (A0000000000000000000000C /* Sources */, A0000000000000000000000D /* Products */,); sourceTree = "<group>"; };
+		A0000000000000000000000C /* Sources */ = {isa = PBXGroup; children = (A00000000000000000000002,); path = Sources; sourceTree = "<group>"; };
+		A0000000000000000000000D /* Products */ = {isa = PBXGroup; children = (A00000000000000000000009,); name = Products; sourceTree = "<group>"; };
+/* End PBXGroup section */
+/* Begin PBXNativeTarget section */
+		A0000000000000000000000E /* LeziDevelopment */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A0000000000000000000000F;
+			buildPhases = (A00000000000000000000010 /* Sources */, A0000000000000000000000A /* Frameworks */, A00000000000000000000011 /* Resources */,);
+			buildRules = ();
+			dependencies = ();
+			name = LeziDevelopment;
+			packageProductDependencies = (A00000000000000000000004, A00000000000000000000006, A00000000000000000000008,);
+			productName = LeziDevelopment;
+			productReference = A00000000000000000000009;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+/* Begin PBXProject section */
+		A00000000000000000000012 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {BuildIndependentTargetsInParallel = YES; LastUpgradeCheck = 1600; };
+			buildConfigurationList = A00000000000000000000013;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = "zh-Hans";
+			hasScannedForEncodings = 0;
+			knownRegions = ("zh-Hans", en, Base,);
+			mainGroup = A0000000000000000000000B;
+			packageReferences = (A00000000000000000000014,);
+			productRefGroup = A0000000000000000000000D;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (A0000000000000000000000E,);
+		};
+/* End PBXProject section */
+/* Begin PBXResourcesBuildPhase section */
+		A00000000000000000000011 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+/* Begin PBXSourcesBuildPhase section */
+		A00000000000000000000010 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000001,); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+/* Begin XCBuildConfiguration section */
+		A00000000000000000000015 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; DEBUG_INFORMATION_FORMAT = dwarf; ENABLE_TESTABILITY = YES; GCC_OPTIMIZATION_LEVEL = 0; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SDKROOT = iphoneos; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)"; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_VERSION = 6.0; }; name = Debug; };
+		A00000000000000000000016 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SDKROOT = iphoneos; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; SWIFT_VERSION = 6.0; }; name = Release; };
+		A00000000000000000000017 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {
+			CODE_SIGNING_ALLOWED = NO;
+			CURRENT_PROJECT_VERSION = 1;
+			GENERATE_INFOPLIST_FILE = YES;
+			INFOPLIST_KEY_CFBundleDisplayName = "乐记开发版";
+			INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.lifestyle";
+			INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+			INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+			INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+			INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+			LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks",);
+			MARKETING_VERSION = 0.0.1;
+			PRODUCT_BUNDLE_IDENTIFIER = com.lezi.babylog.ios.dev;
+			PRODUCT_NAME = "$(TARGET_NAME)";
+			SUPPORTED_PLATFORMS = iphonesimulator;
+			SUPPORTS_MACCATALYST = NO;
+			TARGETED_DEVICE_FAMILY = "1,2";
+		}; name = Debug; };
+		A00000000000000000000018 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {
+			CODE_SIGNING_ALLOWED = NO;
+			CURRENT_PROJECT_VERSION = 1;
+			GENERATE_INFOPLIST_FILE = YES;
+			INFOPLIST_KEY_CFBundleDisplayName = "乐记开发版";
+			INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.lifestyle";
+			INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+			INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+			INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+			INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+			LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks",);
+			MARKETING_VERSION = 0.0.1;
+			PRODUCT_BUNDLE_IDENTIFIER = com.lezi.babylog.ios.dev;
+			PRODUCT_NAME = "$(TARGET_NAME)";
+			SUPPORTED_PLATFORMS = iphonesimulator;
+			SUPPORTS_MACCATALYST = NO;
+			TARGETED_DEVICE_FAMILY = "1,2";
+		}; name = Release; };
+/* End XCBuildConfiguration section */
+/* Begin XCConfigurationList section */
+		A0000000000000000000000F = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000017, A00000000000000000000018,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+		A00000000000000000000013 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000015, A00000000000000000000016,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+/* End XCConfigurationList section */
+/* Begin XCLocalSwiftPackageReference section */
+		A00000000000000000000014 /* XCLocalSwiftPackageReference ".." */ = {isa = XCLocalSwiftPackageReference; relativePath = ..; };
+/* End XCLocalSwiftPackageReference section */
+/* Begin XCSwiftPackageProductDependency section */
+		A00000000000000000000004 /* LeziUI */ = {isa = XCSwiftPackageProductDependency; package = A00000000000000000000014; productName = LeziUI; };
+		A00000000000000000000006 /* LeziStorage */ = {isa = XCSwiftPackageProductDependency; package = A00000000000000000000014; productName = LeziStorage; };
+		A00000000000000000000008 /* LeziCore */ = {isa = XCSwiftPackageProductDependency; package = A00000000000000000000014; productName = LeziCore; };
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = A00000000000000000000012 /* Project object */;
+}

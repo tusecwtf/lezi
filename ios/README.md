@@ -1,13 +1,19 @@
 # LEZI iOS foundation
 
 This is an additive Swift package beside the current Android app and Rust LAN
-service. It is **not yet an installable iOS app or a complete sync client**. It
+service. It is **not a complete iOS product, signed device app or sync client**. It
 contains no backend fork, network calls, account bootstrap, deployment tooling,
 or Android-version impersonation.
+`App/` supplies an unsigned Simulator-only development host for the bounded
+offline baby/pee flow. Its Apple build and launch evidence are separate from
+the portable package tests; no production distribution is configured.
 
 ## Toolchain and platforms
 
-- Swift 6.0 language/tools minimum, no third-party package dependencies.
+- Swift 6.0 language/tools minimum. SHA-256 uses Apple's CryptoKit on Apple
+  platforms and the official `apple/swift-crypto` package on Linux. The package
+  and its ASN.1 dependency are pinned to Swift 6.0-compatible releases in the
+  manifest and resolved lockfile; no custom cryptographic implementation is used.
 - iOS 17 minimum is an initial proposal for the SwiftUI implementation, not a
   verified product/device support decision. macOS 14 supports development tests.
 - `LeziCore` is Foundation-only and testable on Linux. `LeziUI` separates portable
@@ -16,13 +22,15 @@ or Android-version impersonation.
 Run from the checkout root:
 
 ```sh
-swift test --package-path ios
+swift test --package-path ios --force-resolved-versions
 ```
 
 Tests read `config/conflict-v2-golden.json` from the same checkout; they never
 fetch or copy a second corpus. Keep `ios/` beside `config/` when running tests.
 A Linux pass does not prove Apple SDK compilation, simulator behavior, signing,
 accessibility, device behavior, or end-to-end interoperability.
+The storage tests require SQLite development headers and linkage on Linux
+(`libsqlite3-dev` on Debian/Ubuntu); Apple SDKs supply the platform SQLite API.
 
 ## Implemented contract slice
 
@@ -69,8 +77,45 @@ shape cases exercise parser mechanics; **they do not implement or prove baby
 canonicalization**. Snapshot, choice resolution, commit replay and all other
 corpus scenarios remain unimplemented and are not silently counted as passing.
 
+### Subsequent bounded slices
+
+- `RecordPayloadCodec` implements Android's **local** schema-2 payload document
+  rules for all 28 record types, including opaque preservation of unsupported
+  documents and a local-only custom row ID. Its coercions follow the pinned
+  Android serializer and must never be used for strict causal wire validation.
+  Known floating output is semantic JSON, not JVM byte-canonical output.
+  Nonstandard escaped controls, unpaired surrogates and over-deep documents stay
+  opaque rather than silently changing their typed contents.
+- `BabyCanonicalTests` adds real semantic decoder coverage for the first three
+  baby corpus cases. This is distinct from the older parser-mechanics tests
+  above. The public canonical hash API is limited to validated baby mutations;
+  it does not establish arbitrary record/floating-point canonicalization.
+- Mutation and stamped stable baby roots have separate exact key sets. Hashing
+  preserves request values rather than applying server ingress normalization.
+  Explicit-null media dimensions follow the frozen wire/server representation.
+  Negative-zero integer tokens are deliberately rejected at this boundary until
+  their cross-language pre-normalization hash semantics are proven.
+- `LeziStorage` is a real file-backed SQLite **offline-only** vertical slice:
+  native schema 1, local identity, baby profiles/preferences and no-media pee
+  facts. Confirmation saves the fact and dirty marker atomically; tests cover
+  restart, failed COMMIT/rollback, replay, wrong identity, original baby after
+  selection changes, blocked offline writes and monotonic edits. It does not
+  create a family session or a network-ready frozen mutation. Unsupported record
+  types and photos are rejected rather than dropped. Native stale-edit CAS and
+  Int64-overflow refusal are explicitly scoped safety differences, not claims of
+  identical Android behavior; see `Sources/LeziStorage/StorageScope.swift`.
+
+Two source-derived compatibility questions remain open, without a demonstrated
+production failure: Kotlin's hash projection omits null media dimensions while
+Rust serializes them; Rust baby ingress rejects a null birthday while the frozen
+spec and Kotlin snapshot decoder allow it. Current Android photo upload emits
+positive dimensions and its baby mapper emits an epoch-day date, so those normal
+producer paths do not establish the discrepancies as live incidents. Do not
+change existing Android or Rust behavior on this evidence alone; add real
+cross-client proof before claiming full compatibility.
+
 The remaining sync work includes secure endpoint trust and pin persistence,
-family/device session setup and refresh, persistent local facts and immutable
+family/device session setup and refresh, complete family-aware persistent facts and immutable
 pending mutation envelopes, frozen causal base/request hash/media receipts,
 commit/pull orchestration, conflict snapshots and resolution, media verification,
 retry/deadline policy, directory caching, lifecycle/heartbeat scheduling and

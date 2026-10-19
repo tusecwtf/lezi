@@ -10,9 +10,13 @@
 // concrete catalog-key parsing, immutable confirmation snapshot, epoch fact/plan
 // gates, strict wall-time/DST resolution and natural-day intervals, sleep/wake
 // projection, plan status/next-feed marker and local root publication state.
+// Storage payload schema-2 codec covers all 28 types, closed keys, explicit-null
+// rejection, local primitive coercion and opaque raw-document round trips. Its
+// document wrapper retains local custom row IDs outside the portable enum.
+// This is not frozen-wire canonicalization; see codec limits and source notes.
 //
-// Pending (do not claim complete domain parity): strict payload JSON codec and
-// unknown-document round trips; resolved local custom-definition lookup; complete
+// Pending (do not claim complete domain parity): resolved local custom-definition
+// lookup; complete
 // Baby/Record/CarePlan persistence models; author/owner ACL; atomic media packages;
 // fulfillment candidate adjudication; nursing timer/clear epochs; source relations
 // and duplicate bounds; daily/weekly aggregation and reference growth curves;

@@ -36,7 +36,7 @@ jobs:
           xcodebuild -version
           xcrun swift --version
       - name: Run portable domain and wire behavior tests
-        run: swift test --package-path ios
+        run: swift test --package-path ios --force-resolved-versions
       - name: Compile core against the iOS Simulator SDK
         run: |
           set -euo pipefail
@@ -50,18 +50,65 @@ jobs:
             -module-name LeziCore -emit-module \
             -emit-module-path "$RUNNER_TEMP/lezi-ios-core/LeziCore.swiftmodule" \
             "${sources[@]}"
+          storage_sources=()
+          while IFS= read -r file; do storage_sources+=("$file"); done < <(find ios/Sources/LeziStorage -name '*.swift' -type f | sort)
+          test "${#storage_sources[@]}" -gt 0
+          xcrun swiftc -swift-version 6 -parse-as-library \
+            -sdk "$sdk" -target arm64-apple-ios17.0-simulator \
+            -I "$RUNNER_TEMP/lezi-ios-core" -I ios/Sources/CSQLite \
+            -module-name LeziStorage -emit-module \
+            -emit-module-path "$RUNNER_TEMP/lezi-ios-core/LeziStorage.swiftmodule" \
+            "${storage_sources[@]}"
           ui_sources=()
           while IFS= read -r file; do ui_sources+=("$file"); done < <(find ios/Sources/LeziUI -name '*.swift' -type f | sort)
           test "${#ui_sources[@]}" -gt 0
           xcrun swiftc -swift-version 6 -parse-as-library \
             -sdk "$sdk" -target arm64-apple-ios17.0-simulator \
-            -I "$RUNNER_TEMP/lezi-ios-core" \
+            -I "$RUNNER_TEMP/lezi-ios-core" -I ios/Sources/CSQLite \
             -module-name LeziUI -emit-module \
             -emit-module-path "$RUNNER_TEMP/lezi-ios-core/LeziUI.swiftmodule" \
             "${ui_sources[@]}"
+      - name: Build unsigned development app
+        run: |
+          python3 ios/App/prepare-package-lock.py
+          xcodebuild -resolvePackageDependencies \
+            -project ios/App/LeziDevelopment.xcodeproj -scheme LeziDevelopment \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/lezi-source-packages" \
+            -onlyUsePackageVersionsFromResolvedFile
+          xcodebuild build \
+            -project ios/App/LeziDevelopment.xcodeproj -scheme LeziDevelopment \
+            -configuration Debug -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/lezi-app-build" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/lezi-source-packages" \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+            CODE_SIGNING_ALLOWED=NO
+      - name: Smoke launch on a clean iPhone Simulator
+        env:
+          APP_PATH: ${{ runner.temp }}/lezi-app-build/Build/Products/Debug-iphonesimulator/LeziDevelopment.app
+        run: |
+          set -euo pipefail
+          simulator="$(xcrun simctl list devices available --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for runtime,devices in d["devices"].items() if "iOS" in runtime for x in devices if x["name"].startswith("iPhone")))')"
+          # Ephemeral CI device only; never a user's phone or family store.
+          xcrun simctl boot "$simulator"
+          xcrun simctl bootstatus "$simulator" -b
+          xcrun simctl install "$simulator" "$APP_PATH"
+          xcrun simctl launch "$simulator" com.lezi.babylog.ios.dev
+          sleep 5
+          mkdir -p "$RUNNER_TEMP/lezi-ios-evidence"
+          xcrun simctl io "$simulator" screenshot "$RUNNER_TEMP/lezi-ios-evidence/first-launch.png"
+          xcrun simctl shutdown "$simulator"
+      - name: Retain synthetic first-launch screenshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-development-first-launch
+          path: ${{ runner.temp }}/lezi-ios-evidence/first-launch.png
+          retention-days: 3
+          if-no-files-found: error
       - name: Record verification boundary
         run: |
           {
-            echo 'Portable core/presentation tests and iOS Simulator SDK library compilation only.'
-            echo 'This is not an app build, simulator UI test, mixed-client server proof, signing, or device acceptance.'
+            echo 'Portable tests, iOS SDK library compilation, unsigned development app build and first-launch smoke only.'
+            echo 'The app supports a bounded offline baby/pee slice, not full LEZI feature or synchronization parity.'
+            echo 'First launch is not an interaction test, mixed-client server proof, signing, or physical-device acceptance.'
           } >> "$GITHUB_STEP_SUMMARY"

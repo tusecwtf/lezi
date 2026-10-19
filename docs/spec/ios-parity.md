@@ -25,6 +25,26 @@ Android runtime, Rust runtime and shared corpus bytes remain unchanged. The new
 macOS workflow tests the package and compiles both library targets against the
 iOS Simulator SDK. Its run is pending; no Apple validation is claimed here.
 
+### Offline vertical slice checkpoint (2026-10-19)
+
+The first published foundation head `125d326a` passed Android run
+`39270410111` and macOS/iOS-library run `39270410213`. The PR synthetic merge
+tree was verified identical to that head. These results do not cover later code.
+
+The subsequent local slice adds schema-2 local payload codecs, a bounded baby
+canonical/hash contract, real SQLite offline baby/pee persistence with indexed
+keyset paging, and a SwiftUI create/select/confirm/read flow. The unsigned
+`LeziDevelopment` Simulator host is deliberately limited to that flow; it is not
+the complete iOS product. No family, production transport or media support is
+implied. Linux Swift 6.4.1 currently passes **91** cases; two additional
+Apple-only model/orchestration tests await the new macOS run. The new app build
+and first-launch smoke also await that run. The entire product matrix remains
+open until each row's complete acceptance criteria have actual evidence.
+
+Native stale-edit CAS and revision-overflow refusal, and opaque preservation of
+nonstandard local JSON escape cases, are explicitly documented differences.
+They must not be presented as proven identical Android behavior.
+
 ## 1. Meaning of parity and authority
 
 A port is complete only when a user can perform the same supported care and family
