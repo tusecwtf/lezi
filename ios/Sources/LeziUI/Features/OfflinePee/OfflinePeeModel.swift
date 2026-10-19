@@ -112,13 +112,13 @@ final class OfflinePeeModel: ObservableObject {
               let baby = babies.first(where: { $0.clientUUID == selected.babyClientUUID }) else { return }
         editorContext = selected
         editor = .init(babyClientUUID: baby.clientUUID, babyName: baby.nickname,
-                       timestampMillis: Int64(Date().timeIntervalSince1970 * 1000), milkRecent: milkRecent, milkStep: milkStep)
+                       timestampMillis: Int64(Date().timeIntervalSince1970 * 1000), milkRecent: milkRecent, milkStep: milkStep, babyBirthday: baby.birthday)
     }
     func openEditor(record: OfflineRecord, milkStep: Int = 5) {
         guard editor == nil, !busy, let selected,
               selected.babyClientUUID == record.babyClientUUID,
               let baby = babies.first(where: { $0.clientUUID == record.babyClientUUID }) else { return }
-        guard let state = OfflinePeeState(record: record, babyName: baby.nickname, milkRecent: milkRecent, milkStep: milkStep) else {
+        guard let state = OfflinePeeState(record: record, babyName: baby.nickname, milkRecent: milkRecent, milkStep: milkStep, babyBirthday: baby.birthday) else {
             message = "此记录暂不支持安全编辑，原始内容已保留。"
             return
         }

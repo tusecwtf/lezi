@@ -542,7 +542,7 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         assertSelectedBaby(app, name: babyName)
         assertEmptyHistory(app)
 
-        openDiaper(kind: "formula", in: app)
+        openExtendedRecord(kind: "formula", in: app)
         revealHealthControl(app.buttons["offline.milk.step"], in: app)
         tap(app.buttons["offline.milk.step"])
         tap(app.buttons["offline.milk.step.10"])
@@ -580,7 +580,7 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         assertMilkRow(app.otherElements[formulaID], kind: "配方奶", amount: 157, note: formulaNote, prepared: 180, duration: 10)
         XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
 
-        openDiaper(kind: "formula", in: app)
+        openExtendedRecord(kind: "formula", in: app)
         waitFor(healthField("offline.milk.amount", in: app), "value == %@", "157")
         // Move far away from the recent value: 157 cannot be a 10 ml neighbor
         // of 300, so this shortcut must come from the saved formula fact.
@@ -591,8 +591,7 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         enterHealthText("offline.milk.prepared", text: "190", in: app)
         enterHealthText("offline.milk.duration", text: "11", in: app)
         revealHealthControl(app.buttons["offline.excretion.kind"], in: app)
-        tap(app.buttons["offline.excretion.kind"])
-        tap(app.buttons["offline.excretion.kind.pumped_feed"])
+        selectExtendedRecordKind("pumped_feed", currentKind: "formula", in: app)
         XCTAssertFalse(healthField("offline.milk.prepared", in: app).exists)
         XCTAssertFalse(healthField("offline.milk.duration", in: app).exists)
         waitFor(healthField("offline.milk.amount", in: app), "value == %@", "120")
@@ -656,6 +655,136 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         } else {
             XCTAssertFalse(row.staticTexts["offline.record.milk.duration"].exists)
         }
+    }
+
+    func testTemperatureUnitConversionAndAdvicePreferencePreserveSavedFacts() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let babyName = "UI-Temperature-007"
+        let note = "ui-temperature-note"
+        let adviceText = "低月龄发热请及时就医。本提示仅供参考，不构成医疗诊断。"
+        app.launch()
+        tap(app.buttons["offline.baby.new"])
+        let nickname = app.textFields["offline.baby.nickname"]
+        tap(nickname)
+        nickname.typeText(babyName)
+        // The ordinary creation form defaults birthday to today, keeping this
+        // synthetic baby below three months without hardcoding a calendar date.
+        tap(app.buttons["offline.baby.create"])
+        waitFor(app.staticTexts["offline.result"], "label == %@", "已在本机创建宝宝：\(babyName)")
+        waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
+        tap(app.buttons["offline.baby.new"])
+        assertSelectedBaby(app, name: babyName)
+        assertEmptyHistory(app)
+
+        openExtendedRecord(kind: "temperature", in: app)
+        replaceTemperatureValue("36.5", with: "0", in: app)
+        tap(app.buttons["confirmation.save"])
+        waitFor(app.staticTexts["confirmation.reason"], "label == %@", "体温超出可记录范围")
+        let temperature = healthField("offline.temperature.value", in: app)
+        waitFor(temperature, "value == %@", "0")
+        selectTemperatureUnit("fahrenheit", in: app)
+        waitFor(temperature, "value == %@", "0") // Invalid switching cannot replace the input.
+        replaceTemperatureValue("0", with: "37", in: app)
+        selectTemperatureUnit("fahrenheit", in: app)
+        waitFor(temperature, "value == %@", "98.6")
+        replaceTemperatureValue("98.6", with: "100.4", in: app)
+        waitFor(app.staticTexts["offline.temperature.advice"], "label == %@", adviceText)
+        selectTemperatureUnit("celsius", in: app)
+        waitFor(temperature, "value == %@", "38")
+        selectTemperatureUnit("fahrenheit", in: app)
+        waitFor(temperature, "value == %@", "100.4")
+        revealHealthControl(noteField(in: app), in: app)
+        enterNote(note, in: app)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "体温")
+        let row = diaperRow(in: app, note: note)
+        waitFor(row, "exists == true")
+        let recordID = row.identifier
+        assertTemperatureRow(row, value: "38 ℃", note: note)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        assertTemperatureRow(app.otherElements[recordID], value: "38 ℃", note: note)
+        tap(app.otherElements[recordID].buttons["offline.record.edit"])
+        waitFor(app.staticTexts["offline.excretion.kind.fixed"], "label == %@", "类型：体温（不可更改）")
+        XCTAssertFalse(app.buttons["offline.excretion.kind"].exists)
+        // Display units are draft-only: reopening reads canonical Celsius.
+        waitFor(temperature, "value == %@", "38")
+        waitFor(app.staticTexts["offline.temperature.advice"], "label == %@", adviceText)
+        replaceTemperatureValue("38", with: "38.2", in: app)
+        let adviceToggle = app.switches["offline.temperature.advice.enabled"]
+        revealHealthControl(adviceToggle, in: app)
+        waitFor(adviceToggle, "value == %@", "1")
+        tap(adviceToggle)
+        waitFor(adviceToggle, "value == %@", "0")
+        waitFor(app.staticTexts["offline.temperature.advice"], "exists == false")
+        waitFor(temperature, "value == %@", "38.2")
+        saveDiaper(in: app, babyName: babyName, kindLabel: "体温")
+        assertTemperatureRow(app.otherElements[recordID], value: "38.2 ℃", note: note)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        assertTemperatureRow(app.otherElements[recordID], value: "38.2 ℃", note: note)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+        tap(app.otherElements[recordID].buttons["offline.record.edit"])
+        waitFor(temperature, "value == %@", "38.2")
+        waitFor(adviceToggle, "value == %@", "0")
+        XCTAssertFalse(app.staticTexts["offline.temperature.advice"].exists)
+        tap(app.buttons["offline.editor.close"])
+        waitFor(temperature, "exists == false")
+        assertTemperatureRow(app.otherElements[recordID], value: "38.2 ℃", note: note)
+    }
+
+    private func selectTemperatureUnit(_ unit: String, in app: XCUIApplication) {
+        revealHealthControl(app.buttons["offline.temperature.unit"], in: app)
+        tap(app.buttons["offline.temperature.unit"])
+        tap(app.buttons["offline.temperature.unit.\(unit)"])
+    }
+
+    private func replaceTemperatureValue(_ oldValue: String, with newValue: String, in app: XCUIApplication) {
+        let field = healthField("offline.temperature.value", in: app)
+        revealHealthControl(field, in: app)
+        waitFor(field, "value == %@", oldValue)
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: oldValue.count) + newValue)
+        waitFor(field, "value == %@", newValue)
+    }
+
+    private func assertTemperatureRow(_ row: XCUIElement, value: String, note: String) {
+        waitFor(row, "exists == true")
+        waitFor(row.staticTexts["offline.record.kind"], "label == %@", "体温")
+        waitFor(row.staticTexts["offline.record.temperature.value"], "label == %@", value)
+        waitFor(row.staticTexts["offline.record.note"], "label == %@", note)
+    }
+
+    private func openExtendedRecord(kind: String, in app: XCUIApplication) {
+        tap(app.buttons["offline.pee.new"])
+        selectExtendedRecordKind(kind, currentKind: "pee", in: app)
+    }
+
+    private func selectExtendedRecordKind(_ kind: String, currentKind: String, in app: XCUIApplication) {
+        tap(app.buttons["offline.excretion.kind"])
+        // The captured Simulator hierarchy exposes the long Picker popup as a
+        // CollectionView. Its last options exist below the clipped menu viewport.
+        // Scope one reveal gesture to that menu, never the underlying editor.
+        let menu = app.collectionViews.containing(.button, identifier: "offline.excretion.kind.\(currentKind)").firstMatch
+        waitFor(menu, "exists == true")
+        let option = app.buttons["offline.excretion.kind.\(kind)"]
+        if !option.exists || !option.isHittable {
+            let visible = menu.frame.intersection(app.frame)
+            XCTAssertFalse(visible.isNull)
+            XCTAssertGreaterThan(visible.height, 100)
+            print("Record menu reveal \(kind): collection=\(menu.frame), visible=\(visible)")
+            let origin = menu.coordinate(withNormalizedOffset: .zero)
+            let start = origin.withOffset(CGVector(dx: visible.midX - menu.frame.minX,
+                                                   dy: visible.minY + visible.height * 0.7 - menu.frame.minY))
+            let end = origin.withOffset(CGVector(dx: visible.midX - menu.frame.minX,
+                                                 dy: visible.minY + visible.height * 0.25 - menu.frame.minY))
+            start.press(forDuration: 0.1, thenDragTo: end)
+        }
+        tap(option)
     }
 
     private struct HealthForm {

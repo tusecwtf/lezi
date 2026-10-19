@@ -2,7 +2,7 @@
 
 `OfflinePeeAcceptanceTests` exercises the actual `LeziDevelopment` application
 and its ordinary file-backed SQLite store. Run on a fresh, ephemeral Simulator
-sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, `UI-Daily-003`, `UI-Health-004`, `UI-Growth-005`, and `UI-Milk-006` names are
+sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, `UI-Daily-003`, `UI-Health-004`, `UI-Growth-005`, `UI-Milk-006`, and `UI-Temperature-007` names are
 unique in that fresh sandbox, one per test. Reusing an already-tested sandbox intentionally
 fails rather than deleting or modifying existing records to make the test pass.
 No special app launch arguments, fake stores, reset paths, or network are used.
@@ -62,6 +62,20 @@ feeding must expose neither formula-only fields nor formula's recent amount.
 The second saved record has no prepared amount or duration. Batch relaunch and
 deletion checks preserve the formula row and its independent values. Portable
 three-kind coverage includes expressing milk without duplicating this UI flow.
+
+The temperature flow uses the ordinary baby form's current-day birthday. Zero
+is rejected and remains visible even when a unit switch is attempted. It enters
+100.4 °F, switches to 38 ℃ and back without losing the temperature, then saves
+and relaunches to read canonical Celsius. The exact existing low-age advisory
+is checked, without introducing medical copy. Editing to 38.2 ℃ keeps the type
+and UUID fixed; disabling the global local advisory preference must not block
+saving. A second relaunch verifies both the updated fact and disabled preference.
+Reopened editors use Celsius because the display-unit choice belongs to a draft.
+
+The milk and temperature flows reveal late type options with one upward drag
+inside the opened Picker menu’s actual CollectionView, only when the target
+button is offscreen. The captured menu hierarchy establishes the scope; the
+gesture uses current menu/window geometry and retains the target ID checks.
 
 Expectations poll observable UI states; there are no fixed sleeps. Cancel uses
 the existing `取消` button label; other controls and history probes use stable IDs.

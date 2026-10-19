@@ -126,3 +126,39 @@ Before valid input exists the existing panel's typed snapshot uses invalid
 amount −1, never a valid default/old amount. The optional payload accessor returns
 nil and feature/domain checks prevent persistence. This representation is not a
 new wire payload or a saved measurement.
+
+### Temperature (local implementation; Apple validation pending)
+
+The same confirmation/edit/delete owner now accepts `temperature`. The draft starts at
+36.5 ℃; Celsius/Fahrenheit is a draft-only choice, reset to Celsius on reopening.
+New or edited input must be a finite ASCII decimal of at most seven UTF-16 units,
+with canonical Celsius in 34...43. Invalid text remains visible and cannot be
+saved or switched into a different unit; it never becomes a default temperature.
+The canonical payload remains Celsius.
+
+Precision is an intentional native interaction difference: Android's
+`QuickRecordDraft.fromRecord` formats two decimal places and
+`QuickRecordPurposeFields.TemperatureFields` formats one decimal on unit changes
+(and substitutes a default for invalid input). This component retains the exact
+original Celsius payload for unchanged edits, and an exact Celsius anchor during
+unit-only changes. Converted display text may therefore exceed seven characters;
+unchanged generated/legacy text is accepted, while editing that text applies the
+seven-character rule. No epsilon or new medical threshold is introduced.
+
+`TemperatureRules` supplies the source-order conversion and source calendar rule.
+The editor captures the original baby's birthday, uses the record timestamp's
+local date in `TimeZone.current`, and checks birthday <= record date < birthday
+plus three calendar months, with Celsius >= 38. It never uses today's age or the
+currently selected different baby. The global local preference
+`lezi.offline.infantFeverAdviceEnabled` defaults to true; changing this preference
+writes no record and may survive cancelling an editor. The displayed source copy
+is “低月龄发热请及时就医。本提示仅供参考，不构成医疗诊断。” This is a source-defined
+informational prompt, not a new diagnostic rule.
+
+Sources: Android `QuickRecordDraft.kt` (`TemperatureUnit`, defaults, `fromRecord`),
+`QuickRecordPurposeFields.kt` (`TemperatureFields`, `shouldShowInfantFeverAdvice`),
+`QuickRecordSheetControls.kt` (`DecimalField`), and `SettingsDataSource.kt`
+(`infant_fever_advice`). Portable tests cover input/range/precision, original-baby
+birthday ownership, record-date boundaries, opaque/interval protection and real
+SQLite reopen/edit/delete. Two Apple-only tests cover the real model's original
+baby after selection changes, CUD, duplicate dispatch, rollback and discard.

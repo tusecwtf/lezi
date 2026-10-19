@@ -27,7 +27,7 @@ concurrency:
 jobs:
   contracts:
     runs-on: macos-15
-    # Full Simulator interaction coverage now includes six independent record flows.
+    # Full Simulator interaction coverage now includes seven independent record flows.
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
