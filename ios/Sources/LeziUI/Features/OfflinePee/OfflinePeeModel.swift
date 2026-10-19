@@ -10,6 +10,8 @@ final class OfflinePeeModel: ObservableObject {
     @Published private(set) var babies: [OfflineBaby] = []
     @Published private(set) var selected: OfflineContext?
     @Published private(set) var records: [OfflineRecord] = []
+    @Published private(set) var sleeps: [UUID: OfflineSleep] = [:]
+    @Published private(set) var latestOpenSleepClientUUID: UUID?
     @Published private(set) var nextCursor: OfflineRecordCursor?
     @Published private(set) var busy = false
     @Published private(set) var message: String?
@@ -30,7 +32,7 @@ final class OfflinePeeModel: ObservableObject {
     struct Snapshot: Sendable {
         let babies: [OfflineBaby]
         let context: OfflineContext?
-        let page: OfflineRecordsPage?
+        let page: OfflineSleepPage?
         let milkRecent: [RecordType: [Int]]
     }
     private static func snapshot(_ store: OfflineStore) async throws -> Snapshot {
@@ -38,8 +40,8 @@ final class OfflinePeeModel: ObservableObject {
         let context: OfflineContext?
         do { context = try await store.context() }
         catch OfflineStoreError.staleContext { context = nil }
-        let page: OfflineRecordsPage?
-        if let context { page = try await store.recordPage(baby: context.babyClientUUID) }
+        let page: OfflineSleepPage?
+        if let context { page = try await store.sleepPage(baby: context.babyClientUUID) }
         else { page = nil }
         let milkRecent: [RecordType: [Int]]
         if let context { milkRecent = try await store.recentMilkAmounts(baby: context.babyClientUUID) }
@@ -49,7 +51,8 @@ final class OfflinePeeModel: ObservableObject {
     private func apply(_ snapshot: Snapshot) {
         milkRecent = snapshot.milkRecent
         babies = snapshot.babies; selected = snapshot.context
-        records = snapshot.page?.records ?? []; nextCursor = snapshot.page?.nextCursor
+        records = snapshot.page?.page.records ?? []; nextCursor = snapshot.page?.page.nextCursor
+        sleeps = snapshot.page?.sleeps ?? [:]; latestOpenSleepClientUUID = snapshot.page?.latestOpenSleepClientUUID
     }
     func refresh() {
         guard !busy, editor?.isBusy != true else { return }
@@ -99,11 +102,13 @@ final class OfflinePeeModel: ObservableObject {
         let store = store
         operation = Task { [weak self] in
             do {
-                let page = try await store.recordPage(baby: selected.babyClientUUID, before: cursor)
+                let page = try await store.sleepPage(baby: selected.babyClientUUID, before: cursor)
                 guard !Task.isCancelled, let self else { return }
                 let known = Set(self.records.map(\.clientUUID))
-                self.records += page.records.filter { !known.contains($0.clientUUID) }
-                self.nextCursor = page.nextCursor; self.busy = false
+                self.records += page.page.records.filter { !known.contains($0.clientUUID) }
+                self.nextCursor = page.page.nextCursor
+                self.sleeps.merge(page.sleeps) { _, new in new }
+                self.latestOpenSleepClientUUID = page.latestOpenSleepClientUUID; self.busy = false
             } catch { self?.fail(error) }
         }
     }

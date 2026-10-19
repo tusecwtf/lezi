@@ -68,40 +68,48 @@ passed **5,908 tests**. UI duration was 1,450.014 seconds (milk 249.255 seconds,
 temperature 184.565 seconds); artifact `12225776079` contains the acceptance
 evidence. Schema **1/2→3** migration preserves data atomically. Storage supports
 26 ordinary no-media types plus dedicated sleep commands. Fresh schema-3 host
-launch is verified, but **sleep UI is not exposed or accepted**. Database schema
+launch was verified; **that checkpoint did not expose sleep UI**. Database schema
 and payload document schema versions are separate concepts.
 
 Eight explicit sleep
 commands handle start/completed creation, wake creation, start/completed editing,
 wake update/withdrawal, and effective-wake selection. Dedicated reads batch-project
-sleep and wake evidence. No family session or observer is fabricated, and **sleep
-UI is not open**; custom/media writes were unsupported at that checkpoint. Completed creation uses
+sleep and wake evidence. No family session or observer was fabricated; **sleep UI was not open**
+at that checkpoint, and custom/media writes were unsupported then. Completed creation uses
 stronger two-root atomicity; closed projections cannot accidentally reopen during
 start editing; replay is strict; independent wake notes are not changed by sleep
 note edits. See the [offline expansion plan](ios-offline-records.md) for exact APIs
 and scope differences.
 
-**Published Food head `aa2011c`:** 25 ordinary UI forms; Apple package testing
-passed **212 tests**, but the parallel Simulator run hit its **40-minute timeout**
-with only **three of eight scenarios completed**. Android passed **5,908 tests**.
-This is not complete Apple acceptance; the old `10016b6a` green run does not cover it.
+**Latest completed CI checkpoint `de82eb03`:** all **238 Apple package tests**
+passed. The complete ten-scenario UI suite ran each scenario once: **seven passed,
+three failed** in custom/Food/milk interaction; nursing passed. This is not full
+Apple acceptance. [Android run 39339821904](https://github.com/tusecwtf/lezi/actions/runs/39339821904)
+ran **4,196 tests with one failure** at `pendingMembershipDeletionClear`.
+Source analysis identified a virtual-time timeout racing real-I/O startup lock
+work; a minimal test-only fix is awaiting CI proof, not a verified runtime fix.
+The custom/Food/milk UI-helper corrections likewise await validation.
 
-**Current draft batch:** native schema **4**, atomic schema-1/2/3
-migration, concrete custom catalog and dedicated record create/edit/soft-delete,
-and manual nursing bring the source to **26 ordinary forms plus custom**.
-The complete Linux regression passed **209 tests, zero failures** (46 storage,
-77 portable presentation, 61 domain, 25 core). Apple-only orchestration and UI
-checks are not part of that count. This batch is **not Apple-accepted**. Full serial execution of ten Simulator scenarios is the next
-acceptance gate; changing the execution budget is not a passing result.
+**Current draft:** native schema 4, 26 ordinary forms plus custom, and the first
+bounded sleep UI slice. The complete Linux regression passed **215 tests, zero
+failures** (46 storage, 83 portable presentation, 61 domain, 25 core). Three new
+Apple-only sleep model tests and the **eleventh UI scenario** have not yet run.
+The existing `de82eb03` results do not cover this draft or prove the proposed test
+fixes. Historical `aa2011c` had 212 passing Apple package tests but only three of
+eight UI scenarios completed before timeout; it is not current acceptance evidence.
 
-Custom definitions use stable UUID identity and separate local ordering; historical
-title/icon snapshots survive definition changes. Custom writes use their dedicated
-identity/context/revision gates and do not create Android numeric IDs or family
-membership. Manual nursing captures left/right minutes, order and optional ml as
-point facts, preserving supported historical record mode on edits. It does not
-implement active timer sessions or interval inference. Sleep remains dedicated
-storage/projectors only: **no sleep UI is exposed or accepted**. Photos remain
-unsupported. Native schema 4 is not server schema 13 or payload schema 2.
+Custom definitions retain stable UUID identity and historical title/icon snapshots;
+manual nursing records point facts with supported historical record mode preserved.
+Native schema 4 migrates schema 1/2/3 atomically; it is not server schema 13 or
+payload schema 2.
+
+The first sleep UI slice implements explicit-confirm SleepStart creation, a
+separate WakeObservation for the captured sleep/baby, and projected sleep/wake
+readback. Its start → wake → relaunch UI script is written but has not run on Apple.
+Legacy `end_timestamp`/opaque sleep records remain preserved and read-only.
+Completed-sleep backfill, sleep editing and observation management UI remain
+unimplemented, even where dedicated storage commands already exist. Nursing timer,
+care plans, media, family sync and complete-product acceptance remain open.
 
 Food keeps untouched optional legacy amounts exactly (nil, empty, Chinese,
 full-width and whitespace), normalizes only new/changed amounts, and requires a
@@ -117,8 +125,9 @@ host does not implement Android's separate day-list lastAmount launch override.
 
 The development host remains bounded: no family, production transport, signed-device
 or full-product support is implied. The local custom/manual-nursing implementation
-awaits Apple acceptance; nursing timer, dedicated sleep UI, care plans and media
-remain open. The full product matrix stays open until each row has complete evidence.
+has incomplete Apple acceptance. First-slice sleep is now in the current
+draft; nursing timer, completed-sleep backfill/editing/observation management,
+care plans and media remain open. The full product matrix stays open until each row has complete evidence.
 
 Native stale-edit CAS and revision-overflow refusal, and opaque preservation of
 nonstandard local JSON escape cases, are explicitly documented differences.
@@ -363,15 +372,14 @@ this plan. No production family data in fixtures, logs, screenshots or CI artifa
 
 CI in `.github/workflows/ios-core.yml` now tests the Swift package, compiles the
 Apple library code, builds the unsigned SwiftUI development host and runs its
-bounded Simulator UI scenarios. The `10016b6a` checkpoint above has green Apple
-and Android evidence for 22 offline forms plus schema-3 sleep storage, with no
-sleep UI. Published Food head `aa2011c` passed 212 Apple package tests but timed
-out during parallel UI acceptance (three of eight scenarios completed). The local
-schema-4/custom/manual-nursing batch has 209 passing Linux tests and awaits full
-Apple acceptance with ten serial Simulator scenarios. Apple CI is available;
-these counts do not validate the complete app, widget extension,
-signed device installation or real mixed-client sync. The complete application
-gates below remain required; later unverified code cannot inherit this result.
+bounded Simulator UI scenarios. At `de82eb03`, 238 Apple package tests passed
+and the ten UI scenarios completed once each with seven passes and three failures
+(custom/Food/milk interaction; nursing passed). Android run 39339821904 had one
+failure among 4,196 tests. Proposed UI-helper and Android test-race fixes are not
+yet verified. The current sleep draft has 215 passing Linux tests, but its three
+new Apple model tests and eleventh UI scenario have not run. Apple CI is available;
+no older green checkpoint accepts these changes. Complete app/widget, signed-device
+and real mixed-client acceptance remain required.
 
 A macOS runner with a pinned reviewed Xcode toolchain must build the actual app and
 widget targets, execute Swift unit/golden/storage/transport tests and simulator UI

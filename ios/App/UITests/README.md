@@ -1,8 +1,8 @@
 # Offline Simulator acceptance
 
-The ten `Offline*AcceptanceTests` classes in `OfflinePeeAcceptanceTests.swift` exercise the actual `LeziDevelopment` application
+The eleven `Offline*AcceptanceTests` classes in `OfflinePeeAcceptanceTests.swift` exercise the actual `LeziDevelopment` application
 and its ordinary file-backed SQLite store. Run on a fresh, ephemeral Simulator
-sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, `UI-Daily-003`, `UI-Health-004`, `UI-Growth-005`, `UI-Milk-006`, `UI-Temperature-007`, `UI-Food-008`, `UI-Nursing-009`, and `UI-Custom-010` names are
+sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, `UI-Daily-003`, `UI-Health-004`, `UI-Growth-005`, `UI-Milk-006`, `UI-Temperature-007`, `UI-Food-008`, `UI-Nursing-009`, `UI-Custom-010`, and `UI-Sleep-011` names are
 unique in that fresh sandbox, one per test. Reusing an already-tested sandbox intentionally
 fails rather than deleting or modifying existing records to make the test pass.
 No special app launch arguments, fake stores, reset paths, or network are used.
@@ -109,6 +109,16 @@ keyboard reveal uses visible non-interactive label anchors because this catalog
 has no inner padding or confirmation footer. This is local catalog behavior,
 without family-sharing or synchronization claims.
 
+The sleep flow discards a dirty start draft and reloads empty history before
+explicitly saving an open sleep. It then confirms a separate local wake with a
+different note. One relaunch verifies the original sleep UUID, persisted wake
+UUID, unchanged start note, independent wake note, and a stable duration. A local
+wake yields the product's provisional “暂定” status, so this flow does not claim
+an independently observed or confirmed end. It uses ordinary current timestamps;
+exact equal-time/zero-duration closure is covered by model tests, not forced
+through the date picker here. No timer, family observer, or retrospective
+observation-management flow is simulated.
+
 Expectations poll observable UI states; there are no fixed sleeps. Cancel uses
 the existing `取消` button label; other controls and history probes use stable IDs.
 
@@ -146,7 +156,7 @@ successful macOS test execution and its `.xcresult` are required evidence.
 
 ## Serial execution and evidence
 
-Each of the ten flows is a separate `XCTestCase` subclass with one test method.
+Each of the eleven flows is a separate `XCTestCase` subclass with one test method.
 `OfflineAcceptanceSupport` has no test methods and shares helpers without copying
 them. All original test actions, assertions, and synthetic data names are retained.
 CI explicitly passes `-parallel-testing-enabled NO`, overriding the shared
@@ -171,7 +181,18 @@ it is not a measured duration or performance claim for the ten-flow suite.
 The latter shows only the state left on the selected Simulator after the suite,
 not a separate final-state image for each flow. Neither establishes that any
 test passed. The retained `OfflinePeeAcceptance.xcresult` is authoritative for
-all ten test outcomes and runner assignments. Apple CI must verify that each
+all eleven test outcomes and runner assignments. Apple CI must verify that each
 method is discovered once, executes once, and passes with no skips. Inspect
 per-test diagnostics in Xcode; Linux syntax/configuration checks cannot establish
 Apple runtime acceptance.
+
+Scroll interactions retain full-control visibility checks against the actual
+container and keyboard/footer viewport. Milk amount replacement uses a slow drag
+with an endpoint hold to avoid the inertial overshoot captured during validation;
+other editor callers retain their previous gesture. Food history edits reveal the
+UUID-scoped row in the history ScrollView with one measured padding-track drag.
+A catalog control flush with the ScrollView top counts as fully visible, so an
+empty catalog does not require a nonexistent scroll anchor. These corrections
+were syntax-checked on Linux; their Simulator behavior requires the next Apple run.
+The velocity/endpoint-hold API is documented by Apple for Xcode 16.3 onward;
+the diagnostic run used Xcode 16.4.

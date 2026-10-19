@@ -9,6 +9,7 @@ import LeziStorage
 public struct OfflinePeeView: View {
     @Environment(\.leziTheme) private var theme
     @StateObject private var model: OfflinePeeModel
+    @StateObject private var sleep: OfflineSleepModel
     @StateObject private var catalog: OfflineCustomCatalogModel
     @State private var nickname = ""
     @State private var birthday = Date()
@@ -19,15 +20,17 @@ public struct OfflinePeeView: View {
 
     public init(store: OfflineStore) {
         _model = StateObject(wrappedValue: OfflinePeeModel(store: store))
+        _sleep = StateObject(wrappedValue: OfflineSleepModel(store: store))
         _catalog = StateObject(wrappedValue: OfflineCustomCatalogModel(store: store))
     }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: theme.density.sectionGap) {
             LeziText("离线开发组件 · 宝宝与本机护理记录", role: .title)
-            LeziText("仅保存在此设备。支持无照片排泄、日常、症状、用药、就医、疫苗、成长测量、手动母乳、奶量、体温与辅食/点心/饮料记录；护理计划尚未开放。", role: .label)
+            LeziText("仅保存在此设备。支持无照片排泄、日常、症状、用药、就医、疫苗、成长测量、手动母乳、奶量、体温与辅食/点心/饮料记录，以及睡下和醒来观察；护理计划尚未开放。", role: .label)
             if let message = model.message { LeziText(message).accessibilityIdentifier("offline.result") }
             babySelection
+            if let message = sleep.message { LeziText(message).accessibilityIdentifier("offline.sleep.result") }
             ScrollView {
                 VStack(alignment: .leading, spacing: theme.density.sectionGap) {
                         Button(creatingBaby ? "收起新建宝宝" : "新建宝宝") { creatingBaby.toggle() }
@@ -39,13 +42,17 @@ public struct OfflinePeeView: View {
                             .frame(minHeight: theme.primaryTouchMinimum)
                         Button("本机自定义项目") { catalog.open() }
                             .disabled(model.busy).accessibilityIdentifier("offline.catalog.open")
+                        sleepActions
                         recordList
                     }.frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(theme.pageInset)
-        .sheet(isPresented: Binding(get: { model.editor != nil || catalog.isPresented }, set: { if !$0 { if model.editor != nil { model.closeEditor() } else { catalog.close() } } })) {
-            if let editor = model.editor {
+        .disabled(sleep.busy)
+        .sheet(isPresented: Binding(get: { sheetRoute != nil }, set: { if !$0 { dismissSheet() } })) {
+            if sheetRoute == .sleep {
+                OfflineSleepEditor(model: sleep)
+            } else if let editor = model.editor {
                 VStack(spacing: 0) {
                     HStack {
                         Spacer()
@@ -81,6 +88,37 @@ public struct OfflinePeeView: View {
             }
         }
         .task { model.refresh() }
+        .onChange(of: sleep.completion) { _ in model.refresh() }
+    }
+    private var sheetRoute: OfflineSheetRoute? {
+        if sleep.editor != nil { return .sleep }
+        if model.editor != nil { return .ordinary }
+        return catalog.isPresented ? .catalog : nil
+    }
+    private func dismissSheet() {
+        switch sheetRoute {
+        case .sleep: sleep.close()
+        case .ordinary: model.closeEditor()
+        case .catalog: catalog.close()
+        case nil: break
+        }
+    }
+    private var sleepActions: some View {
+        HStack {
+            Button("记录睡下") { openSleep(waking: false) }
+                .accessibilityIdentifier("offline.sleep.start")
+                .disabled(model.latestOpenSleepClientUUID != nil)
+            Button("记录醒来") { openSleep(waking: true) }
+                .accessibilityIdentifier("offline.sleep.wake")
+                .disabled(model.latestOpenSleepClientUUID == nil)
+        }.disabled(model.busy || model.selected == nil || sheetRoute != nil || sleep.busy)
+    }
+    private func openSleep(waking: Bool) {
+        guard sheetRoute == nil, !model.busy, let context = model.selected,
+              let baby = model.babies.first(where: { $0.clientUUID == context.babyClientUUID }) else { return }
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        if waking { sleep.openWake(context: context, babyName: baby.nickname, now: now) }
+        else { sleep.openStart(context: context, babyName: baby.nickname, now: now) }
     }
     private var babySelection: some View {
         VStack(alignment: .leading) {
@@ -126,7 +164,9 @@ public struct OfflinePeeView: View {
             ForEach(model.records, id: \.clientUUID) { record in
                 VStack(alignment: .leading, spacing: 4) {
                     Text(Date(timeIntervalSince1970: Double(record.timestampMillis) / 1000), format: .dateTime)
-                    recordSummary(record)
+                    if let projection = model.sleeps[record.clientUUID] {
+                        OfflineSleepSummary(sleep: projection)
+                    } else { recordSummary(record) }
                     if let note = record.note, !note.isEmpty {
                         LeziText(note).accessibilityIdentifier("offline.record.note")
                     }

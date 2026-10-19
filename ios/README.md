@@ -101,7 +101,8 @@ corpus scenarios remain unimplemented and are not silently counted as passing.
   no-media record types plus dedicated sleep and custom-definition/record paths.
   Generic `confirmRecord` still rejects sleep and custom; their dedicated writers
   preserve their separate identity and transaction contracts. Photos remain
-  unsupported. Sleep has storage/projector APIs, but no exposed or accepted UI.
+  unsupported. The first sleep UI is implemented in the current draft but has
+  not passed Apple model/UI acceptance.
   Confirmation saves facts and dirty markers atomically. Original-baby ownership,
   revision CAS, rollback, replay and opaque preservation remain enforced.
 - The draft custom slice adds a concrete local catalog and dedicated record
@@ -113,7 +114,7 @@ corpus scenarios remain unimplemented and are not silently counted as passing.
   the dedicated custom flow. It records left/right minutes, order and optional
   amount as point facts, retaining supported historical record-mode values when
   editing. It does not implement an active nursing timer, background timing,
-  interval inference or the sleep UI.
+  interval inference.
 - Dedicated sleep writes are `createSleepStart`, `recordCompletedSleep`,
   `recordWake`, `editSleepStart`, `editCompletedSleep`, `updateWake`,
   `withdrawWake`, and `selectEffectiveWake`. `sleepPage` batch-projects roots and
@@ -130,23 +131,34 @@ corpus scenarios remain unimplemented and are not silently counted as passing.
 
 Evidence boundaries (2026-10-19):
 
-- **Historical complete dual-green checkpoint `10016b6a`:** 22 bounded UI types,
-  native schema 3 and dedicated sleep storage. [Apple run 39329817431](https://github.com/tusecwtf/lezi/actions/runs/39329817431)
-  passed 199 package tests and seven Simulator UI tests; [Android run 39329817430](https://github.com/tusecwtf/lezi/actions/runs/39329817430)
-  passed 5,908 tests. This evidence does not cover the subsequent Food or current
-  schema-4/custom/nursing batch.
-- **Published Food head `aa2011c`:** Apple package testing passed 212 tests, but the
-  parallel Simulator suite reached its 40-minute job timeout with only three of
-  eight scenarios completed. This is **not a successful Apple acceptance run**.
-  Android passed 5,908 tests. Food brought the bounded UI to 25 ordinary types;
-  neither package success nor partial UI execution accepts the full head.
-- **Current draft schema-4/custom/manual-nursing batch:** the complete
-  Linux regression passed **209 tests, zero failures** (46 storage, 77 portable presentation,
-  61 domain, 25 core). Apple-only model and Simulator checks are
-  not included in that number. The source exposes 26 ordinary forms plus custom;
-  this batch is **not Apple-accepted**. Full ten-scenario serial
-  Simulator acceptance is the next gate; its revised execution budget does not
-  constitute a test result. Sleep remains storage/projector-only, without UI.
+Historical complete dual-green `10016b6a` covered 22 UI types, schema 3,
+199 Apple package tests and seven UI tests, plus 5,908 Android tests. That result
+covers only its source, not any later draft.
+
+**Latest completed CI checkpoint `de82eb03`:** all **238 Apple package tests**
+passed. The complete ten-scenario UI suite ran each scenario once: **seven passed,
+three failed** in custom/Food/milk interaction; nursing passed. This is not full
+Apple acceptance. [Android run 39339821904](https://github.com/tusecwtf/lezi/actions/runs/39339821904)
+ran **4,196 tests with one failure** at `pendingMembershipDeletionClear`.
+Source analysis identified a virtual-time timeout racing real-I/O startup lock
+work; a minimal test-only fix is awaiting CI proof, not a verified runtime fix.
+The custom/Food/milk UI-helper corrections likewise await validation.
+
+**Current draft:** native schema 4, 26 ordinary forms plus custom, and the first
+bounded sleep UI slice. The complete Linux regression passed **215 tests, zero
+failures** (46 storage, 83 portable presentation, 61 domain, 25 core). Three new
+Apple-only sleep model tests and the **eleventh UI scenario** have not yet run.
+The existing `de82eb03` results do not cover this draft or prove the proposed test
+fixes. Historical `aa2011c` had 212 passing Apple package tests but only three of
+eight UI scenarios completed before timeout; it is not current acceptance evidence.
+
+The first sleep UI slice implements explicit-confirm SleepStart creation, a
+separate WakeObservation for the captured sleep/baby, and projected sleep/wake
+readback. Its start → wake → relaunch UI script is written but has not run on Apple.
+Legacy `end_timestamp`/opaque sleep records remain preserved and read-only.
+Completed-sleep backfill, sleep editing and observation management UI remain
+unimplemented, even where dedicated storage commands already exist. Nursing timer,
+care plans, media, family sync and complete-product acceptance remain open.
 
 Food keeps untouched optional legacy amounts exactly (nil, empty, Chinese,
 full-width and whitespace), normalizes only new/changed amounts, and requires a

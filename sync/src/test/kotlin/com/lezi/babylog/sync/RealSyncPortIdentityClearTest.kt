@@ -267,15 +267,22 @@ class RealSyncPortIdentityClearTest {
         val preferences = MemorySyncPreferences(original)
         val failedRemoteRig = SyncRig(session = original, syncPreferences = preferences)
         failedRemoteRig.awaitStartupRecovery()
-        failedRemoteRig.backend.leaveFailure = SyncHttpException(503)
+        val remoteFailure = SyncHttpException(503)
+        failedRemoteRig.backend.leaveFailure = remoteFailure
 
-        assertThat(failedRemoteRig.port.leave().isFailure).isTrue()
+        // Startup's first replica-store load precedes releasing the sync barrier.
+        // Its IO unlock and leave's barrier timeout must use the same real clock.
+        val failedRemoteResult = withContext(Dispatchers.Default.limitedParallelism(1)) {
+            failedRemoteRig.port.leave()
+        }
+        assertThat(failedRemoteResult.exceptionOrNull()).isSameInstanceAs(remoteFailure)
         assertThat(preferences.current()).isEqualTo(original)
         assertThat(preferences.pendingMembershipDeletionClear).isFalse()
 
         failedRemoteRig.backend.leaveFailure = null
+        val cleanupFailure = IllegalStateException("membership cleanup interrupted")
         val interruptedGate = TestRemovedDeviceLocalClearGate().apply {
-            failures += IllegalStateException("membership cleanup interrupted")
+            failures += cleanupFailure
         }
         val interruptedRig = SyncRig(
             session = original,
@@ -283,7 +290,11 @@ class RealSyncPortIdentityClearTest {
             removedDeviceLocalClearGate = interruptedGate,
         )
         interruptedRig.awaitStartupRecovery()
-        assertThat(interruptedRig.port.leave().isFailure).isTrue()
+        val interruptedResult = withContext(Dispatchers.Default.limitedParallelism(1)) {
+            interruptedRig.port.leave()
+        }
+        assertThat(interruptedResult.exceptionOrNull()).isSameInstanceAs(cleanupFailure)
+        assertThat(interruptedGate.calls).isEqualTo(1)
         assertThat(preferences.current()).isEqualTo(original)
         assertThat(preferences.pendingMembershipDeletionClear).isTrue()
 

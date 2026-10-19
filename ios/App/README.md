@@ -21,10 +21,13 @@ It does not connect to a family server. Use synthetic development data only.
   sandbox. Deleting the app or erasing the Simulator can remove that sandbox.
 - No tab shell advertises unfinished features. There is no family enrollment,
   disconnected-family ACL path, sync transport, media, active nursing timer,
-  sleep UI, complete history/day timeline, widget, or full-product navigation here.
+  complete sleep editing/observation management, complete history/day timeline,
+  widget, or full-product navigation here.
 - The current draft batch uses native schema 4 and preserves schema-1/2/3
-  data through atomic migration. Dedicated sleep storage/projectors do not expose
-  a sleep form. Custom definitions use UUID identity and retain historical record
+  data through atomic migration. Its first sleep UI supports start, wake and
+  projected readback; completed backfill, editing and observation management
+  remain absent. Legacy end-timestamp/opaque sleep is read-only. Custom
+  definitions use UUID identity and retain historical record
   title/icon snapshots; no family identity or Android numeric ID is fabricated.
 
 The target links the local `ios/` Swift package's `LeziUI`, `LeziStorage`, and
@@ -94,17 +97,33 @@ swift test --package-path ios --force-resolved-versions
 
 ### Current evidence, not a release claim
 
-The historical complete dual-green head `10016b6a` covered 22 ordinary UI types,
-199 Apple package tests and seven Simulator UI scenarios. It does not accept the
-current source. Published Food head `aa2011c` passed 212 Apple package tests and
-5,908 Android tests, but its parallel UI run timed out at 40 minutes with only
-three of eight scenarios completed. That Apple job did not pass full acceptance.
+**Latest completed CI checkpoint `de82eb03`:** all **238 Apple package tests**
+passed. The complete ten-scenario UI suite ran each scenario once: **seven passed,
+three failed** in custom/Food/milk interaction; nursing passed. This is not full
+Apple acceptance. [Android run 39339821904](https://github.com/tusecwtf/lezi/actions/runs/39339821904)
+ran **4,196 tests with one failure** at `pendingMembershipDeletionClear`.
+Source analysis identified a virtual-time timeout racing real-I/O startup lock
+work; a minimal test-only fix is awaiting CI proof, not a verified runtime fix.
+The custom/Food/milk UI-helper corrections likewise await validation.
 
-The current draft schema-4/custom/manual-nursing batch passed the complete
-Linux regression: **209 tests, zero failures**. It has not yet been published or
-Apple-accepted. Full serial execution of ten Simulator scenarios is the next gate;
-a revised CI timeout/worker arrangement is not proof those tests passed. Apple CI
-is available; signed device installation and physical-iPhone behavior are separate.
+**Current draft:** native schema 4, 26 ordinary forms plus custom, and the first
+bounded sleep UI slice. The complete Linux regression passed **215 tests, zero
+failures** (46 storage, 83 portable presentation, 61 domain, 25 core). Three new
+Apple-only sleep model tests and the **eleventh UI scenario** have not yet run.
+The existing `de82eb03` results do not cover this draft or prove the proposed test
+fixes. Historical `aa2011c` had 212 passing Apple package tests but only three of
+eight UI scenarios completed before timeout; it is not current acceptance evidence.
+
+The first sleep UI slice implements explicit-confirm SleepStart creation, a
+separate WakeObservation for the captured sleep/baby, and projected sleep/wake
+readback. Its start → wake → relaunch UI script is written but has not run on Apple.
+Legacy `end_timestamp`/opaque sleep records remain preserved and read-only.
+Completed-sleep backfill, sleep editing and observation management UI remain
+unimplemented, even where dedicated storage commands already exist. Nursing timer,
+care plans, media, family sync and complete-product acceptance remain open.
+
+Apple CI is available; signed installation and physical-iPhone behavior still
+require their separate acceptance gates.
 
 Manual synthetic-data checks still required: first launch with no babies;
 create/select baby; edit then cancel without saving; explicit confirmation and

@@ -795,7 +795,7 @@ final class OfflineFoodAcceptanceTests: OfflineAcceptanceSupport {
         assertFoodRow(app.otherElements[foodID], kind: "辅食", content: "ui-food-content", amount: "0.5碗", note: foodNote)
         assertFoodRow(app.otherElements[snackID], kind: "点心", content: "ui-snack-content", amount: "few-bites", note: snackNote)
         assertFoodRow(app.otherElements[drinkID], kind: "饮料", content: "ui-drink-content", amount: "未填量", note: drinkNote)
-        tap(app.otherElements[foodID].buttons["offline.record.edit"])
+        tapHistoryEdit(app.otherElements[foodID], in: app)
         waitFor(app.staticTexts["offline.excretion.kind.fixed"], "label == %@", "类型：辅食（不可更改）")
         XCTAssertFalse(app.buttons["offline.excretion.kind"].exists)
         waitFor(healthField("offline.food.amount", in: app), "value == %@", "0.5碗")
@@ -805,7 +805,7 @@ final class OfflineFoodAcceptanceTests: OfflineAcceptanceSupport {
         saveDiaper(in: app, babyName: babyName, kindLabel: "辅食")
         assertFoodRow(app.otherElements[foodID], kind: "辅食", content: "ui-food-edited", amount: "0.5碗", note: foodNote)
         XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 3)
-        tap(app.otherElements[drinkID].buttons["offline.record.edit"])
+        tapHistoryEdit(app.otherElements[drinkID], in: app)
         revealHealthControl(app.buttons["offline.delete.request"], in: app)
         tap(app.buttons["offline.delete.request"])
         tap(app.buttons["offline.delete.confirm"])
@@ -1008,6 +1008,95 @@ final class OfflineCustomAcceptanceTests: OfflineAcceptanceSupport {
     }
 }
 
+@MainActor
+final class OfflineSleepAcceptanceTests: OfflineAcceptanceSupport {
+    func testSleepStartCancellationAndIndependentWakePersistOnOriginalRecord() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let babyName = "UI-Sleep-011"
+        let cancelledNote = "ui-cancelled-sleep"
+        let startNote = "ui-sleep-start-note"
+        let wakeNote = "ui-sleep-wake-note"
+        app.launch()
+        tap(app.buttons["offline.baby.new"])
+        let nickname = app.textFields["offline.baby.nickname"]
+        tap(nickname)
+        nickname.typeText(babyName)
+        tap(app.buttons["offline.baby.create"])
+        waitFor(app.staticTexts["offline.result"], "label == %@", "已在本机创建宝宝：\(babyName)")
+        waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
+        tap(app.buttons["offline.baby.new"])
+        assertSelectedBaby(app, name: babyName)
+        assertEmptyHistory(app)
+        waitFor(app.buttons["offline.sleep.wake"], "exists == true AND enabled == false")
+
+        tap(app.buttons["offline.sleep.start"])
+        enterSleepNote(cancelledNote, in: app)
+        tap(app.buttons["offline.sleep.close"])
+        tap(app.buttons["offline.sleep.discard.confirm"])
+        waitFor(healthField("offline.sleep.note", in: app), "exists == false")
+        tap(app.buttons["offline.records.reload"])
+        waitFor(app.buttons["offline.sleep.start"], "enabled == true")
+        assertEmptyHistory(app)
+        XCTAssertFalse(app.staticTexts[cancelledNote].exists)
+        XCTAssertEqual(app.staticTexts.matching(identifier: "offline.record.sleep.status").count, 0)
+
+        tap(app.buttons["offline.sleep.start"])
+        waitFor(app.staticTexts["offline.sleep.baby"], "label == %@", "保存对象：\(babyName)")
+        enterSleepNote(startNote, in: app)
+        tap(app.buttons["offline.sleep.confirm"])
+        waitFor(app.staticTexts["offline.sleep.result"], "label == %@", "已保存本机睡下记录")
+        waitFor(healthField("offline.sleep.note", in: app), "exists == false")
+        let row = diaperRow(in: app, note: startNote)
+        waitFor(row, "exists == true")
+        let recordID = row.identifier
+        waitFor(row.staticTexts["offline.record.kind"], "label == %@", "睡眠")
+        waitFor(row.staticTexts["offline.record.sleep.status"], "label == %@", "睡眠开放")
+        XCTAssertFalse(row.staticTexts["offline.record.sleep.duration"].exists)
+        XCTAssertFalse(row.staticTexts["offline.record.sleep.wake"].exists)
+        waitFor(app.buttons["offline.sleep.start"], "enabled == false")
+        waitFor(app.buttons["offline.sleep.wake"], "enabled == true")
+        XCTAssertEqual(app.staticTexts.matching(identifier: "offline.record.sleep.status").count, 1)
+
+        tap(app.buttons["offline.sleep.wake"])
+        waitFor(app.staticTexts["offline.sleep.baby"], "label == %@", "保存对象：\(babyName)")
+        enterSleepNote(wakeNote, in: app)
+        tap(app.buttons["offline.sleep.confirm"])
+        waitFor(app.staticTexts["offline.sleep.result"], "label == %@", "已保存本机醒来观察")
+        waitFor(healthField("offline.sleep.note", in: app), "exists == false")
+        let savedRow = app.otherElements[recordID]
+        // An ordinary local wake is a provisional closure, not an observed or
+        // independently confirmed end. Preserve the product's exact status.
+        waitFor(savedRow.staticTexts["offline.record.sleep.status"], "label == %@", "暂定")
+        let duration = savedRow.staticTexts["offline.record.sleep.duration"]
+        waitFor(duration, "exists == true AND label MATCHES %@", "时长 [0-9]+ 分钟")
+        let durationLabel = duration.label
+        let wake = savedRow.staticTexts["offline.record.sleep.wake"]
+        waitFor(wake, "exists == true")
+        let wakeID = wake.value as? String ?? ""
+        XCTAssertNotNil(UUID(uuidString: wakeID))
+        XCTAssertNotEqual(wakeID, String(recordID.dropFirst("offline.record.row.".count)))
+        waitFor(savedRow.staticTexts["offline.record.note"], "label == %@", startNote)
+        waitFor(savedRow.staticTexts["offline.record.sleep.wake.note"], "label == %@", wakeNote)
+        waitFor(app.buttons["offline.sleep.start"], "enabled == true")
+        waitFor(app.buttons["offline.sleep.wake"], "enabled == false")
+        XCTAssertEqual(app.staticTexts.matching(identifier: "offline.record.sleep.status").count, 1)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        waitFor(app.otherElements[recordID], "exists == true")
+        waitFor(app.otherElements[recordID].staticTexts["offline.record.sleep.status"], "label == %@", "暂定")
+        waitFor(app.otherElements[recordID].staticTexts["offline.record.sleep.duration"], "label == %@", durationLabel)
+        waitFor(app.otherElements[recordID].staticTexts["offline.record.sleep.wake"], "value == %@", wakeID)
+        waitFor(app.otherElements[recordID].staticTexts["offline.record.note"], "label == %@", startNote)
+        waitFor(app.otherElements[recordID].staticTexts["offline.record.sleep.wake.note"], "label == %@", wakeNote)
+        XCTAssertFalse(app.staticTexts[cancelledNote].exists)
+        XCTAssertEqual(app.staticTexts.matching(identifier: "offline.record.sleep.status").count, 1)
+        waitFor(app.buttons["offline.sleep.start"], "enabled == true")
+        waitFor(app.buttons["offline.sleep.wake"], "enabled == false")
+    }
+}
+
 /// Shared UI operations only: no test methods to inherit or execute twice.
 @MainActor
 class OfflineAcceptanceSupport: XCTestCase {
@@ -1031,7 +1120,7 @@ class OfflineAcceptanceSupport: XCTestCase {
 
     fileprivate func replaceMilkAmount(_ oldValue: String, with newValue: String, in app: XCUIApplication) {
         let field = healthField("offline.milk.amount", in: app)
-        revealHealthControl(field, in: app)
+        revealHealthControl(field, controlledDrag: true, in: app)
         waitFor(field, "value == %@", oldValue)
         field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
         field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: oldValue.count) + newValue)
@@ -1104,6 +1193,44 @@ class OfflineAcceptanceSupport: XCTestCase {
             start.press(forDuration: 0.1, thenDragTo: end)
         }
         tap(option)
+    }
+
+    fileprivate func tapHistoryEdit(_ row: XCUIElement, in app: XCUIApplication) {
+        let edit = row.buttons["offline.record.edit"]
+        waitFor(edit, "exists == true")
+        let scroll = app.scrollViews.containing(.button, identifier: "offline.records.reload").firstMatch
+        waitFor(scroll, "exists == true")
+        let viewport = scroll.frame.intersection(app.frame)
+        let target = edit.frame
+        if target.minY < viewport.minY || target.maxY > viewport.maxY {
+            // Captured food history: edit y945–966, viewport y231–824.
+            // Reveal in the history's measured left padding, outside row controls.
+            let padding = row.frame.minX - viewport.minX
+            guard padding >= 8, viewport.height > 80 else {
+                XCTFail("History has no measured padding track for \(row.identifier)")
+                return
+            }
+            let up = target.maxY > viewport.maxY
+            let needed = up ? target.maxY - viewport.maxY : viewport.minY - target.minY
+            let distance = min(needed + 16, viewport.height - 32)
+            let x = viewport.minX + padding / 2
+            let startY = up ? viewport.maxY - 16 : viewport.minY + 16
+            let endY = startY + (up ? -distance : distance)
+            print("History reveal \(row.identifier): target=\(target), viewport=\(viewport), drag=(\(x), \(startY)) -> (\(x), \(endY))")
+            let origin = scroll.coordinate(withNormalizedOffset: .zero)
+            origin.withOffset(CGVector(dx: x - scroll.frame.minX, dy: startY - scroll.frame.minY))
+                .press(forDuration: 0.1,
+                       thenDragTo: origin.withOffset(CGVector(dx: x - scroll.frame.minX, dy: endY - scroll.frame.minY)),
+                       withVelocity: .slow, thenHoldForDuration: 0.2)
+        }
+        let visible = NSPredicate { _, _ in
+            let currentViewport = scroll.frame.intersection(app.frame)
+            return edit.isHittable && edit.frame.minY >= currentViewport.minY
+                && edit.frame.maxY <= currentViewport.maxY
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: visible, object: edit)], timeout: 15), .completed,
+                       "History edit must be fully inside its scroll viewport")
+        tap(edit)
     }
 
     fileprivate func replaceFoodField(_ identifier: String, oldValue: String, newValue: String, in app: XCUIApplication) {
@@ -1197,7 +1324,8 @@ class OfflineAcceptanceSupport: XCTestCase {
         // icon/counter labels as drag anchors instead of an active text field.
         for attempt in 0...4 {
             let viewport = scroll.frame.intersection(app.frame)
-            let top = viewport.minY + 8
+            // A control flush with the actual scroll top is fully visible.
+            let top = viewport.minY
             let bottom = min(viewport.maxY, app.keyboards.firstMatch.exists ? app.keyboards.firstMatch.frame.minY : viewport.maxY) - 12
             let field = element.frame
             print("Catalog reveal \(element.identifier) attempt \(attempt): field=\(field), viewport=\(viewport), safeY=\(top)...\(bottom)")
@@ -1237,6 +1365,23 @@ class OfflineAcceptanceSupport: XCTestCase {
         waitFor(row.staticTexts["offline.record.note"], "label == %@", note)
     }
 
+    fileprivate func enterSleepNote(_ text: String, in app: XCUIApplication) {
+        let field = healthField("offline.sleep.note", in: app)
+        waitFor(field, "exists == true AND hittable == true")
+        let scroll = app.scrollViews.containing(.any, identifier: "offline.sleep.note").firstMatch
+        waitFor(scroll, "exists == true")
+        let visible = NSPredicate { _, _ in
+            let bottom = min(scroll.frame.maxY, app.buttons["offline.sleep.confirm"].frame.minY,
+                             app.keyboards.firstMatch.exists ? app.keyboards.firstMatch.frame.minY : app.frame.maxY)
+            return field.isHittable && field.frame.minY >= scroll.frame.minY && field.frame.maxY <= bottom
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: visible, object: field)], timeout: 15), .completed,
+                       "Sleep note must be fully above the confirm control and keyboard")
+        tap(field)
+        field.typeText(text)
+        waitFor(field, "value == %@", text)
+    }
+
     fileprivate struct HealthForm {
         let kind: String
         let label: String
@@ -1262,7 +1407,7 @@ class OfflineAcceptanceSupport: XCTestCase {
         waitFor(field, "value == %@", text)
     }
 
-    fileprivate func revealHealthControl(_ element: XCUIElement, in app: XCUIApplication) {
+    fileprivate func revealHealthControl(_ element: XCUIElement, controlledDrag: Bool = false, in app: XCUIApplication) {
         waitFor(element, "exists == true")
         let editorScroll = app.scrollViews.containing(.any, identifier: "offline.pee.note").firstMatch
         // isHittable can be true for a field partly covered by the fixed footer.
@@ -1309,7 +1454,13 @@ class OfflineAcceptanceSupport: XCTestCase {
             let origin = editorScroll.coordinate(withNormalizedOffset: .zero)
             let start = origin.withOffset(CGVector(dx: trackX - viewport.minX, dy: startY - viewport.minY))
             let end = origin.withOffset(CGVector(dx: trackX - viewport.minX, dy: endY - viewport.minY))
-            start.press(forDuration: 0.1, thenDragTo: end)
+            if controlledDrag {
+                // The milk validation capture showed 40–52 pt drags flinging
+                // content by ~290 pt. Release at rest, retaining full visibility.
+                start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.2)
+            } else {
+                start.press(forDuration: 0.1, thenDragTo: end)
+            }
         }
         XCTFail("Could not reveal \(element.identifier) above the confirmation footer")
     }

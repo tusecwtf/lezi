@@ -27,8 +27,8 @@ concurrency:
 jobs:
   contracts:
     runs-on: macos-15
-    # Full Simulator interaction coverage now includes ten independent record flows.
-    # Seven serial flows previously took 24.2 min; allow ten plus build/boot variance.
+    # Full Simulator interaction coverage now includes eleven independent record flows.
+    # Seven serial flows previously took 24.2 min; allow eleven plus build/boot variance.
     # The two-clone run stalled its second runner startup; avoid local fan-out.
     timeout-minutes: 60
     steps:
@@ -120,7 +120,7 @@ jobs:
           # Explicit CLI override keeps the full scheme on one Simulator despite
           # the scheme parallelizable flag. No test filters, skips, or retries.
           # This post-test image is only smoke evidence; use per-case xcresult
-          # outcomes to verify all ten acceptance flows executed exactly once.
+          # outcomes to verify all eleven acceptance flows executed exactly once.
           xcrun simctl launch --terminate-running-process "$SIMULATOR_UDID" com.lezi.babylog.ios.dev
           sleep 2
           xcrun simctl io "$SIMULATOR_UDID" screenshot "$RUNNER_TEMP/lezi-ios-evidence/base-simulator-smoke-after-tests.png"
@@ -140,6 +140,6 @@ jobs:
           {
             echo 'Portable tests, iOS SDK libraries, unsigned development build, first launch and bounded offline UI acceptance.'
             echo 'The app supports bounded offline baby and record flows, not full LEZI feature or synchronization parity.'
-            echo 'UI acceptance covers ten synthetic record flows including validation, editing, deletion isolation and relaunch persistence; inspect each xcresult outcome.'
+            echo 'UI acceptance covers eleven synthetic record flows including validation, editing, deletion isolation and relaunch persistence; inspect each xcresult outcome.'
             echo 'No mixed-client server proof, signing, real-family operation or physical-device acceptance is implied.'
           } >> "$GITHUB_STEP_SUMMARY"
