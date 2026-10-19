@@ -232,6 +232,48 @@ final class RecordPayloadCodecTests: XCTestCase {
         XCTAssertEqual(RecordPayloadCodec.payloadKeySchema(.formula).optional, ["prepared_ml", "duration_min"])
     }
 
+    func testMilkTypedFieldCombinationsRespectClosedSchema() throws {
+        for kind: MilkKind in [.formula, .pumpedFeed, .pumpExpress] {
+            for prepared: Int? in [nil, 0, 150, 999] {
+                for duration: Int? in [nil, 0, 10, 1440] {
+                    let payload = RecordPayload.milk(kind: kind, amountMl: 120,
+                                                     preparedMl: prepared, durationMinutes: duration)
+                    let document = try RecordPayloadDocument(payload: payload)
+                    if kind == .formula || (prepared == nil && duration == nil) {
+                        XCTAssertTrue(payload.validationErrors().isEmpty)
+                        let raw = try RecordPayloadCodec.encode(document)
+                        XCTAssertEqual(decode(payload.type, raw).payload, payload)
+                    } else {
+                        XCTAssertFalse(payload.validationErrors().isEmpty)
+                        XCTAssertFalse(payload.validationErrors(allowIntentOnlyFeed: true).isEmpty)
+                        XCTAssertThrowsError(try RecordPayloadCodec.encode(document)) {
+                            XCTAssertEqual($0 as? RecordPayloadCodecError, .invalidTypedPayload)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func testInvalidTypedNursingEnumsCannotBeWrittenAsOpaqueDocuments() throws {
+        for payload: RecordPayload in [.nursing(leftMinutes: 1, order: "LL"),
+                                       .nursing(leftMinutes: 1, recordMode: "other")] {
+            XCTAssertFalse(payload.validationErrors().isEmpty)
+            XCTAssertThrowsError(try RecordPayloadCodec.encode(RecordPayloadDocument(payload: payload))) {
+                XCTAssertEqual($0 as? RecordPayloadCodecError, .invalidTypedPayload)
+            }
+        }
+    }
+
+    func testReadableLegacyValuesStillReencodeWithoutInputValidation() throws {
+        for (type, raw) in [(RecordType.formula, #"{"amount_ml":-1}"#),
+                            (.nursing, #"{"left_min":-1,"right_min":0,"order":"L","record_mode":"end"}"#)] {
+            let document = decode(type, raw)
+            XCTAssertFalse(try XCTUnwrap(document.payload).validationErrors().isEmpty)
+            XCTAssertEqual(decode(type, try RecordPayloadCodec.encode(document)).payload, document.payload)
+        }
+    }
+
     func testTypedOptionalFieldsAndEscapedTextRoundtrip() throws {
         let payloads: [RecordPayload] = [
             .nursing(leftMinutes: 3, rightMinutes: 4, order: "RL", amountMl: 50, recordMode: "start"),

@@ -7,9 +7,11 @@
 > Scope: full product parity, native iOS client, same existing Rust family service,
 > mixed Android/iOS families. Android remains unchanged during this initial work.
 > Architecture decision: [ADR-0025](../adr/0025-ios-co-development.md).
-> Foundation work is in progress on `feat/ios-parity-20261019`; native app and
-> real Android/iOS/server acceptance remain unimplemented/unverified. A draft PR
-> is intended for review, not merge or release.
+> Foundation and a bounded unsigned development host are implemented on
+> `feat/ios-parity-20261019`; the complete app and real Android/iOS/server
+> acceptance remain unimplemented/unverified. The draft PR is for review, not
+> merge or release. See the [offline record expansion plan](ios-offline-records.md)
+> for the implemented checkpoint versus prospective work.
 
 ### Initial foundation evidence (2026-10-19)
 
@@ -18,12 +20,13 @@ decoders, portable care payload/time/sleep rules, four theme palettes, navigatio
 composition and an in-memory confirmation boundary. The integrated Linux
 Swift 6.4.1 run passed 41 XCTest cases (17 contract, 12 domain, 12 presentation)
 including the review regression additions. This is a foundation checkpoint,
-not acceptance of any complete application row below. There is no installable
-app, durable iOS repository, production transport or mixed-client proof yet.
+not acceptance of any complete application row below. At that initial checkpoint there was no installable app, durable iOS repository,
+production transport or mixed-client proof; the later offline checkpoint below
+supersedes only the bounded storage/development-host gaps.
 
-Android runtime, Rust runtime and shared corpus bytes remain unchanged. The new
-macOS workflow tests the package and compiles both library targets against the
-iOS Simulator SDK. Its run is pending; no Apple validation is claimed here.
+Android runtime, Rust runtime and shared corpus bytes remain unchanged. The initial macOS workflow tested the package and compiled library targets
+against the iOS Simulator SDK. The later checkpoint below records actual Apple
+evidence; this historical foundation count does not describe the latest run.
 
 ### Offline vertical slice checkpoint (2026-10-19)
 
@@ -31,15 +34,27 @@ The first published foundation head `125d326a` passed Android run
 `39270410111` and macOS/iOS-library run `39270410213`. The PR synthetic merge
 tree was verified identical to that head. These results do not cover later code.
 
-The subsequent local slice adds schema-2 local payload codecs, a bounded baby
-canonical/hash contract, real SQLite offline baby/pee persistence with indexed
-keyset paging, and a SwiftUI create/select/confirm/read flow. The unsigned
-`LeziDevelopment` Simulator host is deliberately limited to that flow; it is not
-the complete iOS product. No family, production transport or media support is
-implied. Linux Swift 6.4.1 currently passes **91** cases; two additional
-Apple-only model/orchestration tests await the new macOS run. The new app build
-and first-launch smoke also await that run. The entire product matrix remains
-open until each row's complete acceptance criteria have actual evidence.
+The published checkpoint `1e5802a6eeaec8521b89e812e33c9e328e66c736` adds
+schema-2 local payload codecs, a bounded baby canonical/hash contract, real
+SQLite offline baby/pee persistence with indexed keyset paging, and a SwiftUI
+create/select/confirm/read flow. [Android run 39282387623](https://github.com/tusecwtf/lezi/actions/runs/39282387623)
+and [Apple run 39282387612](https://github.com/tusecwtf/lezi/actions/runs/39282387612)
+are green for this head (verified 2026-10-19 16:25 UTC). Apple ran **93 package
+tests plus one Simulator UI smoke test** and built the
+unsigned `LeziDevelopment` host. These results supersede the previously pending
+Apple evidence, not the complete product acceptance matrix.
+
+The development host is deliberately limited to that offline flow. No family,
+production transport, media, signed-device or full-product support is implied.
+Subsequent native schema 1→2 migration and unified storage for 26 ordinary
+no-media record types are now implemented and independently reviewed with no
+blocking issue; locked Linux tests pass **106/106**, including **28 storage
+tests**. New-head Apple CI is pending, so this code is not accepted by the older
+checkpoint. UI remains the baby/pee flow; library support does not imply a
+26-type editor. The [offline record expansion plan](ios-offline-records.md)
+separates implemented behavior, current storage work, 12 planned field groups and
+acceptance gates; sleep/custom need separately coordinated workflows. The entire
+product matrix remains open until each row has its complete acceptance evidence.
 
 Native stale-edit CAS and revision-overflow refusal, and opaque preservation of
 nonstandard local JSON escape cases, are explicitly documented differences.
@@ -278,11 +293,12 @@ this plan. No production family data in fixtures, logs, screenshots or CI artifa
 
 ### 8.3 macOS CI and manual iPhone gates
 
-Foundation CI in `.github/workflows/ios-core.yml` is being introduced for a macOS
-Swift package test run and iOS Simulator SDK core compilation. At this writing its
-actual CI run is pending. Even when green, this foundation gate does not build or
-validate a SwiftUI app, widget extension, signed device install or real mixed-client
-sync. The complete application gates below remain required.
+CI in `.github/workflows/ios-core.yml` now tests the Swift package, compiles the
+Apple library code, builds the unsigned SwiftUI development host and runs its
+bounded Simulator UI smoke. The `1e5802a6` checkpoint above has green Apple and
+Android evidence. This does not validate the complete app, widget extension,
+signed device installation or real mixed-client sync. The complete application
+gates below remain required; later unverified code cannot inherit this result.
 
 A macOS runner with a pinned reviewed Xcode toolchain must build the actual app and
 widget targets, execute Swift unit/golden/storage/transport tests and simulator UI

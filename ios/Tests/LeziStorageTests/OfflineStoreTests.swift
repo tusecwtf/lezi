@@ -45,7 +45,7 @@ final class OfflineStoreTests: XCTestCase, @unchecked Sendable {
         let replay = try await store.confirmPee(draft(context.babyClientUUID, id: first.clientUUID, amount: 3), context: context)
         XCTAssertEqual(replay, results.0)
         let connection = try SQLiteConnection(path: file)
-        XCTAssertEqual(try connection.query("SELECT count(*) FROM pee_records")[0][0], "1")
+        XCTAssertEqual(try connection.query("SELECT count(*) FROM records")[0][0], "1")
     }
     func testBothRollbackSeamsLeaveNoFactOrDirtyMarker() async throws {
         let file = path(); defer { try? FileManager.default.removeItem(atPath: file) }
@@ -142,7 +142,7 @@ final class OfflineStoreTests: XCTestCase, @unchecked Sendable {
         let value = draft(context.babyClientUUID)
         let saved = try await store.confirmPee(value, context: context)
         let db = try SQLiteConnection(path: file)
-        try db.execute("UPDATE pee_records SET deleted_at=1000 WHERE uuid=?", [.text(value.clientUUID.uuidString)])
+        try db.execute("UPDATE records SET deleted_at=1000 WHERE uuid=?", [.text(value.clientUUID.uuidString)])
         await expect(.deletedRecord) { _ = try await store.confirmPee(value, context: context) }
         await expect(.deletedRecord) { _ = try await store.confirmPee(value, context: context, expectedUpdatedAt: saved.updatedAt) }
         try db.execute("UPDATE babies SET deleted_at=1000")
@@ -157,7 +157,7 @@ final class OfflineStoreTests: XCTestCase, @unchecked Sendable {
         await expect(.identityConflict) { _ = try await store.confirmPee(draft(other.clientUUID, id: saved.clientUUID), context: switched, expectedUpdatedAt: saved.updatedAt) }
         let current = try await store.selectBaby(context.babyClientUUID)
         let db = try SQLiteConnection(path: file)
-        try db.execute("UPDATE pee_records SET updated_at=?", [.int(Int64.max)])
+        try db.execute("UPDATE records SET updated_at=?", [.int(Int64.max)])
         await expect(.revisionOverflow) { _ = try await store.confirmPee(draft(context.babyClientUUID, id: saved.clientUUID), context: current, expectedUpdatedAt: Int64.max) }
     }
     func testDraftCreationAndLocalPreferencesDoNotWriteCareFacts() async throws {
@@ -170,7 +170,7 @@ final class OfflineStoreTests: XCTestCase, @unchecked Sendable {
         let before = try db.query("SELECT updated_at,sync_dirty FROM babies")
         try await store.setPreferences(baby: context.babyClientUUID, themeColor: 0xFF123456, sortOrder: 3)
         XCTAssertEqual(try db.query("SELECT updated_at,sync_dirty FROM babies"), before)
-        XCTAssertEqual(try db.query("SELECT count(*) FROM pee_records")[0][0], "0")
+        XCTAssertEqual(try db.query("SELECT count(*) FROM records")[0][0], "0")
     }
     func testRealSQLiteCommitFailureDoesNotReturnSuccessOrKeepFact() async throws {
         let file = path(); defer { try? FileManager.default.removeItem(atPath: file) }
@@ -179,7 +179,7 @@ final class OfflineStoreTests: XCTestCase, @unchecked Sendable {
         // A deferred FK fails at COMMIT, after every fact/dirty SQL statement.
         try connection.execute("CREATE TABLE commit_parent (id INTEGER PRIMARY KEY)")
         try connection.execute("CREATE TABLE commit_guard (id INTEGER REFERENCES commit_parent(id) DEFERRABLE INITIALLY DEFERRED)")
-        try connection.execute("CREATE TRIGGER fail_commit AFTER INSERT ON pee_records BEGIN INSERT INTO commit_guard VALUES (1); END")
+        try connection.execute("CREATE TRIGGER fail_commit AFTER INSERT ON records BEGIN INSERT INTO commit_guard VALUES (1); END")
         let value = draft(context.babyClientUUID)
         do {
             _ = try await store.confirmPee(value, context: context)
@@ -202,7 +202,7 @@ final class OfflineStoreTests: XCTestCase, @unchecked Sendable {
             _ = try await store.confirmPee(draft(context.babyClientUUID, id: id, time: index < 5 ? 100 : 200), context: context)
         }
         let db = try SQLiteConnection(path: file)
-        try db.execute("UPDATE pee_records SET deleted_at=1 WHERE uuid=?", [.text(ids[3].uuidString)])
+        try db.execute("UPDATE records SET deleted_at=1 WHERE uuid=?", [.text(ids[3].uuidString)])
         let anotherBaby = try await store.createBaby(nickname: "二宝", birthday: "2026-02-01")
         let otherContext = try await store.selectBaby(anotherBaby.clientUUID)
         _ = try await store.confirmPee(draft(anotherBaby.clientUUID), context: otherContext)
@@ -249,7 +249,7 @@ final class OfflineStoreTests: XCTestCase, @unchecked Sendable {
             bindings.append(.int(101))
             let plan = try db.query("EXPLAIN QUERY PLAN " + OfflineStore.timelinePageSQL(hasCursor: hasCursor), bindings)
                 .compactMap { $0.last ?? nil }.joined(separator: "\n").uppercased()
-            XCTAssertTrue(plan.contains("SEARCH PEE_RECORDS USING INDEX PEE_TIMELINE"), plan)
+            XCTAssertTrue(plan.contains("SEARCH RECORDS USING INDEX RECORD_TYPE_TIMELINE"), plan)
             XCTAssertFalse(plan.contains("TEMP B-TREE"), plan)
             if hasCursor { XCTAssertTrue(plan.contains("(TIMESTAMP,UUID)<(?,?)"), plan) }
         }

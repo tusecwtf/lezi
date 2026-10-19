@@ -66,21 +66,35 @@ public enum RecordPayload: Equatable, Sendable {
         }
     }
 
-    /// Mirrors RecordPayloadCodec.validate, which is intentionally less strict
-    /// than nursing text confirmation (e.g. its optional milk estimate).
+    /// Storage-shape invariants shared by input validation and the encoder.
+    /// Native tightening: Android's general MilkPayload can hold formula-only
+    /// fields even though its closed schema rejects them on the next read.
+    var typedStructureErrors: [String] {
+        switch self {
+        case let .milk(kind, _, prepared, duration) where kind != .formula:
+            return (prepared == nil ? [] : ["仅配方奶支持冲调量"])
+                + (duration == nil ? [] : ["仅配方奶支持喂养时长"])
+        case let .nursing(_, _, order, _, mode):
+            return (NursingConfirmInput.orders.contains(order) ? [] : ["不支持的喂养顺序"])
+                + (["start", "end"].contains(mode) ? [] : ["不支持的记录时刻模式"])
+        default: return []
+        }
+    }
+
+    /// Mirrors RecordPayloadCodec.validate, with the storage-shape tightening above,
+    /// and remains less strict than nursing text confirmation (e.g. its optional
+    /// milk estimate).
     public func validationErrors(allowIntentOnlyFeed: Bool = false) -> [String] {
-        var errors: [String] = []
+        var errors = typedStructureErrors
         func stool(_ amount: Int, _ consistency: Int, _ color: Int) {
             if !(1...4).contains(amount) { errors.append("便量必须是 1–4") }
             if !(1...4).contains(consistency) { errors.append("软硬必须是 1–4") }
             if !(0...7).contains(color) { errors.append("颜色必须是 0–7") }
         }
         switch self {
-        case let .nursing(left, right, order, _, mode):
+        case let .nursing(left, right, _, _, _):
             if left < 0 || right < 0 { errors.append("喂养时长不能为负数") }
             if Double(left) + Double(right) <= 0 && !allowIntentOnlyFeed { errors.append("至少记录一侧时长") }
-            if !NursingConfirmInput.orders.contains(order) { errors.append("不支持的喂养顺序") }
-            if !["start", "end"].contains(mode) { errors.append("不支持的记录时刻模式") }
         case let .milk(kind, amount, prepared, duration):
             let intentOnly = allowIntentOnlyFeed && kind != .pumpExpress && amount == 0
             if !(1...999).contains(amount) && !intentOnly { errors.append("奶量需在 1–999 ml 之间") }

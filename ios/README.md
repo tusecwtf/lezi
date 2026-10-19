@@ -96,10 +96,12 @@ corpus scenarios remain unimplemented and are not silently counted as passing.
   Negative-zero integer tokens are deliberately rejected at this boundary until
   their cross-language pre-normalization hash semantics are proven.
 - `LeziStorage` is a real file-backed SQLite **offline-only** vertical slice:
-  native schema 1, local identity, baby profiles/preferences and no-media pee
-  facts. Confirmation saves the fact and dirty marker atomically; tests cover
+  native schema 2 with atomic schema-1 migration, local identity, baby
+  profiles/preferences and 26 ordinary no-media record types. The existing UI
+  still exposes only pee; sleep/custom writes and photos remain unsupported. Confirmation saves the fact and dirty marker atomically; tests cover
   restart, failed COMMIT/rollback, replay, wrong identity, original baby after
-  selection changes, blocked offline writes and monotonic edits. It does not
+  selection changes, blocked offline writes, monotonic edits, migration rollback,
+  opaque-document preservation and metadata-only soft deletion. It does not
   create a family session or a network-ready frozen mutation. Unsupported record
   types and photos are rejected rather than dropped. Native stale-edit CAS and
   Int64-overflow refusal are explicitly scoped safety differences, not claims of

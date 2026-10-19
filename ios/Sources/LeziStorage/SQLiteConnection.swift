@@ -11,6 +11,7 @@ public enum OfflineStoreError: Error, Equatable, Sendable {
     case invalidPageLimit
     case invalidDraft
     case identityConflict
+    case opaqueRecord
     case deletedRecord
     case staleEdit
     case revisionOverflow

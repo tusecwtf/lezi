@@ -1,7 +1,7 @@
 import Foundation
 import LeziCore
 
-/// Native schema 1. Not Android Room schema 29; not a family-sync repository.
+/// Native schema 2 (preserves and migrates native schema 1). Not Android Room schema 29; not a family-sync repository.
 public struct OfflineContext: Equatable, Sendable {
     public let generation: UUID
     /// UI selection state only; never authorization to retarget an open editor.
@@ -30,10 +30,11 @@ public struct OfflinePeeRecord: Equatable, Sendable {
     public let deletedAt: Int64?
 }
 
-/// Opaque keyset position tied to one baby and one durable store generation.
+/// Opaque keyset position tied to baby, durable generation, and all/pee filter.
 public struct OfflineRecordCursor: Equatable, Sendable {
     fileprivate let baby: UUID
     fileprivate let generation: UUID
+    fileprivate let peeOnly: Bool
     fileprivate let timestamp: Int64
     fileprivate let recordUUID: UUID
 }
@@ -42,7 +43,7 @@ public struct OfflineRecordPage: Equatable, Sendable {
     public let nextCursor: OfflineRecordCursor?
 }
 
-/// Explicit-confirm-only, no-media pee slice. Reads are snapshots, not streams.
+/// Explicit-confirm-only, no-media ordinary-record storage. Reads are snapshots, not streams.
 /// The durable dirty bit is a local fact marker, NOT a frozen mutation/outbox.
 /// Joining a family must first block this API; there is no ACL bypass fallback.
 public actor OfflineStore {
@@ -56,25 +57,7 @@ public actor OfflineStore {
     public init(path: String, clock: @escaping @Sendable () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }) throws {
         self.clock = clock
         db = try SQLiteConnection(path: path)
-        try db.transaction {
-            let version = try db.query("PRAGMA user_version").first?.first ?? nil
-            let application = try db.query("PRAGMA application_id").first?.first ?? nil
-            if version == "0" {
-                guard application == "0", try db.query("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").isEmpty else {
-                    throw OfflineStoreError.incompatibleDatabase
-                }
-                try db.execute("CREATE TABLE local_identity (id INTEGER PRIMARY KEY CHECK(id=1), actor_uuid TEXT NOT NULL, generation TEXT NOT NULL, mode TEXT NOT NULL CHECK(mode IN ('offline','blocked')), selection_revision INTEGER NOT NULL, selected_baby TEXT)")
-                try db.execute("CREATE TABLE babies (uuid TEXT PRIMARY KEY, nickname TEXT NOT NULL, birthday TEXT NOT NULL, updated_at INTEGER NOT NULL, sync_dirty INTEGER NOT NULL CHECK(sync_dirty IN (0,1)), deleted_at INTEGER)")
-                try db.execute("CREATE TABLE baby_preferences (baby_uuid TEXT PRIMARY KEY REFERENCES babies(uuid), theme_color INTEGER NOT NULL, sort_order INTEGER NOT NULL)")
-                try db.execute("CREATE TABLE pee_records (uuid TEXT PRIMARY KEY, baby_uuid TEXT NOT NULL REFERENCES babies(uuid), timestamp INTEGER NOT NULL, note TEXT, amount INTEGER NOT NULL CHECK(amount BETWEEN 1 AND 3), updated_at INTEGER NOT NULL, sync_dirty INTEGER NOT NULL CHECK(sync_dirty IN (0,1)), deleted_at INTEGER)")
-                try db.execute("CREATE INDEX pee_timeline ON pee_records(baby_uuid,timestamp DESC,uuid DESC) WHERE deleted_at IS NULL")
-                try db.execute("INSERT INTO local_identity VALUES (1, ?, ?, 'offline', 0, NULL)", [.text(UUID().uuidString), .text(UUID().uuidString)])
-                try db.execute("PRAGMA application_id=1279613513") // LEZI, distinct native file.
-                try db.execute("PRAGMA user_version=1")
-            } else {
-                guard version == "1", application == "1279613513" else { throw OfflineStoreError.incompatibleDatabase }
-            }
-        }
+        try OfflineSchema.prepare(db)
     }
     public func identity() throws -> OfflineIdentity {
         let row = try metadata()
@@ -127,80 +110,143 @@ public actor OfflineStore {
         try requireLiveBaby(baby)
         return OfflineContext(generation: generation, selectionRevision: revision, babyClientUUID: baby)
     }
-    /// nil expectedUpdatedAt means create/replay. Edit requires the captured row
-    /// revision; UUID, baby and type cannot be changed by an editor.
-    public func confirmPee(_ draft: RecordConfirmationDraft, context captured: OfflineContext, expectedUpdatedAt: Int64? = nil) throws -> OfflinePeeRecord {
+    /// nil expectedUpdatedAt means create/replay. An edit requires the captured
+    /// row revision. UUID, original baby, and exact type cannot be changed.
+    /// This writes past facts only; future entries need the separate plan flow.
+    public func confirmRecord(_ draft: RecordConfirmationDraft, context captured: OfflineContext, expectedUpdatedAt: Int64? = nil) throws -> OfflineRecord {
         let now = clock()
-        guard draft.validationErrors(nowMillis: now).isEmpty,
-              draft.item == .builtIn(.pee), case let .pee(amount) = draft.payload,
-              draft.endTimestampMillis == nil, draft.photoClientUUIDs.isEmpty else { throw OfflineStoreError.invalidDraft }
+        guard OfflineStorageScope.supportedRecordTypes.contains(draft.payload.type),
+              draft.item == .builtIn(draft.payload.type), draft.photoClientUUIDs.isEmpty,
+              draft.validationErrors(nowMillis: now).isEmpty else { throw OfflineStoreError.invalidDraft }
+        let document = try RecordPayloadDocument(payload: draft.payload)
+        let payloadJSON = try RecordPayloadCodec.encode(document)
         return try db.transaction {
-            try requireOffline()
-            guard try identity().generation == captured.generation, draft.babyClientUUID == captured.babyClientUUID else { throw OfflineStoreError.staleContext }
+            try requireOfflineContext(captured)
+            guard draft.babyClientUUID == captured.babyClientUUID else { throw OfflineStoreError.staleContext }
             try requireLiveBaby(captured.babyClientUUID)
-            let existing = try record(draft.clientUUID)
+            let existing = try recordDetails(draft.clientUUID)
             if let existing {
                 guard existing.deletedAt == nil else { throw OfflineStoreError.deletedRecord }
-                guard existing.babyClientUUID == draft.babyClientUUID else { throw OfflineStoreError.identityConflict }
-                if expectedUpdatedAt == nil { return existing } // Create replay never overwrites.
+                guard existing.babyClientUUID == draft.babyClientUUID,
+                      existing.rawType == draft.payload.type.rawValue else { throw OfflineStoreError.identityConflict }
+                if expectedUpdatedAt == nil { return existing } // Replay never overwrites a fact.
                 guard existing.updatedAt == expectedUpdatedAt else { throw OfflineStoreError.staleEdit }
+                guard !existing.isOpaque else { throw OfflineStoreError.opaqueRecord }
             } else if expectedUpdatedAt != nil { throw OfflineStoreError.staleEdit }
-            let revision: Int64
-            if let existing {
-                guard existing.updatedAt < Int64.max else { throw OfflineStoreError.revisionOverflow }
-                revision = max(now, existing.updatedAt + 1)
-            } else { revision = now }
+            let revision = try existing.map { try Self.nextRevision(after: $0.updatedAt, now: now) } ?? now
             if existing == nil {
-                try db.execute("INSERT INTO pee_records VALUES (?,?,?,?,?,?,0,NULL)", [.text(draft.clientUUID.uuidString), .text(draft.babyClientUUID.uuidString), .int(draft.timestampMillis), draft.note.map(SQLiteConnection.Value.text) ?? .null, .int(Int64(amount)), .int(revision)])
+                try db.execute("INSERT INTO records (uuid,baby_uuid,type,timestamp,end_timestamp,note,payload_json,payload_schema_version,updated_at,sync_dirty) VALUES (?,?,?,?,?,?,?,?,?,0)", [
+                    .text(draft.clientUUID.uuidString), .text(draft.babyClientUUID.uuidString), .text(draft.payload.type.rawValue),
+                    .int(draft.timestampMillis), draft.endTimestampMillis.map(SQLiteConnection.Value.int) ?? .null,
+                    draft.note.map(SQLiteConnection.Value.text) ?? .null, .text(payloadJSON), .int(Int64(document.schemaVersion)), .int(revision)])
             } else {
-                try db.execute("UPDATE pee_records SET timestamp=?,note=?,amount=?,updated_at=? WHERE uuid=?", [.int(draft.timestampMillis), draft.note.map(SQLiteConnection.Value.text) ?? .null, .int(Int64(amount)), .int(revision), .text(draft.clientUUID.uuidString)])
+                try db.execute("UPDATE records SET timestamp=?,end_timestamp=?,note=?,payload_json=?,payload_schema_version=?,updated_at=? WHERE uuid=?", [
+                    .int(draft.timestampMillis), draft.endTimestampMillis.map(SQLiteConnection.Value.int) ?? .null,
+                    draft.note.map(SQLiteConnection.Value.text) ?? .null, .text(payloadJSON), .int(Int64(document.schemaVersion)), .int(revision), .text(draft.clientUUID.uuidString)])
             }
             try inject(.afterFact)
-            try db.execute("UPDATE pee_records SET sync_dirty=1 WHERE uuid=?", [.text(draft.clientUUID.uuidString)])
+            try db.execute("UPDATE records SET sync_dirty=1 WHERE uuid=?", [.text(draft.clientUUID.uuidString)])
             try inject(.beforeCommit)
-            guard let saved = try record(draft.clientUUID) else { throw OfflineStoreError.incompatibleDatabase }
+            guard let saved = try recordDetails(draft.clientUUID) else { throw OfflineStoreError.incompatibleDatabase }
             return saved
         }
     }
-    /// Bounded newest-first keyset page. Each page is a read-only SQLite snapshot;
-    /// later pages reflect later edits, not an immutable history export. UI selection
-    /// is irrelevant: an editor/list may keep reading its originally captured baby.
+    /// Compatibility adapter for the original pee-only feature. One writer owns
+    /// all identities/transactions; an existing UUID of another type is a conflict.
+    public func confirmPee(_ draft: RecordConfirmationDraft, context captured: OfflineContext, expectedUpdatedAt: Int64? = nil) throws -> OfflinePeeRecord {
+        guard draft.item == .builtIn(.pee), draft.endTimestampMillis == nil else { throw OfflineStoreError.invalidDraft }
+        return try Self.peeRecord(confirmRecord(draft, context: captured, expectedUpdatedAt: expectedUpdatedAt))
+    }
+    /// Metadata-only soft deletion preserves even opaque JSON and unknown types.
+    /// Like Android deleteRecord, it does not require payload decoding or a live
+    /// baby. The original identity, offline mode and generation still gate writes.
+    @discardableResult
+    public func deleteRecord(_ id: UUID, context captured: OfflineContext, expectedUpdatedAt: Int64? = nil) throws -> Bool {
+        let now = clock()
+        return try db.transaction {
+            try requireOfflineContext(captured)
+            guard let row = try db.query("SELECT baby_uuid,updated_at,deleted_at FROM records WHERE uuid=?", [.text(id.uuidString)]).first else { return false }
+            guard row[0] == captured.babyClientUUID.uuidString else { throw OfflineStoreError.identityConflict }
+            if row[2] != nil { return false }
+            guard let previous = Int64(row[1] ?? "") else { throw OfflineStoreError.incompatibleDatabase }
+            if let expectedUpdatedAt, previous != expectedUpdatedAt { throw OfflineStoreError.staleEdit }
+            let revision = try Self.nextRevision(after: previous, now: now)
+            try db.execute("UPDATE records SET deleted_at=?,updated_at=? WHERE uuid=?", [.int(revision), .int(revision), .text(id.uuidString)])
+            try inject(.afterFact)
+            try db.execute("UPDATE records SET sync_dirty=1 WHERE uuid=?", [.text(id.uuidString)])
+            try inject(.beforeCommit)
+            return true
+        }
+    }
+    /// Generic bounded timeline, including unknown type/schema documents.
+    public func recordPage(baby: UUID, before: OfflineRecordCursor? = nil, limit: Int = 100) throws -> OfflineRecordsPage {
+        try readPage(baby: baby, before: before, limit: limit, peeOnly: false)
+    }
+    /// Compatibility pee-only timeline; its cursor cannot be used in the all-type timeline.
     public func records(baby: UUID, before: OfflineRecordCursor? = nil, limit: Int = 100) throws -> OfflineRecordPage {
+        let page = try readPage(baby: baby, before: before, limit: limit, peeOnly: true)
+        return OfflineRecordPage(records: try page.records.map(Self.peeRecord), nextCursor: page.nextCursor)
+    }
+    /// Each page is a read-only snapshot, not a frozen history export. Selection
+    /// is irrelevant; later pages can reflect later edits to the stored facts.
+    private func readPage(baby: UUID, before: OfflineRecordCursor?, limit: Int, peeOnly: Bool) throws -> OfflineRecordsPage {
         guard (1...200).contains(limit) else { throw OfflineStoreError.invalidPageLimit }
         return try db.transaction(begin: "BEGIN") {
             let generation = try identity().generation
             if let before {
-                guard before.baby == baby, before.generation == generation else { throw OfflineStoreError.staleContext }
+                guard before.baby == baby, before.generation == generation,
+                      before.peeOnly == peeOnly else { throw OfflineStoreError.staleContext }
             }
             try requireLiveBaby(baby)
-            let sql = Self.timelinePageSQL(hasCursor: before != nil)
             var values: [SQLiteConnection.Value] = [.text(baby.uuidString)]
-            if let before {
-                values += [.int(before.timestamp), .text(before.recordUUID.uuidString)]
-            }
+            if let before { values += [.int(before.timestamp), .text(before.recordUUID.uuidString)] }
             values.append(.int(Int64(limit + 1)))
-            let fetched = try db.query(sql, values).map(Self.decodeRecord)
+            let fetched = try db.query(Self.timelinePageSQL(hasCursor: before != nil, peeOnly: peeOnly), values).map(Self.decodeRecord)
             let page = Array(fetched.prefix(limit))
-            let cursor: OfflineRecordCursor?
-            if fetched.count > limit, let last = page.last {
-                cursor = OfflineRecordCursor(baby: baby, generation: generation, timestamp: last.timestampMillis, recordUUID: last.clientUUID)
-            } else { cursor = nil }
-            return OfflineRecordPage(records: page, nextCursor: cursor)
+            let cursor = fetched.count > limit ? page.last.map {
+                OfflineRecordCursor(baby: baby, generation: generation, peeOnly: peeOnly, timestamp: $0.timestampMillis, recordUUID: $0.clientUUID)
+            } : nil
+            return OfflineRecordsPage(records: page, nextCursor: cursor)
         }
     }
-    // Shared with EXPLAIN QUERY PLAN tests so the tested plan is the shipped SQL.
-    static func timelinePageSQL(hasCursor: Bool) -> String {
-        "SELECT uuid,baby_uuid,timestamp,note,amount,updated_at,sync_dirty,deleted_at FROM pee_records WHERE baby_uuid=? AND deleted_at IS NULL" +
-        (hasCursor ? " AND (timestamp,uuid) < (?,?)" : "") +
+    private static let recordColumns = "uuid,baby_uuid,type,timestamp,end_timestamp,note,payload_json,payload_schema_version,updated_at,sync_dirty,deleted_at"
+    // Shared with EXPLAIN tests so they exercise the shipped SQL.
+    static func timelinePageSQL(hasCursor: Bool, peeOnly: Bool = true) -> String {
+        "SELECT " + recordColumns + " FROM records WHERE baby_uuid=? AND deleted_at IS NULL" +
+        (peeOnly ? " AND type='pee'" : "") + (hasCursor ? " AND (timestamp,uuid) < (?,?)" : "") +
         " ORDER BY timestamp DESC,uuid DESC LIMIT ?"
     }
-    public func record(_ id: UUID) throws -> OfflinePeeRecord? {
-        guard let row = try db.query("SELECT uuid,baby_uuid,timestamp,note,amount,updated_at,sync_dirty,deleted_at FROM pee_records WHERE uuid=?", [.text(id.uuidString)]).first else { return nil }
+    public func recordDetails(_ id: UUID) throws -> OfflineRecord? {
+        guard let row = try db.query("SELECT " + Self.recordColumns + " FROM records WHERE uuid=?", [.text(id.uuidString)]).first else { return nil }
         return try Self.decodeRecord(row)
     }
-    private static func decodeRecord(_ row: [String?]) throws -> OfflinePeeRecord {
-        guard let uuid = UUID(uuidString: row[0] ?? ""), let baby = UUID(uuidString: row[1] ?? ""), let time = Int64(row[2] ?? ""), let amount = Int(row[4] ?? ""), let updated = Int64(row[5] ?? "") else { throw OfflineStoreError.incompatibleDatabase }
-        return OfflinePeeRecord(clientUUID: uuid, babyClientUUID: baby, timestampMillis: time, note: row[3], amount: amount, updatedAt: updated, syncDirty: row[6] == "1", deletedAt: row[7].flatMap(Int64.init))
+    public func record(_ id: UUID) throws -> OfflinePeeRecord? {
+        guard let record = try recordDetails(id), record.type == .pee else { return nil }
+        return try Self.peeRecord(record)
+    }
+    private static func decodeRecord(_ row: [String?]) throws -> OfflineRecord {
+        guard let uuid = UUID(uuidString: row[0] ?? ""), let baby = UUID(uuidString: row[1] ?? ""),
+              let rawType = row[2], let time = Int64(row[3] ?? ""), let json = row[6],
+              let schema = Int(row[7] ?? ""), let updated = Int64(row[8] ?? "") else { throw OfflineStoreError.incompatibleDatabase }
+        let document = RecordType(rawValue: rawType).map { RecordPayloadCodec.decode(type: $0, payloadJSON: json, schemaVersion: schema) }
+        return OfflineRecord(clientUUID: uuid, babyClientUUID: baby, rawType: rawType, timestampMillis: time,
+            endTimestampMillis: row[4].flatMap(Int64.init), note: row[5], payloadJSON: json,
+            payloadSchemaVersion: schema, payloadDocument: document, updatedAt: updated,
+            syncDirty: row[9] == "1", deletedAt: row[10].flatMap(Int64.init))
+    }
+    private static func peeRecord(_ record: OfflineRecord) throws -> OfflinePeeRecord {
+        guard record.type == .pee, case let .pee(amount)? = record.payloadDocument?.payload else { throw OfflineStoreError.opaqueRecord }
+        return OfflinePeeRecord(clientUUID: record.clientUUID, babyClientUUID: record.babyClientUUID,
+            timestampMillis: record.timestampMillis, note: record.note, amount: amount,
+            updatedAt: record.updatedAt, syncDirty: record.syncDirty, deletedAt: record.deletedAt)
+    }
+    private static func nextRevision(after previous: Int64, now: Int64) throws -> Int64 {
+        guard previous < Int64.max else { throw OfflineStoreError.revisionOverflow }
+        return max(now, previous + 1)
+    }
+    private func requireOfflineContext(_ captured: OfflineContext) throws {
+        try requireOffline()
+        guard try identity().generation == captured.generation else { throw OfflineStoreError.staleContext }
     }
     private func metadata() throws -> [String?] {
         guard let row = try db.query("SELECT actor_uuid,generation,mode,selection_revision,selected_baby FROM local_identity WHERE id=1").first else { throw OfflineStoreError.incompatibleDatabase }

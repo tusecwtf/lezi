@@ -148,6 +148,10 @@ extension RecordPayloadCodec {
     /// This is NOT wire canonicalization and may emit the local custom row ID.
     public static func encode(_ document: RecordPayloadDocument) throws -> String {
         guard let payload = document.payload else { return document.rawJSON! }
+        // Reject incompatible typed shapes here, rather than writing a document
+        // our own closed-schema decoder would have to preserve as opaque.
+        // This does not apply user-input ranges to legacy readable documents.
+        guard payload.typedStructureErrors.isEmpty else { throw RecordPayloadCodecError.invalidTypedPayload }
         var fields: [(String, String)] = []
         let localStringEncoder = JSONEncoder()
         localStringEncoder.outputFormatting = [.withoutEscapingSlashes]
