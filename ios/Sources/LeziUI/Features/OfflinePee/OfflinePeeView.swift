@@ -26,8 +26,10 @@ public struct OfflinePeeView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: theme.density.sectionGap) {
                         Button(creatingBaby ? "收起新建宝宝" : "新建宝宝") { creatingBaby.toggle() }
+                            .accessibilityIdentifier("offline.baby.new")
                         if creatingBaby { babyForm }
                         Button("记录尿") { model.openEditor() }
+                            .accessibilityIdentifier("offline.pee.new")
                             .disabled(model.selected == nil || model.busy)
                             .frame(minHeight: theme.primaryTouchMinimum)
                         recordList
@@ -49,6 +51,7 @@ public struct OfflinePeeView: View {
                     Text(baby.nickname).tag(Optional(baby.clientUUID))
                 }
             }.disabled(model.busy || model.editor?.session.isSaving == true)
+                .accessibilityIdentifier("offline.baby.selection")
             if model.busy { ProgressView("正在处理本机数据") }
             if let editor = model.editor, editor.draft.babyClientUUID != model.selected?.babyClientUUID {
                 LeziText("此草稿仍属于\(editor.session.context.babyName)，切换宝宝不会改变保存对象。", role: .label)
@@ -58,6 +61,7 @@ public struct OfflinePeeView: View {
     private var babyForm: some View {
         VStack(alignment: .leading, spacing: 12) {
             TextField("昵称（留空为年年）", text: $nickname)
+                .accessibilityIdentifier("offline.baby.nickname")
             LeziText("最多 20 个 Unicode 字符；前后空白会去除，同名宝宝不能重复创建。", role: .label)
             DatePicker("生日", selection: $birthday, displayedComponents: .date)
             Button("确认创建并选择宝宝") {
@@ -67,17 +71,24 @@ public struct OfflinePeeView: View {
                 formatter.timeZone = .current; formatter.dateFormat = "yyyy-MM-dd"
                 model.createBaby(nickname: nickname, birthday: formatter.string(from: birthday))
             }.frame(minHeight: theme.primaryTouchMinimum)
+                .accessibilityIdentifier("offline.baby.create")
         }.disabled(model.busy)
     }
     private var recordList: some View {
         VStack(alignment: .leading, spacing: 12) {
             LeziText("本机尿记录（只读）", role: .titleSmall)
-            if model.records.isEmpty { LeziText(model.selected == nil ? "创建或选择宝宝后查看记录" : "尚无本机尿记录") }
+            if model.records.isEmpty {
+                LeziText(model.selected == nil ? "创建或选择宝宝后查看记录" : "尚无本机尿记录")
+                    .accessibilityIdentifier("offline.records.empty")
+            }
             ForEach(model.records, id: \.clientUUID) { record in
                 VStack(alignment: .leading, spacing: 4) {
                     Text(Date(timeIntervalSince1970: Double(record.timestampMillis) / 1000), format: .dateTime)
                     LeziText("尿量：\(Self.amountLabel(record.amount))")
-                    if let note = record.note, !note.isEmpty { LeziText(note) }
+                        .accessibilityIdentifier("offline.record.amount")
+                    if let note = record.note, !note.isEmpty {
+                        LeziText(note).accessibilityIdentifier("offline.record.note")
+                    }
                 }
                 .padding(theme.density.cardPad)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -87,6 +98,7 @@ public struct OfflinePeeView: View {
                 Button("加载更早的记录") { model.loadMore() }.disabled(model.busy)
             }
             Button("重新读取本机记录") { model.refresh() }.disabled(model.busy)
+                .accessibilityIdentifier("offline.records.reload")
         }
     }
     private func confirmation(_ editor: OfflinePeeState) -> some View {
@@ -110,6 +122,7 @@ public struct OfflinePeeView: View {
                     get: { model.editor?.draft.note ?? editor.draft.note },
                     set: { model.editor?.edit(note: $0) }
                 ), axis: .vertical)
+                .accessibilityIdentifier("offline.pee.note")
                 LeziText("按确认后才写入本机；取消会放弃此草稿。", role: .label)
             }
         }

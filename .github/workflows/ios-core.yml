@@ -89,6 +89,7 @@ jobs:
         run: |
           set -euo pipefail
           simulator="$(xcrun simctl list devices available --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for runtime,devices in d["devices"].items() if "iOS" in runtime for x in devices if x["name"].startswith("iPhone")))')"
+          echo "SIMULATOR_UDID=$simulator" >> "$GITHUB_ENV"
           # Ephemeral CI device only; never a user's phone or family store.
           xcrun simctl boot "$simulator"
           xcrun simctl bootstatus "$simulator" -b
@@ -97,18 +98,37 @@ jobs:
           sleep 5
           mkdir -p "$RUNNER_TEMP/lezi-ios-evidence"
           xcrun simctl io "$simulator" screenshot "$RUNNER_TEMP/lezi-ios-evidence/first-launch.png"
-          xcrun simctl shutdown "$simulator"
-      - name: Retain synthetic first-launch screenshot
-        uses: actions/upload-artifact@v4
+      - name: Exercise real offline confirmation and relaunch
+        run: |
+          xcodebuild test \
+            -project ios/App/LeziDevelopment.xcodeproj -scheme LeziDevelopment \
+            -configuration Debug -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+            -derivedDataPath "$RUNNER_TEMP/lezi-app-build" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/lezi-source-packages" \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+            -parallel-testing-enabled NO \
+            -resultBundlePath "$RUNNER_TEMP/lezi-ios-evidence/OfflinePeeAcceptance.xcresult" \
+            CODE_SIGNING_ALLOWED=NO
+          xcrun simctl launch --terminate-running-process "$SIMULATOR_UDID" com.lezi.babylog.ios.dev
+          sleep 2
+          xcrun simctl io "$SIMULATOR_UDID" screenshot "$RUNNER_TEMP/lezi-ios-evidence/offline-acceptance.png"
+      - name: Shut down ephemeral Simulator
+        if: always() && env.SIMULATOR_UDID != ''
+        run: xcrun simctl shutdown "$SIMULATOR_UDID"
+      - name: Retain synthetic Simulator evidence
+        if: always()
+        uses: actions/upload-artifact@v7
         with:
-          name: ios-development-first-launch
-          path: ${{ runner.temp }}/lezi-ios-evidence/first-launch.png
+          name: ios-development-evidence
+          path: ${{ runner.temp }}/lezi-ios-evidence/
           retention-days: 3
           if-no-files-found: error
       - name: Record verification boundary
         run: |
           {
-            echo 'Portable tests, iOS SDK library compilation, unsigned development app build and first-launch smoke only.'
+            echo 'Portable tests, iOS SDK libraries, unsigned development build, first launch and bounded offline UI acceptance.'
             echo 'The app supports a bounded offline baby/pee slice, not full LEZI feature or synchronization parity.'
-            echo 'First launch is not an interaction test, mixed-client server proof, signing, or physical-device acceptance.'
+            echo 'UI acceptance covers synthetic baby creation, draft cancellation, confirmation and persistence after relaunch only.'
+            echo 'No mixed-client server proof, signing, real-family operation or physical-device acceptance is implied.'
           } >> "$GITHUB_STEP_SUMMARY"

@@ -9,18 +9,29 @@
 		A00000000000000000000003 /* LeziUI in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000004 /* LeziUI */; };
 		A00000000000000000000005 /* LeziStorage in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000006 /* LeziStorage */; };
 		A00000000000000000000007 /* LeziCore in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000008 /* LeziCore */; };
+		B00000000000000000000001 /* OfflinePeeAcceptanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000002; };
 /* End PBXBuildFile section */
+/* Begin PBXContainerItemProxy section */
+		B0000000000000000000000A = {isa = PBXContainerItemProxy; containerPortal = A00000000000000000000012; proxyType = 1; remoteGlobalIDString = A0000000000000000000000E; remoteInfo = LeziDevelopment; };
+/* End PBXContainerItemProxy section */
+/* Begin PBXTargetDependency section */
+		B00000000000000000000009 = {isa = PBXTargetDependency; target = A0000000000000000000000E; targetProxy = B0000000000000000000000A; };
+/* End PBXTargetDependency section */
 /* Begin PBXFileReference section */
 		A00000000000000000000002 /* LeziDevelopmentApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LeziDevelopmentApp.swift; sourceTree = "<group>"; };
 		A00000000000000000000009 /* LeziDevelopment.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LeziDevelopment.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B00000000000000000000002 /* OfflinePeeAcceptanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflinePeeAcceptanceTests.swift; sourceTree = "<group>"; };
+		B00000000000000000000003 /* LeziDevelopmentUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LeziDevelopmentUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 /* Begin PBXFrameworksBuildPhase section */
 		A0000000000000000000000A /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000003, A00000000000000000000005, A00000000000000000000007,); runOnlyForDeploymentPostprocessing = 0; };
+		B00000000000000000000004 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 /* Begin PBXGroup section */
-		A0000000000000000000000B = {isa = PBXGroup; children = (A0000000000000000000000C /* Sources */, A0000000000000000000000D /* Products */,); sourceTree = "<group>"; };
+		A0000000000000000000000B = {isa = PBXGroup; children = (A0000000000000000000000C /* Sources */, B00000000000000000000005 /* UITests */, A0000000000000000000000D /* Products */,); sourceTree = "<group>"; };
 		A0000000000000000000000C /* Sources */ = {isa = PBXGroup; children = (A00000000000000000000002,); path = Sources; sourceTree = "<group>"; };
-		A0000000000000000000000D /* Products */ = {isa = PBXGroup; children = (A00000000000000000000009,); name = Products; sourceTree = "<group>"; };
+		A0000000000000000000000D /* Products */ = {isa = PBXGroup; children = (A00000000000000000000009, B00000000000000000000003,); name = Products; sourceTree = "<group>"; };
+		B00000000000000000000005 /* UITests */ = {isa = PBXGroup; children = (B00000000000000000000002,); path = UITests; sourceTree = "<group>"; };
 /* End PBXGroup section */
 /* Begin PBXNativeTarget section */
 		A0000000000000000000000E /* LeziDevelopment */ = {
@@ -35,11 +46,22 @@
 			productReference = A00000000000000000000009;
 			productType = "com.apple.product-type.application";
 		};
+		B00000000000000000000006 /* LeziDevelopmentUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B00000000000000000000007;
+			buildPhases = (B00000000000000000000008 /* Sources */, B00000000000000000000004 /* Frameworks */,);
+			buildRules = ();
+			dependencies = (B00000000000000000000009,);
+			name = LeziDevelopmentUITests;
+			productName = LeziDevelopmentUITests;
+			productReference = B00000000000000000000003;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 /* Begin PBXProject section */
 		A00000000000000000000012 /* Project object */ = {
 			isa = PBXProject;
-			attributes = {BuildIndependentTargetsInParallel = YES; LastUpgradeCheck = 1600; };
+			attributes = {BuildIndependentTargetsInParallel = YES; LastUpgradeCheck = 1600; TargetAttributes = {B00000000000000000000006 = {CreatedOnToolsVersion = 16.0; TestTargetID = A0000000000000000000000E; }; }; };
 			buildConfigurationList = A00000000000000000000013;
 			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = "zh-Hans";
@@ -50,7 +72,7 @@
 			productRefGroup = A0000000000000000000000D;
 			projectDirPath = "";
 			projectRoot = "";
-			targets = (A0000000000000000000000E,);
+			targets = (A0000000000000000000000E, B00000000000000000000006,);
 		};
 /* End PBXProject section */
 /* Begin PBXResourcesBuildPhase section */
@@ -58,6 +80,7 @@
 /* End PBXResourcesBuildPhase section */
 /* Begin PBXSourcesBuildPhase section */
 		A00000000000000000000010 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000001,); runOnlyForDeploymentPostprocessing = 0; };
+		B00000000000000000000008 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B00000000000000000000001,); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 /* Begin XCBuildConfiguration section */
 		A00000000000000000000015 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; DEBUG_INFORMATION_FORMAT = dwarf; ENABLE_TESTABILITY = YES; GCC_OPTIMIZATION_LEVEL = 0; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SDKROOT = iphoneos; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)"; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_VERSION = 6.0; }; name = Debug; };
@@ -98,10 +121,33 @@
 			SUPPORTS_MACCATALYST = NO;
 			TARGETED_DEVICE_FAMILY = "1,2";
 		}; name = Release; };
+		B0000000000000000000000B /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {
+			CODE_SIGNING_ALLOWED = NO;
+			GENERATE_INFOPLIST_FILE = YES;
+			LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@loader_path/Frameworks",);
+			PRODUCT_BUNDLE_IDENTIFIER = com.lezi.babylog.ios.dev.uitests;
+			PRODUCT_NAME = "$(TARGET_NAME)";
+			SUPPORTED_PLATFORMS = iphonesimulator;
+			SUPPORTS_MACCATALYST = NO;
+			TARGETED_DEVICE_FAMILY = "1,2";
+			TEST_TARGET_NAME = LeziDevelopment;
+		}; name = Debug; };
+		B0000000000000000000000C /* Release */ = {isa = XCBuildConfiguration; buildSettings = {
+			CODE_SIGNING_ALLOWED = NO;
+			GENERATE_INFOPLIST_FILE = YES;
+			LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@loader_path/Frameworks",);
+			PRODUCT_BUNDLE_IDENTIFIER = com.lezi.babylog.ios.dev.uitests;
+			PRODUCT_NAME = "$(TARGET_NAME)";
+			SUPPORTED_PLATFORMS = iphonesimulator;
+			SUPPORTS_MACCATALYST = NO;
+			TARGETED_DEVICE_FAMILY = "1,2";
+			TEST_TARGET_NAME = LeziDevelopment;
+		}; name = Release; };
 /* End XCBuildConfiguration section */
 /* Begin XCConfigurationList section */
 		A0000000000000000000000F = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000017, A00000000000000000000018,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
 		A00000000000000000000013 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000015, A00000000000000000000016,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+		B00000000000000000000007 = {isa = XCConfigurationList; buildConfigurations = (B0000000000000000000000B, B0000000000000000000000C,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
 /* End XCConfigurationList section */
 /* Begin XCLocalSwiftPackageReference section */
 		A00000000000000000000014 /* XCLocalSwiftPackageReference ".." */ = {isa = XCLocalSwiftPackageReference; relativePath = ..; };
