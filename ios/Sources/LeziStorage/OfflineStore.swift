@@ -1,7 +1,7 @@
 import Foundation
 import LeziCore
 
-/// Native schema 3 (preserves and migrates native schemas 1 and 2). Not Android Room schema 29; not a family-sync repository.
+/// Native schema 4 (preserves and migrates native schemas 1, 2 and 3). Not Android Room schema 29; not a family-sync repository.
 public struct OfflineContext: Equatable, Sendable {
     public let generation: UUID
     /// UI selection state only; never authorization to retarget an open editor.
@@ -135,17 +135,16 @@ public actor OfflineStore {
             } else if expectedUpdatedAt != nil { throw OfflineStoreError.staleEdit }
             let revision = try existing.map { try Self.nextRevision(after: $0.updatedAt, now: now) } ?? now
             if existing == nil {
-                try db.execute("INSERT INTO records (uuid,baby_uuid,type,timestamp,end_timestamp,note,payload_json,payload_schema_version,updated_at,sync_dirty) VALUES (?,?,?,?,?,?,?,?,?,0)", [
+                try db.execute("INSERT INTO records (uuid,baby_uuid,type,timestamp,end_timestamp,note,payload_json,payload_schema_version,updated_at,sync_dirty) VALUES (?,?,?,?,?,?,?,?,?,1)", [
                     .text(draft.clientUUID.uuidString), .text(draft.babyClientUUID.uuidString), .text(draft.payload.type.rawValue),
                     .int(draft.timestampMillis), draft.endTimestampMillis.map(SQLiteConnection.Value.int) ?? .null,
                     draft.note.map(SQLiteConnection.Value.text) ?? .null, .text(payloadJSON), .int(Int64(document.schemaVersion)), .int(revision)])
             } else {
-                try db.execute("UPDATE records SET timestamp=?,end_timestamp=?,note=?,payload_json=?,payload_schema_version=?,updated_at=? WHERE uuid=?", [
+                try db.execute("UPDATE records SET timestamp=?,end_timestamp=?,note=?,payload_json=?,payload_schema_version=?,updated_at=?,sync_dirty=1 WHERE uuid=?", [
                     .int(draft.timestampMillis), draft.endTimestampMillis.map(SQLiteConnection.Value.int) ?? .null,
                     draft.note.map(SQLiteConnection.Value.text) ?? .null, .text(payloadJSON), .int(Int64(document.schemaVersion)), .int(revision), .text(draft.clientUUID.uuidString)])
             }
             try inject(.afterFact)
-            try db.execute("UPDATE records SET sync_dirty=1 WHERE uuid=?", [.text(draft.clientUUID.uuidString)])
             try inject(.beforeCommit)
             guard let saved = try recordDetails(draft.clientUUID) else { throw OfflineStoreError.incompatibleDatabase }
             return saved
@@ -171,9 +170,8 @@ public actor OfflineStore {
             guard let previous = Int64(row[1] ?? "") else { throw OfflineStoreError.incompatibleDatabase }
             if let expectedUpdatedAt, previous != expectedUpdatedAt { throw OfflineStoreError.staleEdit }
             let revision = try Self.nextRevision(after: previous, now: now)
-            try db.execute("UPDATE records SET deleted_at=?,updated_at=? WHERE uuid=?", [.int(revision), .int(revision), .text(id.uuidString)])
+            try db.execute("UPDATE records SET deleted_at=?,updated_at=?,sync_dirty=1 WHERE uuid=?", [.int(revision), .int(revision), .text(id.uuidString)])
             try inject(.afterFact)
-            try db.execute("UPDATE records SET sync_dirty=1 WHERE uuid=?", [.text(id.uuidString)])
             try inject(.beforeCommit)
             return true
         }
@@ -214,7 +212,7 @@ public actor OfflineStore {
         } : nil
         return OfflineRecordsPage(records: page, nextCursor: cursor)
     }
-    static let recordColumns = "uuid,baby_uuid,type,timestamp,end_timestamp,note,payload_json,payload_schema_version,updated_at,sync_dirty,deleted_at,effective_wake_observation_client_uuid"
+    static let recordColumns = "uuid,baby_uuid,type,timestamp,end_timestamp,note,payload_json,payload_schema_version,updated_at,sync_dirty,deleted_at,effective_wake_observation_client_uuid,custom_definition_uuid"
     // Shared with EXPLAIN tests so they exercise the shipped SQL.
     static func timelinePageSQL(hasCursor: Bool, peeOnly: Bool = true) -> String {
         "SELECT " + recordColumns + " FROM records WHERE baby_uuid=? AND deleted_at IS NULL" +
@@ -238,7 +236,8 @@ public actor OfflineStore {
             endTimestampMillis: row[4].flatMap(Int64.init), note: row[5], payloadJSON: json,
             payloadSchemaVersion: schema, payloadDocument: document, updatedAt: updated,
             syncDirty: row[9] == "1", deletedAt: row[10].flatMap(Int64.init),
-            effectiveWakeObservationClientUUID: row[11].flatMap(UUID.init(uuidString:)))
+            effectiveWakeObservationClientUUID: row[11].flatMap(UUID.init(uuidString:)),
+            customDefinitionUUID: row[12].flatMap(UUID.init(uuidString:)))
     }
     private static func peeRecord(_ record: OfflineRecord) throws -> OfflinePeeRecord {
         guard record.type == .pee, case let .pee(amount)? = record.payloadDocument?.payload else { throw OfflineStoreError.opaqueRecord }
@@ -258,7 +257,7 @@ public actor OfflineStore {
         guard let row = try db.query("SELECT actor_uuid,generation,mode,selection_revision,selected_baby FROM local_identity WHERE id=1").first else { throw OfflineStoreError.incompatibleDatabase }
         return row
     }
-    private func requireOffline() throws { guard try metadata()[2] == "offline" else { throw OfflineStoreError.offlineOnly } }
+    func requireOffline() throws { guard try metadata()[2] == "offline" else { throw OfflineStoreError.offlineOnly } }
     func requireLiveBaby(_ id: UUID) throws {
         guard !(try db.query("SELECT uuid FROM babies WHERE uuid=? AND deleted_at IS NULL", [.text(id.uuidString)])).isEmpty else { throw OfflineStoreError.missingBaby }
     }

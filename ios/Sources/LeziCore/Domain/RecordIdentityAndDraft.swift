@@ -15,6 +15,13 @@ public struct RecordItemIdentity: Equatable, Hashable, Sendable {
         guard type != .custom else { return nil }
         return Self(key: type.rawValue, type: type)
     }
+    /// A concrete definition's stable identity; this grants no family authority.
+    /// The historical familyCustomUUID field also carries native offline UUIDs.
+    public static func customDefinition(_ id: UUID) -> Self {
+        let canonical = id.uuidString.lowercased()
+        return Self(key: "custom:\(canonical)", type: .custom, familyUUID: canonical)
+    }
+
     public static func parseCatalogKey(_ key: String) -> Self? {
         if key.hasPrefix("custom:") {
             let suffix = String(key.dropFirst(7))

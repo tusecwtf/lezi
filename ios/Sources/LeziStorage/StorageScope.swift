@@ -2,13 +2,13 @@ import LeziCore
 
 /// Acceptance boundary for this additive native storage checkpoint.
 ///
-/// Implemented: independent native SQLite schema 3 with atomic native schema-1/2 migration; file-backed offline identity
+/// Implemented: independent native SQLite schema 4 with atomic native schema-1/2/3 migration; file-backed offline identity
 /// and store generation; baby nickname/birthday facts plus separate local color
 /// and ordering preferences; explicit-confirm no-media ordinary built-in record create/edit/soft-delete;
 /// live-baby/context/CAS gates; atomic fact + syncDirty writes; replay protection.
 ///
 /// NOT implemented: family enrollment/session/membership ACL, family reads or
-/// writes while disconnected, media, custom writes, full Baby metadata,
+/// writes while disconnected, media, full Baby metadata,
 /// reset, publication, canonical Record root encoding, causal envelope
 /// freezing, receipts/conflicts, generic outbox, sync transport or a complete shipping
 /// iOS application. syncDirty is not a mutation envelope and is never sent.
@@ -27,7 +27,18 @@ import LeziCore
 /// wire legacy migration identity. Local observer UUID is not a membership stamp.
 /// Soft-deleting sleep preserves all wake evidence. Batch page projection reads
 /// roots, their observations, and latest-open target within one SQLite snapshot.
-/// Ordinary writer support below intentionally excludes the dedicated sleep path.
+/// Ordinary writer support below intentionally excludes the dedicated sleep/custom paths.
+///
+/// Concrete custom definitions use stable UUID identity, separate local ordering,
+/// and atomic dirty facts. A local creation ordinal breaks equal sort positions
+/// like Android local insertion order; it is never business or wire identity.
+/// Dedicated custom confirmation binds that UUID to the
+/// record; numeric Android IDs are not generated or serialized. Historical title/
+/// icon snapshots survive definition rename/delete; typed edits keep the original
+/// definition and baby. Definitions and records are separate future causal roots.
+/// Unexpected pre-v4 custom rows reject migration rather than inventing identity.
+/// Catalog equality is case-sensitive, exact Unicode encoding as Kotlin String;
+/// catalog names have no storage length limit. No family authority is fabricated.
 ///
 /// Product text forms (note length, nursing input, food-amount editing and
 /// display-unit conversion) remain UI/domain responsibilities. Typed storage
@@ -46,6 +57,6 @@ import LeziCore
 /// visible. Family authority needs a separate integrated ACL-aware coordinator;
 /// absence of a network connection must never select this offline-only writer.
 public enum OfflineStorageScope {
-    public static let schemaVersion = 3
+    public static let schemaVersion = 4
     public static let supportedRecordTypes = RecordType.allCases.filter { $0 != .sleep && $0 != .custom }
 }

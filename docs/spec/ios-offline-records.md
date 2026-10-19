@@ -1,7 +1,7 @@
 # iOS offline records: bounded editor expansion plan
 
-> Status as of 2026-10-19: **22-type offline UI plus schema-3 sleep storage verified at `10016b6a`;
-> local Food expansion reaches 25 UI types but awaits publication/Apple CI. No sleep UI**.
+> Status as of 2026-10-19: **current local schema-4/custom/manual-nursing batch
+> implements 26 ordinary forms plus custom; 209 Linux tests pass, Apple acceptance pending. Sleep remains storage/projectors only, without UI**.
 > This document refines the [iOS parity inventory](ios-parity.md), not the Android
 > product contract. Native offline mode is not permission to bypass membership/ACL
 > while an enrolled device cannot reach its server.
@@ -28,7 +28,7 @@ two-decimal editor refill. Changed values use shared Core range/conversion rules
 weight kg converts to integer g, with rounded zero refused. This is an explicit
 native interaction difference, not exact Android editor parity.
 
-The latest verified **dual-green** checkpoint is **`10016b6a`**, with **22 bounded
+The historical complete **dual-green** checkpoint is **`10016b6a`**, with **22 bounded
 UI types** (including milk and temperature), native schema **3**, and dedicated
 sleep storage. [Apple run 39329817431](https://github.com/tusecwtf/lezi/actions/runs/39329817431)
 passed **199 package tests + seven Simulator UI tests**;
@@ -40,21 +40,33 @@ evidence. Schema **1/2→3** migration preserves data atomically. Storage suppor
 launch is verified, but **sleep UI is not exposed or accepted**. Database schema
 and payload document schema versions are separate concepts.
 
-**Current local, unpublished Food expansion:** baby_food, snack and drink bring
-UI to **25 types**. The Food slice passed **190 Linux tests**. Its two new
-Apple-only model tests and eighth UI scenario await Apple validation. The proposed
-eight-class UI suite with two parallel Simulator workers is also unverified; the
-seven-test green run above does not validate that parallel execution setup.
+**Published Food head `aa2011c`:** 25 ordinary UI forms; Apple package testing
+passed **212 tests**, but the parallel Simulator run hit its **40-minute timeout**
+with only **three of eight scenarios completed**. Android passed **5,908 tests**.
+This is not complete Apple acceptance; the old `10016b6a` green run does not cover it.
+
+**Current draft batch:** native schema **4**, atomic schema-1/2/3
+migration, concrete custom catalog and dedicated record create/edit/soft-delete,
+and manual nursing bring the source to **26 ordinary forms plus custom**.
+The complete Linux regression passed **209 tests, zero failures** (46 storage,
+77 portable presentation, 61 domain, 25 core). Apple-only orchestration and UI
+checks are not part of that count. This batch is **not Apple-accepted**. Full serial execution of ten Simulator scenarios is the next
+acceptance gate; changing the execution budget is not a passing result.
+
+Custom definitions use stable UUID identity and separate local ordering; historical
+title/icon snapshots survive definition changes. Custom writes use their dedicated
+identity/context/revision gates and do not create Android numeric IDs or family
+membership. Manual nursing captures left/right minutes, order and optional ml as
+point facts, preserving supported historical record mode on edits. It does not
+implement active timer sessions or interval inference. Sleep remains dedicated
+storage/projectors only: **no sleep UI is exposed or accepted**. Photos remain
+unsupported. Native schema 4 is not server schema 13 or payload schema 2.
+
 Food keeps untouched optional legacy amounts exactly (nil, empty, Chinese,
 full-width and whitespace), normalizes only new/changed amounts, and requires a
 parseable amount only for new/changed baby-food facts. Guidance uses the original
 baby's birthday and the record's local date, with Java-compatible completed
 calendar months; suggestion buttons change only content.
-
-A separate **local schema-4 custom-storage workstream** is ready but is excluded
-from this Food publication. Its combined local 195-test result is not the Food
-slice's 190-test result and is not Apple or published evidence. Custom workflows
-remain pending separate integration and validation; no custom UI is claimed.
 
 Milk recent amounts are read for all three types in one SQLite snapshot using
 bounded keyset batches across history, not just the visible UI page. Following
@@ -69,7 +81,8 @@ host; genuine recent defaults are not presented as that missing intent.
 
 Ordinary APIs remain `confirmRecord`, `recordDetails`, `recordPage`, and
 `deleteRecord`, with pee compatibility wrappers. Generic ordinary confirmation
-still rejects sleep: dedicated commands preserve its independent evidence roots.
+still rejects sleep and custom: dedicated commands preserve their independent
+identity and evidence contracts.
 The eight explicit sleep writes are:
 
 1. `createSleepStart`
@@ -115,8 +128,9 @@ restriction prevents unreadable round trips; it does not assert every Android
 in-memory combination behaves identically. Legacy numeric-domain values remain
 readable. See [the payload contract](contracts/data-model.md).
 
-After the local Food slice, remaining UI work includes manual nursing, nursing timer handoff,
-care plans, media, dedicated sleep UI, and concrete custom-item workflows. Full
+The current local manual nursing and custom workflows still need Apple acceptance.
+Remaining UI work includes nursing timer handoff, care plans, media and dedicated
+sleep UI. Full
 navigation, family enrollment and synchronization remain unimplemented here.
 The 12 groups below are a catalog/implementation plan, not an assertion that
 all their UI or complete product parity has been delivered.
@@ -125,7 +139,7 @@ Historical evidence: the earlier pee-only `1e5802a6` checkpoint passed
 [Android 39282387623](https://github.com/tusecwtf/lezi/actions/runs/39282387623)
 and [Apple 39282387612](https://github.com/tusecwtf/lezi/actions/runs/39282387612)
 with 93 package tests and one UI smoke. It is superseded by the latest verified
-checkpoint above; it is not evidence for unpublished Food changes.
+checkpoint above; it is not evidence for the Food or current draft batch.
 
 ## 2. Sources and authority
 
@@ -236,9 +250,11 @@ explicitly; no fallback may immediately save or silently use an empty payload.
 
 The 22-type checkpoint `10016b6a` verifies the existing daily/health/growth/milk/
 temperature forms and schema-3 sleep storage with 199 Apple package tests and
-seven UI tests, without a sleep UI entry. Food is locally implemented (25 forms)
-and awaits publication, Apple model tests and eighth UI acceptance. Manual nursing
-and dedicated sleep UI remain future slices; storage coverage is not UI acceptance.
+seven UI tests, without a sleep UI entry. Published Food `aa2011c` has 212 passing
+Apple package tests but incomplete UI acceptance after timeout. The draft
+schema-4/custom/manual-nursing batch has 26 ordinary forms plus custom and 209
+passing Linux tests; full ten-scenario Apple acceptance is pending. Dedicated
+sleep UI and nursing timers remain future slices; storage is not UI acceptance.
 Do not replace the working pee flow with a generic form before its regression
 proof remains green.
 

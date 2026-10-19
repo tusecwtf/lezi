@@ -4,6 +4,10 @@ import Foundation
 public enum OfflineStoreError: Error, Equatable, Sendable {
     case sqlite(Int32, String)
     case incompatibleDatabase
+    case unsupportedCustomHistory
+    case missingCustomDefinition
+    case duplicateCustomName
+    case customDefinitionLimit
     case unsupportedSleepHistory
     case sleepStateChanged
     case missingWake

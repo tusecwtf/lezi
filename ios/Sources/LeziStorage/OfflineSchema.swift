@@ -3,9 +3,9 @@ import Foundation
 /// Native SQLite versions only. These numbers are unrelated to payload schema 2,
 /// Android Room versions, and the family server's schema/wire versions.
 enum OfflineSchema {
-    static let version = 3
+    static let version = 4
     static let applicationID = "1279613513"
-    enum MigrationFailurePoint { case afterCopy, beforeCommit, afterSleepSchema }
+    enum MigrationFailurePoint { case afterCopy, beforeCommit, afterSleepSchema, afterCustomSchema }
 
     static func prepare(_ db: SQLiteConnection, failMigrationAt: MigrationFailurePoint? = nil) throws {
         try db.transaction {
@@ -38,15 +38,28 @@ enum OfflineSchema {
                 try db.execute("DROP TABLE pee_records")
                 try db.execute("PRAGMA user_version=2")
                 if failMigrationAt == .beforeCommit { throw OfflineStoreError.injectedFailure }
-            case "2", "3":
+            case "2", "3", "4":
                 guard application == applicationID else { throw OfflineStoreError.incompatibleDatabase }
             default:
                 throw OfflineStoreError.incompatibleDatabase
             }
-            if version != "3" {
+            if version != "3" && version != "4" {
                 try addSleepSchema(db)
                 if failMigrationAt == .afterSleepSchema { throw OfflineStoreError.injectedFailure }
                 try db.execute("PRAGMA user_version=3")
+            }
+            if version != "4" {
+                guard try db.query("SELECT uuid FROM records WHERE type='custom' LIMIT 1").isEmpty else {
+                    throw OfflineStoreError.unsupportedCustomHistory
+                }
+                try db.execute("CREATE TABLE custom_definitions (uuid TEXT PRIMARY KEY,name TEXT NOT NULL,icon_slot INTEGER NOT NULL CHECK(icon_slot BETWEEN 0 AND 7),updated_at INTEGER NOT NULL,sync_dirty INTEGER NOT NULL CHECK(sync_dirty IN(0,1)),deleted_at INTEGER)")
+                // BINARY equality matches Kotlin String equality, including case and
+                // canonically-equivalent but differently encoded Unicode names.
+                try db.execute("CREATE UNIQUE INDEX custom_live_name ON custom_definitions(name COLLATE BINARY) WHERE deleted_at IS NULL")
+                try db.execute("CREATE TABLE custom_preferences (definition_uuid TEXT PRIMARY KEY REFERENCES custom_definitions(uuid),sort_order INTEGER NOT NULL,creation_ordinal INTEGER NOT NULL UNIQUE)")
+                try db.execute("ALTER TABLE records ADD COLUMN custom_definition_uuid TEXT REFERENCES custom_definitions(uuid)")
+                if failMigrationAt == .afterCustomSchema { throw OfflineStoreError.injectedFailure }
+                try db.execute("PRAGMA user_version=4")
             }
         }
     }

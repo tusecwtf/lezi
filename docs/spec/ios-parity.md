@@ -59,7 +59,7 @@ passed **159 package tests plus five Simulator UI tests** (863.188 seconds total
 growth payload precision is preserved rather than copying Android's lossy
 two-decimal editor refill; changed input uses the shared Core conversion rules.
 
-The latest verified **dual-green** checkpoint is **`10016b6a`**, with **22 bounded
+The historical complete **dual-green** checkpoint is **`10016b6a`**, with **22 bounded
 UI types** (including milk and temperature), native schema **3**, and dedicated
 sleep storage. [Apple run 39329817431](https://github.com/tusecwtf/lezi/actions/runs/39329817431)
 passed **199 package tests + seven Simulator UI tests**;
@@ -75,27 +75,39 @@ Eight explicit sleep
 commands handle start/completed creation, wake creation, start/completed editing,
 wake update/withdrawal, and effective-wake selection. Dedicated reads batch-project
 sleep and wake evidence. No family session or observer is fabricated, and **sleep
-UI is not open**; custom/media writes remain unsupported. Completed creation uses
+UI is not open**; custom/media writes were unsupported at that checkpoint. Completed creation uses
 stronger two-root atomicity; closed projections cannot accidentally reopen during
 start editing; replay is strict; independent wake notes are not changed by sleep
 note edits. See the [offline expansion plan](ios-offline-records.md) for exact APIs
 and scope differences.
 
-**Current local, unpublished Food expansion:** baby_food, snack and drink bring
-UI to **25 types**. The Food slice passed **190 Linux tests**. Its two new
-Apple-only model tests and eighth UI scenario await Apple validation. The proposed
-eight-class UI suite with two parallel Simulator workers is also unverified; the
-seven-test green run above does not validate that parallel execution setup.
+**Published Food head `aa2011c`:** 25 ordinary UI forms; Apple package testing
+passed **212 tests**, but the parallel Simulator run hit its **40-minute timeout**
+with only **three of eight scenarios completed**. Android passed **5,908 tests**.
+This is not complete Apple acceptance; the old `10016b6a` green run does not cover it.
+
+**Current draft batch:** native schema **4**, atomic schema-1/2/3
+migration, concrete custom catalog and dedicated record create/edit/soft-delete,
+and manual nursing bring the source to **26 ordinary forms plus custom**.
+The complete Linux regression passed **209 tests, zero failures** (46 storage,
+77 portable presentation, 61 domain, 25 core). Apple-only orchestration and UI
+checks are not part of that count. This batch is **not Apple-accepted**. Full serial execution of ten Simulator scenarios is the next
+acceptance gate; changing the execution budget is not a passing result.
+
+Custom definitions use stable UUID identity and separate local ordering; historical
+title/icon snapshots survive definition changes. Custom writes use their dedicated
+identity/context/revision gates and do not create Android numeric IDs or family
+membership. Manual nursing captures left/right minutes, order and optional ml as
+point facts, preserving supported historical record mode on edits. It does not
+implement active timer sessions or interval inference. Sleep remains dedicated
+storage/projectors only: **no sleep UI is exposed or accepted**. Photos remain
+unsupported. Native schema 4 is not server schema 13 or payload schema 2.
+
 Food keeps untouched optional legacy amounts exactly (nil, empty, Chinese,
 full-width and whitespace), normalizes only new/changed amounts, and requires a
 parseable amount only for new/changed baby-food facts. Guidance uses the original
 baby's birthday and the record's local date, with Java-compatible completed
 calendar months; suggestion buttons change only content.
-
-A separate **local schema-4 custom-storage workstream** is ready but is excluded
-from this Food publication. Its combined local 195-test result is not the Food
-slice's 190-test result and is not Apple or published evidence. Custom workflows
-remain pending separate integration and validation; no custom UI is claimed.
 
 Milk recents use one three-type SQLite snapshot and
 keyset traversal beyond the visible page. As in Android, the history query filters
@@ -104,9 +116,9 @@ full validation gates. Step is a global device-local AppStorage preference. This
 host does not implement Android's separate day-list lastAmount launch override.
 
 The development host remains bounded: no family, production transport, signed-device
-or full-product support is implied. The local Food slice leaves manual nursing as the remaining ordinary form;
-storage support does not expose that form or dedicated sleep UI. Concrete custom workflows remain
-incomplete. The full product matrix stays open until each row has complete evidence.
+or full-product support is implied. The local custom/manual-nursing implementation
+awaits Apple acceptance; nursing timer, dedicated sleep UI, care plans and media
+remain open. The full product matrix stays open until each row has complete evidence.
 
 Native stale-edit CAS and revision-overflow refusal, and opaque preservation of
 nonstandard local JSON escape cases, are explicitly documented differences.
@@ -279,6 +291,10 @@ must be clearly labeled isolated tests and must not become a production bypass.
 The library/codec scaffold can proceed while this gate is open; claiming the iOS
 client is fully compatible or ready to use with the family NAS cannot.
 
+The [sync-adapter plan](ios-sync-adapter.md) details staged endpoint/session/read
+integration. It remains a design; neither release-policy option above is approved
+or implemented by that document.
+
 ## 8. Test architecture and evidence
 
 ### 8.1 Shared contract fixtures, independent implementations
@@ -349,8 +365,11 @@ CI in `.github/workflows/ios-core.yml` now tests the Swift package, compiles the
 Apple library code, builds the unsigned SwiftUI development host and runs its
 bounded Simulator UI scenarios. The `10016b6a` checkpoint above has green Apple
 and Android evidence for 22 offline forms plus schema-3 sleep storage, with no
-sleep UI. The local 25-form Food expansion and eight-class/two-worker UI execution
-setup still await publication and Apple CI. This does not validate the complete app, widget extension,
+sleep UI. Published Food head `aa2011c` passed 212 Apple package tests but timed
+out during parallel UI acceptance (three of eight scenarios completed). The local
+schema-4/custom/manual-nursing batch has 209 passing Linux tests and awaits full
+Apple acceptance with ten serial Simulator scenarios. Apple CI is available;
+these counts do not validate the complete app, widget extension,
 signed device installation or real mixed-client sync. The complete application
 gates below remain required; later unverified code cannot inherit this result.
 

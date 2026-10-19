@@ -823,6 +823,191 @@ final class OfflineFoodAcceptanceTests: OfflineAcceptanceSupport {
     }
 }
 
+@MainActor
+final class OfflineNursingAcceptanceTests: OfflineAcceptanceSupport {
+    func testManualNursingFactsRetainModeAndIdentityAcrossEdits() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let babyName = "UI-Nursing-009"
+        let note = "ui-nursing-note"
+        app.launch()
+        tap(app.buttons["offline.baby.new"])
+        let nickname = app.textFields["offline.baby.nickname"]
+        tap(nickname)
+        nickname.typeText(babyName)
+        tap(app.buttons["offline.baby.create"])
+        waitFor(app.staticTexts["offline.result"], "label == %@", "已在本机创建宝宝：\(babyName)")
+        waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
+        tap(app.buttons["offline.baby.new"])
+        assertSelectedBaby(app, name: babyName)
+        assertEmptyHistory(app)
+
+        // The 26th option needs a longer single menu-contained reveal than the
+        // earlier types. Existing callers retain their original gesture endpoint.
+        openExtendedRecord(kind: "nursing", menuDragEndFraction: 0.12, in: app)
+        waitFor(app.staticTexts["offline.nursing.scope"], "label == %@",
+                "手动填写已发生的哺乳事实；不含计时器或进行中状态。")
+        waitFor(app.staticTexts["offline.nursing.mode"], "label == %@", "记录模式：结束；记录时间不从左右时长倒推。")
+        tap(app.buttons["confirmation.save"])
+        waitFor(app.staticTexts["confirmation.reason"], "label == %@", "请填写左侧或右侧喂养时长")
+        waitFor(healthField("offline.nursing.left", in: app), "value == %@", "0")
+        waitFor(healthField("offline.nursing.right", in: app), "value == %@", "0")
+        replaceNursingMinutes("offline.nursing.left", oldValue: "0", newValue: "5", in: app)
+        revealHealthControl(app.buttons["offline.nursing.order"], in: app)
+        tap(app.buttons["offline.nursing.order"])
+        tap(app.buttons["offline.nursing.order.L"])
+        revealHealthControl(noteField(in: app), in: app)
+        enterNote(note, in: app)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "母乳")
+        let row = diaperRow(in: app, note: note)
+        waitFor(row, "exists == true")
+        let recordID = row.identifier
+        assertNursingRow(row, rightMinutes: 0, order: "仅左", amount: "奶量未填写", note: note)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        assertNursingRow(app.otherElements[recordID], rightMinutes: 0, order: "仅左", amount: "奶量未填写", note: note)
+        tap(app.otherElements[recordID].buttons["offline.record.edit"])
+        waitFor(app.staticTexts["offline.excretion.kind.fixed"], "label == %@", "类型：母乳（不可更改）")
+        XCTAssertFalse(app.buttons["offline.excretion.kind"].exists)
+        waitFor(app.staticTexts["offline.nursing.scope"], "label == %@",
+                "手动填写已发生的哺乳事实；不含计时器或进行中状态。")
+        waitFor(healthField("offline.nursing.left", in: app), "value == %@", "5")
+        replaceNursingMinutes("offline.nursing.right", oldValue: "0", newValue: "3", in: app)
+        revealHealthControl(app.buttons["offline.nursing.order"], in: app)
+        tap(app.buttons["offline.nursing.order"])
+        tap(app.buttons["offline.nursing.order.RL"])
+        enterHealthText("offline.nursing.amount", text: "80", in: app)
+        waitFor(noteField(in: app), "value == %@", note)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "母乳")
+        assertNursingRow(app.otherElements[recordID], rightMinutes: 3, order: "先右后左", amount: "奶量：80 ml", note: note)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        assertNursingRow(app.otherElements[recordID], rightMinutes: 3, order: "先右后左", amount: "奶量：80 ml", note: note)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+    }
+}
+
+@MainActor
+final class OfflineCustomAcceptanceTests: OfflineAcceptanceSupport {
+    func testCustomCatalogChangesPreserveHistoricalSnapshotsAndAssociation() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let babyName = "UI-Custom-010"
+        let nameA = "UI-Custom-A"
+        let nameB = "UI-Custom-B"
+        let renamed = "UI-Custom-Renamed"
+        let note = "ui-custom-note"
+        app.launch()
+        tap(app.buttons["offline.baby.new"])
+        let nickname = app.textFields["offline.baby.nickname"]
+        tap(nickname)
+        nickname.typeText(babyName)
+        tap(app.buttons["offline.baby.create"])
+        waitFor(app.staticTexts["offline.result"], "label == %@", "已在本机创建宝宝：\(babyName)")
+        waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
+        tap(app.buttons["offline.baby.new"])
+        assertSelectedBaby(app, name: babyName)
+        assertEmptyHistory(app)
+        tap(app.buttons["offline.catalog.open"])
+        createCatalogDefinition(nameA, icon: 0, in: app)
+        let rowA = catalogRow(name: nameA, in: app)
+        waitFor(rowA, "exists == true")
+        let idA = rowA.identifier
+        let definitionID = String(idA.dropFirst("offline.catalog.row.".count))
+        createCatalogDefinition(nameB, icon: 1, in: app)
+        let rowB = catalogRow(name: nameB, in: app)
+        waitFor(rowB, "exists == true")
+        let idB = rowB.identifier
+        XCTAssertNotEqual(idA, idB)
+        assertCatalogOrder(first: app.otherElements[idA], second: app.otherElements[idB])
+        moveCatalogRow(app.otherElements[idA], direction: "down", in: app)
+        assertCatalogOrder(first: app.otherElements[idB], second: app.otherElements[idA])
+        moveCatalogRow(app.otherElements[idA], direction: "up", in: app)
+        assertCatalogOrder(first: app.otherElements[idA], second: app.otherElements[idB])
+        moveCatalogRow(app.otherElements[idB], direction: "up", in: app)
+        assertCatalogOrder(first: app.otherElements[idB], second: app.otherElements[idA])
+
+        tap(app.otherElements[idA].buttons["offline.catalog.record.new"])
+        waitFor(healthField("offline.custom.title", in: app), "value == %@", nameA)
+        waitFor(app.staticTexts["offline.custom.icon"], "label == %@", "图标快照：星星")
+        waitFor(app.staticTexts["offline.custom.definition"], "value == %@", definitionID)
+        enterHealthText("offline.custom.detail", text: "ui-custom-detail", in: app)
+        revealHealthControl(noteField(in: app), in: app)
+        enterNote(note, in: app)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "自定义记录")
+        let record = diaperRow(in: app, note: note)
+        waitFor(record, "exists == true")
+        let recordID = record.identifier
+        assertCustomRow(record, title: nameA, detail: "ui-custom-detail", note: note, definitionID: definitionID)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+
+        tap(app.buttons["offline.catalog.open"])
+        tap(app.otherElements[idA].buttons["offline.catalog.edit"])
+        let nameField = healthField("offline.catalog.editor.name", in: app)
+        revealCatalogControl(nameField, in: app)
+        waitFor(nameField, "value == %@", nameA)
+        nameField.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        nameField.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: nameA.count) + renamed)
+        waitFor(nameField, "value == %@", renamed)
+        chooseCatalogIcon(3, in: app)
+        saveCatalogDefinition(in: app)
+        waitFor(app.otherElements[idA].staticTexts["offline.catalog.name"], "label == %@", renamed)
+        waitFor(app.otherElements[idA].staticTexts["offline.catalog.icon"], "label == %@", "图标：月亮")
+        tap(app.buttons["offline.catalog.close"])
+        assertCustomRow(app.otherElements[recordID], title: nameA, detail: "ui-custom-detail", note: note, definitionID: definitionID)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        assertCustomRow(app.otherElements[recordID], title: nameA, detail: "ui-custom-detail", note: note, definitionID: definitionID)
+        tap(app.buttons["offline.catalog.open"])
+        assertCatalogOrder(first: app.otherElements[idB], second: app.otherElements[idA])
+        waitFor(app.otherElements[idA].staticTexts["offline.catalog.name"], "label == %@", renamed)
+        waitFor(app.otherElements[idA].staticTexts["offline.catalog.icon"], "label == %@", "图标：月亮")
+        tap(app.otherElements[idA].buttons["offline.catalog.delete"])
+        tap(app.buttons["offline.catalog.delete.cancel"])
+        waitFor(app.otherElements[idA].buttons["offline.catalog.record.new"], "exists == true AND enabled == true")
+        tap(app.otherElements[idA].buttons["offline.catalog.delete"])
+        tap(app.buttons["offline.catalog.delete.confirm"])
+        waitFor(app.staticTexts["offline.catalog.result"], "label == %@", "已删除本机自定义项目；历史记录保留")
+        waitFor(app.otherElements[idA], "exists == false")
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.catalog.record.new").count, 1)
+        waitFor(app.otherElements[idB].buttons["offline.catalog.record.new"], "exists == true AND enabled == true")
+        tap(app.buttons["offline.catalog.close"])
+        assertCustomRow(app.otherElements[recordID], title: nameA, detail: "ui-custom-detail", note: note, definitionID: definitionID)
+        tap(app.otherElements[recordID].buttons["offline.record.edit"])
+        waitFor(app.staticTexts["offline.excretion.kind.fixed"], "label == %@", "类型：自定义记录（不可更改）")
+        XCTAssertFalse(app.buttons["offline.excretion.kind"].exists)
+        waitFor(app.staticTexts["offline.custom.icon"], "label == %@", "图标快照：星星")
+        waitFor(app.staticTexts["offline.custom.definition"], "value == %@", definitionID)
+        let detail = healthField("offline.custom.detail", in: app)
+        revealHealthControl(detail, in: app)
+        waitFor(detail, "value == %@", "ui-custom-detail")
+        detail.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.1)).tap()
+        detail.typeText("-edited")
+        waitFor(detail, "value == %@", "ui-custom-detail-edited")
+        saveDiaper(in: app, babyName: babyName, kindLabel: "自定义记录")
+        assertCustomRow(app.otherElements[recordID], title: nameA, detail: "ui-custom-detail-edited", note: note, definitionID: definitionID)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        assertCustomRow(app.otherElements[recordID], title: nameA, detail: "ui-custom-detail-edited", note: note, definitionID: definitionID)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+        tap(app.buttons["offline.catalog.open"])
+        XCTAssertFalse(app.otherElements[idA].exists)
+        waitFor(app.otherElements[idB].staticTexts["offline.catalog.name"], "label == %@", nameB)
+        waitFor(app.otherElements[idB].staticTexts["offline.catalog.icon"], "label == %@", "图标：爱心")
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.catalog.record.new").count, 1)
+        XCTAssertFalse(app.otherElements[idB].buttons["offline.catalog.up"].isEnabled)
+        XCTAssertFalse(app.otherElements[idB].buttons["offline.catalog.down"].isEnabled)
+        tap(app.buttons["offline.catalog.close"])
+    }
+}
+
 /// Shared UI operations only: no test methods to inherit or execute twice.
 @MainActor
 class OfflineAcceptanceSupport: XCTestCase {
@@ -893,12 +1078,12 @@ class OfflineAcceptanceSupport: XCTestCase {
         waitFor(row.staticTexts["offline.record.note"], "label == %@", note)
     }
 
-    fileprivate func openExtendedRecord(kind: String, in app: XCUIApplication) {
+    fileprivate func openExtendedRecord(kind: String, menuDragEndFraction: CGFloat = 0.25, in app: XCUIApplication) {
         tap(app.buttons["offline.pee.new"])
-        selectExtendedRecordKind(kind, currentKind: "pee", in: app)
+        selectExtendedRecordKind(kind, currentKind: "pee", menuDragEndFraction: menuDragEndFraction, in: app)
     }
 
-    fileprivate func selectExtendedRecordKind(_ kind: String, currentKind: String, in app: XCUIApplication) {
+    fileprivate func selectExtendedRecordKind(_ kind: String, currentKind: String, menuDragEndFraction: CGFloat = 0.25, in app: XCUIApplication) {
         tap(app.buttons["offline.excretion.kind"])
         // The captured Simulator hierarchy exposes the long Picker popup as a
         // CollectionView. Its last options exist below the clipped menu viewport.
@@ -910,12 +1095,12 @@ class OfflineAcceptanceSupport: XCTestCase {
             let visible = menu.frame.intersection(app.frame)
             XCTAssertFalse(visible.isNull)
             XCTAssertGreaterThan(visible.height, 100)
-            print("Record menu reveal \(kind): collection=\(menu.frame), visible=\(visible)")
+            print("Record menu reveal \(kind): collection=\(menu.frame), visible=\(visible), dragEndFraction=\(menuDragEndFraction)")
             let origin = menu.coordinate(withNormalizedOffset: .zero)
             let start = origin.withOffset(CGVector(dx: visible.midX - menu.frame.minX,
                                                    dy: visible.minY + visible.height * 0.7 - menu.frame.minY))
             let end = origin.withOffset(CGVector(dx: visible.midX - menu.frame.minX,
-                                                 dy: visible.minY + visible.height * 0.25 - menu.frame.minY))
+                                                 dy: visible.minY + visible.height * menuDragEndFraction - menu.frame.minY))
             start.press(forDuration: 0.1, thenDragTo: end)
         }
         tap(option)
@@ -935,6 +1120,120 @@ class OfflineAcceptanceSupport: XCTestCase {
         waitFor(row.staticTexts["offline.record.kind"], "label == %@", kind)
         waitFor(row.staticTexts["offline.record.food.content"], "label == %@", content)
         waitFor(row.staticTexts["offline.record.food.amount"], "label == %@", amount)
+        waitFor(row.staticTexts["offline.record.note"], "label == %@", note)
+    }
+
+    fileprivate func replaceNursingMinutes(_ identifier: String, oldValue: String, newValue: String, in app: XCUIApplication) {
+        let field = healthField(identifier, in: app)
+        revealHealthControl(field, in: app)
+        waitFor(field, "value == %@", oldValue)
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: oldValue.count) + newValue)
+        waitFor(field, "value == %@", newValue)
+    }
+
+    fileprivate func assertNursingRow(_ row: XCUIElement, rightMinutes: Int, order: String, amount: String, note: String) {
+        waitFor(row, "exists == true")
+        waitFor(row.staticTexts["offline.record.kind"], "label == %@", "母乳")
+        waitFor(row.staticTexts["offline.record.nursing.duration"], "label == %@", "左侧：5 分钟 · 右侧：\(rightMinutes) 分钟")
+        waitFor(row.staticTexts["offline.record.nursing.order"], "label == %@", "顺序：\(order)")
+        waitFor(row.staticTexts["offline.record.nursing.amount"], "label == %@", amount)
+        waitFor(row.staticTexts["offline.record.nursing.mode"], "label == %@", "记录模式：结束")
+        waitFor(row.staticTexts["offline.record.note"], "label == %@", note)
+    }
+
+    fileprivate func catalogRow(name: String, in app: XCUIApplication) -> XCUIElement {
+        app.otherElements.matching(NSPredicate(format: "identifier BEGINSWITH %@", "offline.catalog.row."))
+            .containing(.staticText, identifier: name).firstMatch
+    }
+
+    fileprivate func createCatalogDefinition(_ name: String, icon: Int, in app: XCUIApplication) {
+        revealCatalogControl(app.buttons["offline.catalog.add"], in: app)
+        tap(app.buttons["offline.catalog.add"])
+        let field = healthField("offline.catalog.editor.name", in: app)
+        revealCatalogControl(field, in: app)
+        tap(field)
+        field.typeText(name)
+        waitFor(field, "value == %@", name)
+        chooseCatalogIcon(icon, in: app)
+        saveCatalogDefinition(in: app)
+    }
+
+    fileprivate func chooseCatalogIcon(_ icon: Int, in app: XCUIApplication) {
+        revealCatalogControl(app.buttons["offline.catalog.editor.icon"], in: app)
+        tap(app.buttons["offline.catalog.editor.icon"])
+        tap(app.buttons["offline.catalog.editor.icon.\(icon)"])
+    }
+
+    fileprivate func saveCatalogDefinition(in app: XCUIApplication) {
+        revealCatalogControl(app.buttons["offline.catalog.save"], in: app)
+        tap(app.buttons["offline.catalog.save"])
+        waitFor(app.staticTexts["offline.catalog.result"], "label == %@", "已保存本机自定义项目")
+        waitFor(healthField("offline.catalog.editor.name", in: app), "exists == false")
+        waitFor(app.buttons["offline.catalog.add"], "exists == true AND enabled == true")
+    }
+
+    fileprivate func moveCatalogRow(_ row: XCUIElement, direction: String, in app: XCUIApplication) {
+        tap(row.buttons["offline.catalog.\(direction)"])
+        tap(app.buttons["offline.catalog.move.confirm"])
+        waitFor(app.staticTexts["offline.catalog.result"], "label == %@", "已保存本机项目顺序")
+        waitFor(app.buttons["offline.catalog.add"], "enabled == true")
+    }
+
+    fileprivate func assertCatalogOrder(first: XCUIElement, second: XCUIElement) {
+        waitFor(first, "exists == true")
+        waitFor(second, "exists == true")
+        XCTAssertLessThan(first.frame.minY, second.frame.minY)
+        XCTAssertFalse(first.buttons["offline.catalog.up"].isEnabled)
+        XCTAssertFalse(second.buttons["offline.catalog.down"].isEnabled)
+    }
+
+    fileprivate func revealCatalogControl(_ element: XCUIElement, in app: XCUIApplication) {
+        waitFor(element, "exists == true")
+        let scroll = app.scrollViews.containing(.any, identifier: element.identifier).firstMatch
+        waitFor(scroll, "exists == true")
+        // The catalog has no confirmation footer or inner horizontal padding.
+        // Clip its real viewport to the keyboard; use visible, non-interactive
+        // icon/counter labels as drag anchors instead of an active text field.
+        for attempt in 0...4 {
+            let viewport = scroll.frame.intersection(app.frame)
+            let top = viewport.minY + 8
+            let bottom = min(viewport.maxY, app.keyboards.firstMatch.exists ? app.keyboards.firstMatch.frame.minY : viewport.maxY) - 12
+            let field = element.frame
+            print("Catalog reveal \(element.identifier) attempt \(attempt): field=\(field), viewport=\(viewport), safeY=\(top)...\(bottom)")
+            if element.isHittable && field.minY >= top && field.maxY <= bottom { return }
+            if attempt == 4 { break }
+            let up = field.maxY > bottom
+            let anchors = scroll.staticTexts.matching(NSPredicate(
+                format: "identifier == %@ OR identifier == %@", "offline.catalog.icon", "offline.catalog.editor.count"
+            )).allElementsBoundByIndex.filter {
+                $0.isHittable && $0.frame.minY >= top && $0.frame.maxY <= bottom
+                    && (up ? $0.frame.midY - top : bottom - $0.frame.midY) > 40
+            }.sorted { up ? $0.frame.midY > $1.frame.midY : $0.frame.midY < $1.frame.midY }
+            guard bottom - top > 60, let anchor = anchors.first else {
+                XCTFail("Catalog has no visible non-interactive scroll anchor for \(element.identifier)")
+                return
+            }
+            let needed = up ? field.maxY - bottom : top - field.minY
+            let startY = anchor.frame.midY
+            let distance = min(max(needed + 16, 40), up ? startY - top - 8 : bottom - startY - 8)
+            let x = anchor.frame.midX
+            let endY = startY + (up ? -distance : distance)
+            print("Catalog anchor \(anchor.identifier): \(anchor.frame), dragY=\(startY)...\(endY)")
+            let origin = scroll.coordinate(withNormalizedOffset: .zero)
+            origin.withOffset(CGVector(dx: x - scroll.frame.minX, dy: startY - scroll.frame.minY))
+                .press(forDuration: 0.1, thenDragTo: origin.withOffset(CGVector(dx: x - scroll.frame.minX, dy: endY - scroll.frame.minY)))
+        }
+        XCTFail("Could not reveal catalog control \(element.identifier)")
+    }
+
+    fileprivate func assertCustomRow(_ row: XCUIElement, title: String, detail: String, note: String, definitionID: String) {
+        waitFor(row, "exists == true")
+        waitFor(row.staticTexts["offline.record.kind"], "label == %@", "自定义记录")
+        waitFor(row.staticTexts["offline.record.custom.title"], "label == %@", title)
+        waitFor(row.staticTexts["offline.record.custom.detail"], "label == %@", detail)
+        waitFor(row.staticTexts["offline.record.custom.icon"], "label == %@", "图标快照：星星")
+        waitFor(row.staticTexts["offline.record.custom.definition"], "value == %@", definitionID)
         waitFor(row.staticTexts["offline.record.note"], "label == %@", note)
     }
 

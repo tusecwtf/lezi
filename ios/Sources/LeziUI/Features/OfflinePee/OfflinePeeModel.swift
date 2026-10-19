@@ -114,6 +114,13 @@ final class OfflinePeeModel: ObservableObject {
         editor = .init(babyClientUUID: baby.clientUUID, babyName: baby.nickname,
                        timestampMillis: Int64(Date().timeIntervalSince1970 * 1000), milkRecent: milkRecent, milkStep: milkStep, babyBirthday: baby.birthday)
     }
+    func openEditor(definition: OfflineCustomDefinition) {
+        guard editor == nil, !busy, definition.deletedAt == nil, let selected,
+              let baby = babies.first(where: { $0.clientUUID == selected.babyClientUUID }) else { return }
+        editorContext = selected
+        editor = .init(babyClientUUID: baby.clientUUID, babyName: baby.nickname,
+                       timestampMillis: Int64(Date().timeIntervalSince1970 * 1000), definition: definition, babyBirthday: baby.birthday)
+    }
     func openEditor(record: OfflineRecord, milkStep: Int = 5) {
         guard editor == nil, !busy, let selected,
               selected.babyClientUUID == record.babyClientUUID,
@@ -170,7 +177,7 @@ final class OfflinePeeModel: ObservableObject {
                       self.editor?.deletionAttemptID == attempt else { return }
                 self.editor?.finishDeletion(attemptID: attempt)
                 self.clearEditor()
-                self.message = deleted ? "已删除本机\(current.draft.kind.label)" : "这条记录已不在本机列表中"
+                self.message = deleted ? "已删除本机\(current.draft.label)" : "这条记录已不在本机列表中"
                 self.refresh()
             } catch {
                 guard !Task.isCancelled, let self,
@@ -181,19 +188,23 @@ final class OfflinePeeModel: ObservableObject {
     }
     func persist(_ frozen: LeziConfirmedRecord) {
         guard !busy, editor?.accepts(frozen) == true, let context = editorContext,
-              let kind = OfflineRecordKind(rawValue: frozen.draft.payload.type.rawValue),
               context.babyClientUUID == frozen.draft.babyClientUUID,
               editor?.beginPersistence(frozen) == true else { return }
         let store = store
+        let label = editor?.draft.label ?? "记录"
         let revision = editor?.expectedUpdatedAt
         save = Task { [weak self] in
             do {
                 // This returns only after SQLite COMMIT. Never complete on dispatch/enqueue.
-                _ = try await store.confirmRecord(frozen.draft, context: context, expectedUpdatedAt: revision)
+                if frozen.draft.item.recordType == .custom {
+                    _ = try await store.confirmCustomRecord(frozen.draft, context: context, expectedUpdatedAt: revision)
+                } else {
+                    _ = try await store.confirmRecord(frozen.draft, context: context, expectedUpdatedAt: revision)
+                }
                 guard !Task.isCancelled, let self, self.editor?.accepts(frozen) == true else { return }
                 self.editor?.finish(attemptID: frozen.attemptID)
                 self.clearEditor()
-                self.message = "已保存到本机：\(frozen.context.babyName)的\(kind.label)"
+                self.message = "已保存到本机：\(frozen.context.babyName)的\(label)"
                 self.refresh()
             } catch {
                 guard !Task.isCancelled, let self, self.editor?.accepts(frozen) == true else { return }

@@ -12,13 +12,20 @@ It does not connect to a family server. Use synthetic development data only.
 - Bootstrap shows loading or an honest error with retry. Failure never deletes,
   resets, substitutes an in-memory store, or imports an Android database.
 - The ready state wraps `OfflinePeeView(store:)` in `LeziTheme`: create/select a
-  local baby, explicitly confirm a no-photo pee record, cancel a draft, and read
-  persisted local records with pagination. No fabricated sample history is seeded.
+  local baby, explicitly confirm no-photo ordinary care or custom records, cancel
+  a draft, and read persisted local records with pagination. The current local
+  batch exposes 26 ordinary forms plus a dedicated custom catalog/record flow.
+  Manual nursing records point facts; it is not an active timer. No fabricated
+  sample history is seeded.
 - Local data survives an ordinary app process restart in the same Simulator
   sandbox. Deleting the app or erasing the Simulator can remove that sandbox.
 - No tab shell advertises unfinished features. There is no family enrollment,
-  disconnected-family ACL path, sync transport, media, other care record UI,
-  complete history/day timeline, widget, or full-product navigation here.
+  disconnected-family ACL path, sync transport, media, active nursing timer,
+  sleep UI, complete history/day timeline, widget, or full-product navigation here.
+- The current draft batch uses native schema 4 and preserves schema-1/2/3
+  data through atomic migration. Dedicated sleep storage/projectors do not expose
+  a sleep form. Custom definitions use UUID identity and retain historical record
+  title/icon snapshots; no family identity or Android numeric ID is fabricated.
 
 The target links the local `ios/` Swift package's `LeziUI`, `LeziStorage`, and
 `LeziCore` products. No project generator dependency is needed. The checked-in
@@ -85,10 +92,31 @@ run before claiming visible behavior. Package unit tests are separate:
 swift test --package-path ios --force-resolved-versions
 ```
 
-Manual synthetic-data checks still required: first launch with no babies; create
-and select baby; edit pee fields then cancel without saving; explicit confirmation
-and one persisted record; double-tap protection; relaunch reads the same baby and
-record; paginate; storage failure remains an error rather than an empty history;
-retry after the storage becomes available; large text and VoiceOver. Full-product,
-real-family, mixed-client and physical-iPhone acceptance remain outside this slice.
-See `docs/spec/ios-parity.md` and `ios/README.md` for the complete open work.
+### Current evidence, not a release claim
+
+The historical complete dual-green head `10016b6a` covered 22 ordinary UI types,
+199 Apple package tests and seven Simulator UI scenarios. It does not accept the
+current source. Published Food head `aa2011c` passed 212 Apple package tests and
+5,908 Android tests, but its parallel UI run timed out at 40 minutes with only
+three of eight scenarios completed. That Apple job did not pass full acceptance.
+
+The current draft schema-4/custom/manual-nursing batch passed the complete
+Linux regression: **209 tests, zero failures**. It has not yet been published or
+Apple-accepted. Full serial execution of ten Simulator scenarios is the next gate;
+a revised CI timeout/worker arrangement is not proof those tests passed. Apple CI
+is available; signed device installation and physical-iPhone behavior are separate.
+
+Manual synthetic-data checks still required: first launch with no babies;
+create/select baby; edit then cancel without saving; explicit confirmation and
+persisted records; double-tap protection; relaunch with retained baby, records and
+custom definitions; pagination; migration retaining existing data; custom rename/
+delete preserving historical snapshots; manual nursing validation; storage failure
+remaining an error rather than empty history; retry after recovery; large text and
+VoiceOver. Full-product, real-family, mixed-client and physical-iPhone acceptance
+remain outside this slice. Use `UITests/README.md` for the exact current automated
+scenario list rather than treating this checklist as test execution evidence.
+
+See [the parity specification](../../docs/spec/ios-parity.md) and
+[the package README](../README.md) for open work. The
+[sync-adapter design](../../docs/spec/ios-sync-adapter.md) remains a proposal;
+server release compatibility policy has not been decided or implemented.

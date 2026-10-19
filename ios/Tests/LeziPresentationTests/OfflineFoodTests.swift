@@ -109,7 +109,7 @@ final class OfflineFoodStateTests: XCTestCase {
                 let reread = try await reopened.recordDetails(row.clientUUID)
                 var state = try XCTUnwrap(OfflinePeeState(record: XCTUnwrap(reread), babyName: a.nickname, babyBirthday: a.birthday))
                 _ = try await reopened.selectBaby(b.clientUUID)
-                state.edit(kind: .pee); XCTAssertEqual(state.draft.kind.recordType, kind.recordType)
+                state.edit(kind: .pee); XCTAssertEqual(state.draft.kind?.recordType, kind.recordType)
                 state.edit(note: "仅改备注")
                 XCTAssertEqual(state.draft.payload, original)
                 guard case let .confirmed(edit) = state.confirm(nowMillis: 1000) else { return XCTFail() }

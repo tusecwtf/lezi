@@ -27,8 +27,10 @@ concurrency:
 jobs:
   contracts:
     runs-on: macos-15
-    # Full Simulator interaction coverage now includes eight independent record flows.
-    timeout-minutes: 40
+    # Full Simulator interaction coverage now includes ten independent record flows.
+    # Seven serial flows previously took 24.2 min; allow ten plus build/boot variance.
+    # The two-clone run stalled its second runner startup; avoid local fan-out.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - name: Record exact source and Apple toolchain
@@ -112,12 +114,13 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/lezi-ui-test-build" \
             -clonedSourcePackagesDirPath "$RUNNER_TEMP/lezi-source-packages" \
             -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
-            -parallel-testing-enabled YES \
-            -parallel-testing-worker-count 2 \
+            -parallel-testing-enabled NO \
             -resultBundlePath "$RUNNER_TEMP/lezi-ios-evidence/OfflinePeeAcceptance.xcresult" \
             ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
-          # Parallel UI tests run on clones. This base-device image is only smoke
-          # evidence; use the xcresult test outcomes for all eight acceptance flows.
+          # Explicit CLI override keeps the full scheme on one Simulator despite
+          # the scheme parallelizable flag. No test filters, skips, or retries.
+          # This post-test image is only smoke evidence; use per-case xcresult
+          # outcomes to verify all ten acceptance flows executed exactly once.
           xcrun simctl launch --terminate-running-process "$SIMULATOR_UDID" com.lezi.babylog.ios.dev
           sleep 2
           xcrun simctl io "$SIMULATOR_UDID" screenshot "$RUNNER_TEMP/lezi-ios-evidence/base-simulator-smoke-after-tests.png"
@@ -136,7 +139,7 @@ jobs:
         run: |
           {
             echo 'Portable tests, iOS SDK libraries, unsigned development build, first launch and bounded offline UI acceptance.'
-            echo 'The app supports a bounded offline baby/pee slice, not full LEZI feature or synchronization parity.'
-            echo 'UI acceptance covers synthetic baby creation, draft cancellation, confirmation and persistence after relaunch only.'
+            echo 'The app supports bounded offline baby and record flows, not full LEZI feature or synchronization parity.'
+            echo 'UI acceptance covers ten synthetic record flows including validation, editing, deletion isolation and relaunch persistence; inspect each xcresult outcome.'
             echo 'No mixed-client server proof, signing, real-family operation or physical-device acceptance is implied.'
           } >> "$GITHUB_STEP_SUMMARY"

@@ -214,3 +214,101 @@ legacy optionals through SQLite reopen/edit/delete, type/suggestion isolation,
 future rejection and opaque/interval protection. Two Apple-only model tests
 cover real CUD, original baby after selection changes, duplicate dispatch,
 rollback and discard. Apple SDK and UI acceptance remain separate CI gates.
+
+### Manual nursing (local implementation; Apple validation pending)
+
+`nursing` (母乳) uses the same ordinary confirmation/CAS/delete owner for manual
+point facts only. Left/right minutes default to `0`, order to `LR`, optional milk
+amount to empty, and new record mode to `end`. Both minutes must be integer
+0...1440 and at least one side must be positive. The source order choices are
+L/仅左, LR/先左后右, RL/先右后左, R/仅右; no additional matching between order and
+nonzero sides is imposed. Optional milk amount must be 1...999 ml when nonblank;
+it is user-entered, never estimated from minutes.
+
+The draft delegates domain validation to `NursingConfirmInput` only after strict
+text checks, and calls its payload adapter only after validation succeeds. That
+adapter's invalid-text zero/nil fallbacks never become a successful native fact.
+Minutes allow four BMP decimal-digit UTF-16 units, amount three; pasted invalid
+text remains visible and blocks confirmation instead of Android's digit-filtering
+and truncation. The duration issue focuses the left field, as Android does;
+order and optional amount have separate focus targets.
+
+Editing preserves the original `start`/`end` payload mode, timestamp and optional
+amount. Minutes never synthesize or change a timestamp. Known-schema legacy
+numeric values outside confirmation ranges remain visible for explicit correction;
+even a note-only edit cannot bypass strict validation. Unknown mode/order/opaque
+records remain read-only. Every record with an `endTimestamp` remains read-only
+in this bounded editor, including start-mode timer interval records, so editing
+cannot silently drop an endpoint.
+
+There is no timer entry, running-state claim, plan or automatic next-feed offer.
+Android timer completion uses a separate durable session/UUID, elapsed-time
+accumulation and frozen confirmation. Its global start/end setting chooses
+`timestamp=startedAt,endTimestamp=endedAt` for start, or
+`timestamp=endedAt,endTimestamp=nil` for end. The manual editor does not expose
+that timer preference or reinterpret its own point time from duration. Real timer
+persistence, restoration, completion replay/cleanup, background lifecycle and
+plan/media handoff require a separate future slice. Future facts remain blocked.
+
+Source references: `core/model/.../NursingConfirmInput.kt`,
+`designsystem/.../NursingConfirmFields.kt`, `QuickRecordDraft.kt:171–174,448–457,627–629`,
+`RecordPayload.kt:54–76`, `RecordMutationCoordinator.kt:580–677`, and
+`feature/timer/.../{NursingCompletionDraft,TimerState,TimerViewModel}.kt`.
+Seven portable tests cover every order, single/double sides, strict raw text and
+optional nil, both legacy modes, invalid legacy repair through a real COMMIT,
+interval/opaque protection, original-baby file reopen/edit/delete and future
+rejection. Two Apple-only model tests cover actual CUD, original baby across
+selection changes, duplicate dispatch, rollback and discard. These are separate
+from the pending ninth Simulator UI acceptance.
+
+### Concrete custom definitions and records (local implementation; Apple pending)
+
+The global **本机自定义项目** catalog is independent of baby selection. It offers
+create, name/icon editing, explicit delete confirmation, and explicit up/down
+ordering confirmation. Names trim using AndroidText, new/changed input is limited
+to 20 UTF-16 units, and unchanged legacy long names remain usable. Invalid text
+is retained rather than Android's on-change `take(20)`. The store enforces exact
+name uniqueness, a ten-live-definition limit, generation ownership and revision
+CAS. The eight slot meanings remain star/heart/sun/moon/music/circle/triangle/
+diamond; the native component uses corresponding SF Symbols, not a claim of
+pixel-identical Android vector paths. Definition icon selection does not mutate
+historical record icons. Ordering is device-local and does not change business
+revision or dirty flags. No family/shared-delete or local-hide behavior is implied.
+
+`OfflineRecordTarget` is `.builtIn(OfflineRecordKind)` or `.custom(UUID)`.
+`OfflineRecordKind` remains the 26 built-ins, so no bare custom can enter the
+existing picker or reach `builtIn(.custom)!`. The Core UUID factory creates a
+canonical concrete custom identity. The draft's optional kind is only a built-in
+projection; target is authoritative and custom identity cannot be changed by
+`editing(kind:)`. Existing built-in initialization and accessibility IDs remain.
+The single sheet host switches between the catalog and a record editor; it never
+presents two sheets concurrently.
+
+New custom records require selecting a live concrete definition and a baby.
+Title/icon are captured from that selection. The record form edits only title
+(required, 30 UTF-16) and detail (optional, 200); the icon snapshot is read-only.
+Record fields trim on confirmation, preserve unchanged legacy long input, and
+retain/reject new overlong input. Catalog rename/icon edits do not restamp an
+open draft or historical record. Creating from a subsequently deleted definition
+fails without clearing the draft. Known historical records still edit after the
+definition is deleted, retaining original baby, definition UUID, icon and CAS
+revision. Missing associations, unknown documents and unsupported intervals stay
+read-only. Device-local numeric custom IDs are never guessed into UUID identity.
+The Core field named `familyCustomUUID` is only a stable identity carrier here;
+it creates no membership, family session or synchronization capability.
+
+Record confirmation still uses the same immutable attempt, busy/dirty/discard
+owner, but dispatches concrete custom facts to `confirmCustomRecord`; ordinary
+facts continue through `confirmRecord`. Definition operations use their own
+small catalog owner with captured generation/revision and duplicate-dispatch
+busy gates. Draft clearing and success messages happen only after COMMIT;
+rollback keeps inputs. Catalog saves/deletes/reorders never write a baby record.
+
+Sources: `core/ui/.../CustomItemManageDialog.kt:368–442`,
+`QuickRecordPurposeTextFields.kt:35–76`, `QuickRecordDraft.kt:680–685,850–853`,
+`designsystem/.../LeziCustomItemGlyphs.kt`, and `OfflineStore+Custom.swift`.
+Four portable tests cover concrete targets, limits, readonly cases and actual
+SQLite restart/rename/delete/history editing/cross-definition refusal. Five
+Apple-only model tests cover catalog CRUD/reorder/restart, rollback/duplicate
+save/discard, read-failure retention, session-bound close versus cancel-edit, and record original-baby/rename/delete-history/rollback behavior.
+These and the tenth UI acceptance remain pending Apple SDK/runtime validation.

@@ -4,11 +4,12 @@ import LeziCore
 import LeziStorage
 
 /// Embed in an Apple host with its real file-backed OfflineStore and LeziTheme.
-/// Development slice only: no networking, membership, other record kinds, media, or app navigation.
+/// Development host only: no family networking, media, or complete product navigation.
 @MainActor
 public struct OfflinePeeView: View {
     @Environment(\.leziTheme) private var theme
     @StateObject private var model: OfflinePeeModel
+    @StateObject private var catalog: OfflineCustomCatalogModel
     @State private var nickname = ""
     @State private var birthday = Date()
     @State private var creatingBaby = false
@@ -16,12 +17,15 @@ public struct OfflinePeeView: View {
     @AppStorage("lezi.offline.infantFeverAdviceEnabled") private var infantFeverAdviceEnabled = true
     @FocusState private var focusedField: String?
 
-    public init(store: OfflineStore) { _model = StateObject(wrappedValue: OfflinePeeModel(store: store)) }
+    public init(store: OfflineStore) {
+        _model = StateObject(wrappedValue: OfflinePeeModel(store: store))
+        _catalog = StateObject(wrappedValue: OfflineCustomCatalogModel(store: store))
+    }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: theme.density.sectionGap) {
             LeziText("离线开发组件 · 宝宝与本机护理记录", role: .title)
-            LeziText("仅保存在此设备。支持无照片排泄、日常、症状、用药、就医、疫苗、成长测量、奶量、体温与辅食/点心/饮料记录；护理计划尚未开放。", role: .label)
+            LeziText("仅保存在此设备。支持无照片排泄、日常、症状、用药、就医、疫苗、成长测量、手动母乳、奶量、体温与辅食/点心/饮料记录；护理计划尚未开放。", role: .label)
             if let message = model.message { LeziText(message).accessibilityIdentifier("offline.result") }
             babySelection
             ScrollView {
@@ -33,12 +37,14 @@ public struct OfflinePeeView: View {
                             .accessibilityIdentifier("offline.pee.new")
                             .disabled(model.selected == nil || model.busy)
                             .frame(minHeight: theme.primaryTouchMinimum)
+                        Button("本机自定义项目") { catalog.open() }
+                            .disabled(model.busy).accessibilityIdentifier("offline.catalog.open")
                         recordList
                     }.frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(theme.pageInset)
-        .sheet(isPresented: Binding(get: { model.editor != nil }, set: { if !$0 { model.closeEditor() } })) {
+        .sheet(isPresented: Binding(get: { model.editor != nil || catalog.isPresented }, set: { if !$0 { if model.editor != nil { model.closeEditor() } else { catalog.close() } } })) {
             if let editor = model.editor {
                 VStack(spacing: 0) {
                     HStack {
@@ -61,12 +67,17 @@ public struct OfflinePeeView: View {
                     Button("放弃修改", role: .destructive) { model.discardChanges() }
                         .accessibilityIdentifier("offline.discard.confirm")
                 } message: { Text("这些修改尚未写入本机。") }
-                .alert("删除这条\(model.editor?.draft.kind.label ?? "记录")？", isPresented: $model.showingDeleteConfirmation) {
+                .alert("删除这条\(model.editor?.draft.label ?? "记录")？", isPresented: $model.showingDeleteConfirmation) {
                     Button("取消", role: .cancel) { model.cancelDelete() }
                         .accessibilityIdentifier("offline.delete.cancel")
                     Button("确认删除", role: .destructive) { model.confirmDelete() }
                         .accessibilityIdentifier("offline.delete.confirm")
                 } message: { Text("确认后将从本机记录列表移除；取消不会改动记录。") }
+            } else if catalog.isPresented {
+                OfflineCustomCatalogView(model: catalog, canCreateRecord: model.selected != nil && !model.busy) { definition in
+                    model.openEditor(definition: definition)
+                    if model.editor != nil { catalog.isPresented = false }
+                }
             }
         }
         .task { model.refresh() }
@@ -107,7 +118,7 @@ public struct OfflinePeeView: View {
     }
     private var recordList: some View {
         VStack(alignment: .leading, spacing: 12) {
-            LeziText("本机记录（当前支持排泄、日常、健康、成长、奶量、体温与辅食/点心/饮料记录）", role: .titleSmall)
+            LeziText("本机记录（当前支持排泄、日常、健康、成长、手动母乳、奶量、体温与辅食/点心/饮料记录）", role: .titleSmall)
             if model.records.isEmpty {
                 LeziText(model.selected == nil ? "创建或选择宝宝后查看记录" : "尚无本机记录")
                     .accessibilityIdentifier("offline.records.empty")
@@ -144,7 +155,7 @@ public struct OfflinePeeView: View {
         LeziConfirmationPanel(
             session: Binding(get: { model.editor?.session ?? editor.session },
                              set: { model.editor?.session = $0 }),
-            draft: editor.draft.confirmation, title: "\(editor.isEditing ? "编辑" : "新建")\(editor.draft.kind.label) · 本机",
+            draft: editor.draft.confirmation, title: "\(editor.isEditing ? "编辑" : "新建")\(editor.draft.label) · 本机",
             confirmTitle: editor.isEditing ? "保存修改" : "确认保存到本机",
             canWrite: true, externallyBusy: model.busy || editor.deletionAttemptID != nil,
             preventDismiss: editor.isDirty,
@@ -156,12 +167,12 @@ public struct OfflinePeeView: View {
                     get: { Date(timeIntervalSince1970: Double(model.editor?.draft.timestampMillis ?? editor.draft.timestampMillis) / 1000) },
                     set: { model.editor?.edit(timestampMillis: Int64($0.timeIntervalSince1970 * 1000)) }
                 ))
-                if editor.isEditing {
-                    LeziText("类型：\(editor.draft.kind.label)（不可更改）", role: .label)
+                if editor.isEditing || editor.draft.kind == nil {
+                    LeziText("类型：\(editor.draft.label)（不可更改）", role: .label)
                         .accessibilityIdentifier("offline.excretion.kind.fixed")
                 } else {
                     Picker("记录类型", selection: Binding(
-                        get: { model.editor?.draft.kind ?? editor.draft.kind },
+                        get: { model.editor?.draft.kind ?? editor.draft.kind ?? .pee },
                         set: { model.editor?.edit(kind: $0) }
                     )) {
                         ForEach(OfflineRecordKind.allCases, id: \.self) { kind in
@@ -170,7 +181,7 @@ public struct OfflinePeeView: View {
                     }.accessibilityIdentifier("offline.excretion.kind")
                 }
                 excretionFields(editor)
-                if let kind = editor.draft.kind.milkKind {
+                if let kind = editor.draft.kind?.milkKind {
                     OfflineMilkFields(kind: kind, draft: Binding(
                         get: { model.editor?.draft.milk ?? editor.draft.milk },
                         set: { model.editor?.edit(milk: $0) }
@@ -183,7 +194,13 @@ public struct OfflinePeeView: View {
                         }
                     ), focus: $focusedField)
                 }
-                if let kind = editor.draft.kind.foodKind {
+                if editor.draft.kind == .nursing {
+                    OfflineNursingFields(draft: Binding(
+                        get: { model.editor?.draft.nursing ?? editor.draft.nursing },
+                        set: { model.editor?.edit(nursing: $0) }
+                    ), focus: $focusedField)
+                }
+                if let kind = editor.draft.kind?.foodKind {
                     OfflineFoodFields(kind: kind, draft: Binding(
                         get: { model.editor?.draft.food ?? editor.draft.food },
                         set: { model.editor?.edit(food: $0) }
@@ -201,14 +218,22 @@ public struct OfflinePeeView: View {
                         }
                     ), birthday: editor.babyBirthday, timestampMillis: editor.draft.timestampMillis, focus: $focusedField)
                 }
-                OfflineGrowthFields(kind: editor.draft.kind, draft: Binding(
+                if let kind = editor.draft.kind {
+                OfflineGrowthFields(kind: kind, draft: Binding(
                     get: { model.editor?.draft.growth ?? editor.draft.growth },
                     set: { model.editor?.edit(growth: $0) }
                 ), focus: $focusedField)
-                OfflineHealthFields(kind: editor.draft.kind, draft: Binding(
+                OfflineHealthFields(kind: kind, draft: Binding(
                     get: { model.editor?.draft.health ?? editor.draft.health },
                     set: { model.editor?.edit(health: $0) }
                 ), focus: $focusedField)
+                }
+                if case let .custom(definitionID) = editor.draft.target {
+                    LeziText("具体项目关联已固定", role: .label)
+                        .accessibilityIdentifier("offline.custom.definition")
+                        .accessibilityValue(definitionID.uuidString)
+                    OfflineCustomRecordFields(draft: Binding(get: { model.editor?.draft.custom ?? editor.draft.custom }, set: { model.editor?.edit(custom: $0) }), focus: $focusedField)
+                }
                 if editor.draft.kind == .diary {
                     TextField("日记正文", text: Binding(
                         get: { model.editor?.draft.body ?? editor.draft.body },
@@ -244,12 +269,12 @@ public struct OfflinePeeView: View {
     }
     @ViewBuilder
     private func excretionFields(_ editor: OfflinePeeState) -> some View {
-        if editor.draft.kind.hasPee {
+        if editor.draft.kind?.hasPee == true {
             choice("尿量", id: "offline.pee.amount", values: 1...3, label: OfflineExcretionLabels.pee,
                    selection: Binding(get: { model.editor?.draft.amount ?? editor.draft.amount },
                                       set: { model.editor?.edit(amount: $0) }))
         }
-        if editor.draft.kind.hasStool {
+        if editor.draft.kind?.hasStool == true {
             choice("便量", id: "offline.stool.amount", values: 1...4, label: OfflineExcretionLabels.amount,
                    selection: Binding(get: { model.editor?.draft.stoolAmount ?? editor.draft.stoolAmount },
                                       set: { model.editor?.edit(stoolAmount: $0) }))
@@ -271,6 +296,13 @@ public struct OfflinePeeView: View {
     }
     @ViewBuilder
     private func recordSummary(_ record: OfflineRecord) -> some View {
+        if record.type == .custom, !record.isOpaque {
+            LeziText("自定义记录", role: .titleSmall).accessibilityIdentifier("offline.record.kind")
+            if let id = record.customDefinitionUUID {
+                LeziText("具体项目关联已固定", role: .label).accessibilityIdentifier("offline.record.custom.definition")
+                    .accessibilityValue(id.uuidString)
+            }
+        }
         if let kind = OfflineRecordKind(rawValue: record.rawType), !record.isOpaque {
             LeziText(kind.label, role: .titleSmall).accessibilityIdentifier("offline.record.kind")
         }
@@ -286,6 +318,12 @@ public struct OfflinePeeView: View {
             OfflineHealthSummary(payload: payload)
         case let .milk(_, amount, prepared, duration):
             OfflineMilkSummary(amount: amount, prepared: prepared, duration: duration)
+        case let .custom(title, detail, icon):
+            LeziText(title).accessibilityIdentifier("offline.record.custom.title")
+            if let detail { LeziText(detail).accessibilityIdentifier("offline.record.custom.detail") }
+            LeziText("图标快照：\(OfflineCustomIcons.label(icon))", role: .label).accessibilityIdentifier("offline.record.custom.icon")
+        case let .nursing(left, right, order, amount, mode):
+            OfflineNursingSummary(left: left, right: right, order: order, amount: amount, mode: mode)
         case let .food(_, content, amount):
             LeziText(content).accessibilityIdentifier("offline.record.food.content")
             LeziText(amount ?? "未填量").accessibilityIdentifier("offline.record.food.amount")

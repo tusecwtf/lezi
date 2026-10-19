@@ -5,7 +5,7 @@ service. It is **not a complete iOS product, signed device app or sync client**.
 contains no backend fork, network calls, account bootstrap, deployment tooling,
 or Android-version impersonation.
 `App/` supplies an unsigned Simulator-only development host for the bounded
-offline baby/pee flow. Its Apple build and launch evidence are separate from
+offline baby, ordinary care and custom-record flows. Its Apple build and launch evidence are separate from
 the portable package tests; no production distribution is configured.
 
 ## Toolchain and platforms
@@ -96,12 +96,24 @@ corpus scenarios remain unimplemented and are not silently counted as passing.
   Negative-zero integer tokens are deliberately rejected at this boundary until
   their cross-language pre-normalization hash semantics are proven.
 - `LeziStorage` is a real file-backed SQLite **offline-only** vertical slice.
-  Verified checkpoint `10016b6a` includes native schema **3**, with atomic,
-  data-preserving migration from schema 1 or 2. It supports 26 ordinary no-media
-  record types plus dedicated sleep storage. Generic `confirmRecord` still rejects
-  sleep; custom entries and photos remain unsupported. Sleep UI is not exposed.
+  The current draft batch uses native schema **4**, with atomic,
+  data-preserving migration from schema 1, 2 or 3. It supports 26 ordinary
+  no-media record types plus dedicated sleep and custom-definition/record paths.
+  Generic `confirmRecord` still rejects sleep and custom; their dedicated writers
+  preserve their separate identity and transaction contracts. Photos remain
+  unsupported. Sleep has storage/projector APIs, but no exposed or accepted UI.
   Confirmation saves facts and dirty markers atomically. Original-baby ownership,
   revision CAS, rollback, replay and opaque preservation remain enforced.
+- The draft custom slice adds a concrete local catalog and dedicated record
+  create/edit/soft-delete UI. Definitions have stable UUIDs and separate local
+  ordering; records retain title/icon snapshots across definition changes. It does
+  not invent Android numeric IDs or family authority. Catalog/record saves remain
+  explicit-confirm and revision/context guarded.
+- The draft manual nursing form completes **26 ordinary forms**, alongside
+  the dedicated custom flow. It records left/right minutes, order and optional
+  amount as point facts, retaining supported historical record-mode values when
+  editing. It does not implement an active nursing timer, background timing,
+  interval inference or the sleep UI.
 - Dedicated sleep writes are `createSleepStart`, `recordCompletedSleep`,
   `recordWake`, `editSleepStart`, `editCompletedSleep`, `updateWake`,
   `withdrawWake`, and `selectEffectiveWake`. `sleepPage` batch-projects roots and
@@ -118,41 +130,37 @@ corpus scenarios remain unimplemented and are not silently counted as passing.
 
 Evidence boundaries (2026-10-19):
 
-The latest verified **dual-green** checkpoint is **`10016b6a`**, with **22 bounded
-UI types** (including milk and temperature), native schema **3**, and dedicated
-sleep storage. [Apple run 39329817431](https://github.com/tusecwtf/lezi/actions/runs/39329817431)
-passed **199 package tests + seven Simulator UI tests**;
-[Android run 39329817430](https://github.com/tusecwtf/lezi/actions/runs/39329817430)
-passed **5,908 tests**. UI duration was 1,450.014 seconds (milk 249.255 seconds,
-temperature 184.565 seconds); artifact `12225776079` contains the acceptance
-evidence. Schema **1/2→3** migration preserves data atomically. Storage supports
-26 ordinary no-media types plus dedicated sleep commands. Fresh schema-3 host
-launch is verified, but **sleep UI is not exposed or accepted**. Database schema
-and payload document schema versions are separate concepts.
+- **Historical complete dual-green checkpoint `10016b6a`:** 22 bounded UI types,
+  native schema 3 and dedicated sleep storage. [Apple run 39329817431](https://github.com/tusecwtf/lezi/actions/runs/39329817431)
+  passed 199 package tests and seven Simulator UI tests; [Android run 39329817430](https://github.com/tusecwtf/lezi/actions/runs/39329817430)
+  passed 5,908 tests. This evidence does not cover the subsequent Food or current
+  schema-4/custom/nursing batch.
+- **Published Food head `aa2011c`:** Apple package testing passed 212 tests, but the
+  parallel Simulator suite reached its 40-minute job timeout with only three of
+  eight scenarios completed. This is **not a successful Apple acceptance run**.
+  Android passed 5,908 tests. Food brought the bounded UI to 25 ordinary types;
+  neither package success nor partial UI execution accepts the full head.
+- **Current draft schema-4/custom/manual-nursing batch:** the complete
+  Linux regression passed **209 tests, zero failures** (46 storage, 77 portable presentation,
+  61 domain, 25 core). Apple-only model and Simulator checks are
+  not included in that number. The source exposes 26 ordinary forms plus custom;
+  this batch is **not Apple-accepted**. Full ten-scenario serial
+  Simulator acceptance is the next gate; its revised execution budget does not
+  constitute a test result. Sleep remains storage/projector-only, without UI.
 
-**Current local, unpublished Food expansion:** baby_food, snack and drink bring
-UI to **25 types**. The Food slice passed **190 Linux tests**. Its two new
-Apple-only model tests and eighth UI scenario await Apple validation. The proposed
-eight-class UI suite with two parallel Simulator workers is also unverified; the
-seven-test green run above does not validate that parallel execution setup.
 Food keeps untouched optional legacy amounts exactly (nil, empty, Chinese,
 full-width and whitespace), normalizes only new/changed amounts, and requires a
 parseable amount only for new/changed baby-food facts. Guidance uses the original
 baby's birthday and the record's local date, with Java-compatible completed
 calendar months; suggestion buttons change only content.
 
-A separate **local schema-4 custom-storage workstream** is ready but is excluded
-from this Food publication. Its combined local 195-test result is not the Food
-slice's 190-test result and is not Apple or published evidence. Custom workflows
-remain pending separate integration and validation; no custom UI is claimed.
-
 The three-type recent-amount map is read in one SQLite snapshot through bounded
 keyset pages across history. It follows Android's amount-only 1–999 filtering,
 not full optional-payload validation; save/edit still enforce full validation.
 Step 5/10/15 is a global local AppStorage preference. Android's day-list lastAmount
 launch override is not implemented or simulated by recent values in this host.
-No custom-item workflow, complete app, signed install or mixed-client sync claim
-follows from these counts.
+The local custom workflow is implemented in the draft batch above, but no
+complete app, signed install or mixed-client sync claim follows from these counts.
 
 Two source-derived compatibility questions remain open, without a demonstrated
 production failure: Kotlin's hash projection omits null media dimensions while
@@ -171,4 +179,6 @@ retry/deadline policy, directory caching, lifecycle/heartbeat scheduling and
 isolated cross-end integration tests. No pending envelope is currently sent,
 and no claimed parity or usable-product milestone follows from these unit tests.
 
-See `Sources/LeziUI/README.md` for presentation-slice scope as it lands.
+See `Sources/LeziUI/README.md` for presentation-slice scope as it lands. The
+[next sync-adapter design](../docs/spec/ios-sync-adapter.md) remains a proposal;
+its release compatibility policy is neither decided nor implemented.

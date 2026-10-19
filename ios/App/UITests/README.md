@@ -1,8 +1,8 @@
 # Offline Simulator acceptance
 
-The eight `Offline*AcceptanceTests` classes in `OfflinePeeAcceptanceTests.swift` exercise the actual `LeziDevelopment` application
+The ten `Offline*AcceptanceTests` classes in `OfflinePeeAcceptanceTests.swift` exercise the actual `LeziDevelopment` application
 and its ordinary file-backed SQLite store. Run on a fresh, ephemeral Simulator
-sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, `UI-Daily-003`, `UI-Health-004`, `UI-Growth-005`, `UI-Milk-006`, `UI-Temperature-007`, and `UI-Food-008` names are
+sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, `UI-Daily-003`, `UI-Health-004`, `UI-Growth-005`, `UI-Milk-006`, `UI-Temperature-007`, `UI-Food-008`, `UI-Nursing-009`, and `UI-Custom-010` names are
 unique in that fresh sandbox, one per test. Reusing an already-tested sandbox intentionally
 fails rather than deleting or modifying existing records to make the test pass.
 No special app launch arguments, fake stores, reset paths, or network are used.
@@ -87,6 +87,28 @@ The current-day baby receives the exact pre-six-month stage and disclaimer,
 which have no suggestion buttons. Suggestion-button interaction is not exercised
 by this UI flow; content-only suggestion mutation is covered by model tests.
 
+The manual-nursing flow rejects zero minutes on both sides without changing the
+inputs. It saves a left-only fact with no optional milk quantity, relaunches,
+then edits right-side minutes, side order, and the optional amount. A second
+relaunch checks the same UUID, type, end-record mode, note, and updated values.
+It checks the actual manual-only scope and no-inferred-time wording; it does not
+start or simulate a timer. Legacy start-mode and invalid-data correction remain
+covered by model tests. The late nursing menu option uses one longer menu-bound
+reveal gesture; previous callers keep the original default gesture endpoint.
+
+The custom flow creates two device-global catalog definitions with distinct icons,
+confirms both upward and downward ordering, and creates a record through one
+specific definition. Renaming that definition and changing its icon must leave
+the saved title/icon snapshot unchanged. After the first relaunch it checks the
+catalog order, cancels deletion once, then confirms deletion of that definition.
+Its new-record entry disappears while the existing record remains editable.
+After editing the record detail, a second relaunch verifies the same record and
+definition UUID, original title/icon snapshot, unchanged note, and the surviving
+catalog item. Catalog helpers await after-COMMIT results and editor closure;
+keyboard reveal uses visible non-interactive label anchors because this catalog
+has no inner padding or confirmation footer. This is local catalog behavior,
+without family-sharing or synchronization claims.
+
 Expectations poll observable UI states; there are no fixed sleeps. Cancel uses
 the existing `取消` button label; other controls and history probes use stable IDs.
 
@@ -107,8 +129,7 @@ xcodebuild test \
   -clonedSourcePackagesDirPath ios/App/SourcePackages \
   -disableAutomaticPackageResolution \
   -onlyUsePackageVersionsFromResolvedFile \
-  -parallel-testing-enabled YES \
-  -parallel-testing-worker-count 2 \
+  -parallel-testing-enabled NO \
   -resultBundlePath ios/App/OfflinePeeAcceptance.xcresult \
   ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
 ```
@@ -123,29 +144,34 @@ inspection on Linux cannot establish Apple compilation or UI acceptance. A
 successful macOS test execution and its `.xcresult` are required evidence.
 
 
-## Parallel execution and evidence
+## Serial execution and evidence
 
-Each of the eight flows is a separate `XCTestCase` subclass with one test method.
+Each of the ten flows is a separate `XCTestCase` subclass with one test method.
 `OfflineAcceptanceSupport` has no test methods and shares helpers without copying
 them. All original test actions, assertions, and synthetic data names are retained.
-The shared scheme enables parallel execution and CI requests exactly two workers,
-keeping the full scheme test action and the 40-minute job limit. There are no test
-filters, skips, or retries.
+CI explicitly passes `-parallel-testing-enabled NO`, overriding the shared
+scheme's parallelizable flag. The complete scheme runs serially on one concrete
+Simulator; there are no test filters, skips, retries, or reduced assertions.
+Use a fresh Simulator with synthetic data only. Each flow owns its baby and
+records, so shared storage does not require resetting data between flows.
 
-XCTest distributes **classes**, not individual methods within one class, across
-runners. Each Simulator runner uses a separate clone of the selected destination;
-a worker may execute several classes serially. Assignment is not deterministic,
-so flows cannot rely on a particular clone or order. See Apple's
-[Xcode 10 testing release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-10-release-notes)
-and [Get your test results faster](https://developer.apple.com/videos/play/wwdc2020/10221/).
-Use a fresh base Simulator with synthetic data only, even when using clones.
+The two-worker experiment on head `aa2011cf` reached the 40-minute job limit.
+Both clones booted, but clone 2 installed its runner and then waited in runner
+launch until cancellation. Clone 1 completed only diaper, milk and pee, then
+started daily. The evidence does not establish resource contention as the root
+cause, nor any parallel speedup. CI therefore returns to the previously verified
+single-Simulator execution mode rather than adding launch retries.
 
-`first-launch.png` and `base-simulator-smoke-after-tests.png` capture only the
-original base Simulator's smoke launch. They do **not** show the clones' final
-acceptance data and do not establish that any acceptance test passed. The retained
-`OfflinePeeAcceptance.xcresult` is the evidence for all eight test outcomes and
-runner assignments. Review its per-test results and available diagnostics in
-Xcode; this change does not add a guaranteed final-state screenshot attachment.
-Apple CI must verify that all eight methods are discovered once, execute on the
-two workers, and pass. Linux syntax/configuration checks cannot establish that
-runtime behavior or a speedup.
+The job budget is 60 minutes. The previous seven-flow serial run took 1450 seconds
+(24.2 minutes) for UI execution. Planning allowance for three additional flows,
+build/Simulator startup and hosted-runner variance motivates the larger bound;
+it is not a measured duration or performance claim for the ten-flow suite.
+
+`first-launch.png` and `base-simulator-smoke-after-tests.png` are smoke images.
+The latter shows only the state left on the selected Simulator after the suite,
+not a separate final-state image for each flow. Neither establishes that any
+test passed. The retained `OfflinePeeAcceptance.xcresult` is authoritative for
+all ten test outcomes and runner assignments. Apple CI must verify that each
+method is discovered once, executes once, and passes with no skips. Inspect
+per-test diagnostics in Xcode; Linux syntax/configuration checks cannot establish
+Apple runtime acceptance.
