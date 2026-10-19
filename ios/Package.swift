@@ -1,6 +1,13 @@
 // swift-tools-version: 6.0
 import PackageDescription
 
+#if os(Linux)
+let sqlitePkgConfig: String? = "sqlite3"
+#else
+// Apple builds must link the selected SDK's SQLite, never a host Homebrew dylib.
+let sqlitePkgConfig: String? = nil
+#endif
+
 let package = Package(
     name: "Lezi",
     platforms: [.iOS(.v17), .macOS(.v14)],
@@ -16,8 +23,8 @@ let package = Package(
         // CI uses --force-resolved-versions rather than updating dependencies.
     ],
     targets: [
-        .systemLibrary(name: "CSQLite", pkgConfig: "sqlite3", providers: [
-            .apt(["libsqlite3-dev"]), .brew(["sqlite3"]),
+        .systemLibrary(name: "CSQLite", pkgConfig: sqlitePkgConfig, providers: [
+            .apt(["libsqlite3-dev"]),
         ]),
         .target(name: "LeziStorage", dependencies: ["LeziCore", "CSQLite"]),
         .target(name: "LeziCore", dependencies: [
