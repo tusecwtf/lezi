@@ -449,8 +449,12 @@ class RealSyncPortIdentityClearTest {
         val rig = SyncRig(session = retained)
         rig.awaitStartupRecovery()
         assertThat(
-            withTimeout(2_000) {
-                rig.port.status().filter { it == SyncStatus.ReauthRequired }.first()
+            // Startup recovery does not await the independent IO session collector.
+            // Bound that real-dispatcher publication with real time, not runTest time.
+            withContext(Dispatchers.Default.limitedParallelism(1)) {
+                withTimeout(2_000) {
+                    rig.port.status().filter { it == SyncStatus.ReauthRequired }.first()
+                }
             },
         ).isEqualTo(SyncStatus.ReauthRequired)
         assertThat(rig.preferences.current().familyId).isEqualTo("family-a")
