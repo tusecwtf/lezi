@@ -82,7 +82,7 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/lezi-app-build" \
             -clonedSourcePackagesDirPath "$RUNNER_TEMP/lezi-source-packages" \
             -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
-            CODE_SIGNING_ALLOWED=NO
+            ONLY_ACTIVE_ARCH=NO CODE_SIGNING_ALLOWED=NO
       - name: Smoke launch on a clean iPhone Simulator
         env:
           APP_PATH: ${{ runner.temp }}/lezi-app-build/Build/Products/Debug-iphonesimulator/LeziDevelopment.app
@@ -100,16 +100,20 @@ jobs:
           xcrun simctl io "$simulator" screenshot "$RUNNER_TEMP/lezi-ios-evidence/first-launch.png"
       - name: Exercise real offline confirmation and relaunch
         run: |
+          # The generic build above remains a universal Simulator compilation gate.
+          # A concrete-device test must use the same active architecture for the
+          # app, Swift package products, and test runner. Keep its intermediates
+          # separate so it cannot overwrite the universal build's package objects.
           xcodebuild test \
             -project ios/App/LeziDevelopment.xcodeproj -scheme LeziDevelopment \
             -configuration Debug -sdk iphonesimulator \
             -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
-            -derivedDataPath "$RUNNER_TEMP/lezi-app-build" \
+            -derivedDataPath "$RUNNER_TEMP/lezi-ui-test-build" \
             -clonedSourcePackagesDirPath "$RUNNER_TEMP/lezi-source-packages" \
             -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
             -parallel-testing-enabled NO \
             -resultBundlePath "$RUNNER_TEMP/lezi-ios-evidence/OfflinePeeAcceptance.xcresult" \
-            CODE_SIGNING_ALLOWED=NO
+            ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
           xcrun simctl launch --terminate-running-process "$SIMULATOR_UDID" com.lezi.babylog.ios.dev
           sleep 2
           xcrun simctl io "$SIMULATOR_UDID" screenshot "$RUNNER_TEMP/lezi-ios-evidence/offline-acceptance.png"
