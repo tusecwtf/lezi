@@ -1,39 +1,74 @@
 # iOS offline records: bounded editor expansion plan
 
-> Status as of 2026-10-19: **six-type offline UI verified at `9752aaa`;
-> seven additional health types implemented locally, pending new-head Apple CI**.
+> Status as of 2026-10-19: **18-type offline UI verified at `3f8e449`; dedicated sleep
+> storage is locally implemented but unpublished, with no sleep UI**.
 > This document refines the [iOS parity inventory](ios-parity.md), not the Android
 > product contract. Native offline mode is not permission to bypass membership/ACL
 > while an enrolled device cannot reach its server.
 
 ## 1. Implemented checkpoint versus proposed work
 
-The latest verified published checkpoint is **`9752aaa`**: green Android CI
-(**5,908 tests**) and Apple CI (**144 package tests plus three real Simulator
-UI tests**). Its bounded UI supports `pee`, `poop`, `both_diaper`, `diary`, `bath`,
-and `walk`: create, revision-checked edit, explicit soft-delete, dirty-exit
-confirmation, and restart persistence. The unsigned development host uses a
-persistent sandbox store and does not seed fake history or silently fall back to
-an in-memory store. This is not full-product, signed-device, family/sync, media,
-visual/accessibility, or physical installation acceptance.
+The earlier **dual-green** checkpoint **`f7ca7571`** covered 13 forms:
+Android **5,908 tests**, Apple **151 package tests plus four real Simulator UI
+tests**. Its bounded UI supports `pee`, `poop`, `both_diaper`, `diary`, `bath`,
+`walk`, `cough`, `rash`, `vomit`, `injury`, `medicine`, `hospital`, and `vaccine`.
+These use genuine create, revision-checked edit, explicit soft-delete, dirty-exit
+confirmation and restart persistence. The health UI scroll failure was resolved
+by a test gesture starting in measured content padding rather than a TextField;
+the application layout was not altered to hide it.
 
-The native schema 1→2 migration preserves existing data. Unified SQLite storage
-supports create/edit/soft-delete for **26 ordinary no-media types**. Its APIs are
-`confirmRecord`, `recordDetails`, `recordPage`, and `deleteRecord`; older pee APIs
-remain compatibility wrappers. Unknown documents are preserved/readable and
-cannot be silently rewritten. Sleep/custom/media writes remain rejected. Native
-database schema version and payload document schema version are separate concepts.
-Library capability does not imply all 26 forms are implemented.
+The latest verified **dual-green** checkpoint **`3f8e449`** adds `height`, `weight`, `head`, `chest`, and `foot_size`,
+for **18 verified bounded UI types**. [Android run 39318117835](https://github.com/tusecwtf/lezi/actions/runs/39318117835)
+passed **5,908 tests**; [Apple run 39318117841](https://github.com/tusecwtf/lezi/actions/runs/39318117841)
+passed **159 package tests plus five Simulator UI tests**. UI execution totaled
+863.188 seconds, including 147.704 seconds for growth; artifact `12218688971`
+contains the acceptance results. These results cover this published tree only. Growth
+preserves unchanged original payload precision/unit rather than Android's lossy
+two-decimal editor refill. Changed values use shared Core range/conversion rules;
+weight kg converts to integer g, with rounded zero refused. This is an explicit
+native interaction difference, not exact Android editor parity.
 
-**Current local, unpublished expansion:** `cough`, `rash`, `vomit`, `injury`,
-`medicine`, `hospital`, and `vaccine` extend the same owner to **13 UI types**.
-The fields, typed payloads, original-baby binding, immutable edit type, captured
-revision, explicit confirmation, commit-before-success, error retention and
-save/delete duplicate-task gates are implemented. A bounded health field value
-and SwiftUI component avoid duplicating the transaction flow. Local feature
-regression passed **30 portable tests**, including six new health tests; one new
-Apple-only model test and the fourth Simulator UI path await new-head Apple CI.
-These changes do not inherit acceptance from `9752aaa`.
+**Current unpublished storage work:** native schema **1/2→3** migration preserves
+existing data atomically. Unified SQLite storage supports **26 ordinary no-media
+types plus dedicated sleep commands**. The locked full-package Linux run passed
+**159 tests: 38 Storage, 48 Presentation, 48 Domain, 25 Core**. This is local
+verification, not Apple acceptance and not part of either published checkpoint
+above. The development host still has **no sleep UI**; concrete custom items and
+media remain unsupported. Database schema version and payload document schema
+version are separate concepts.
+
+Ordinary APIs remain `confirmRecord`, `recordDetails`, `recordPage`, and
+`deleteRecord`, with pee compatibility wrappers. Generic ordinary confirmation
+still rejects sleep: dedicated commands preserve its independent evidence roots.
+The eight explicit sleep writes are:
+
+1. `createSleepStart`
+2. `recordCompletedSleep`
+3. `recordWake`
+4. `editSleepStart`
+5. `editCompletedSleep`
+6. `updateWake`
+7. `withdrawWake`
+8. `selectEffectiveWake`
+
+`sleepPage` batch-projects each bounded page's sleep roots and wake evidence in
+one read snapshot without per-sleep queries; `sleepDetails`, `openSleep`, and
+`wakeDetails` expose dedicated reads. Wake identity uses the source-derived UUIDv5
+helper. Local observer identity comes from durable local identity, not a fabricated
+family member/session. This does not establish family-aware authorization or sync.
+
+Explicit native safety differences: completed-sleep creation commits the sleep
+and wake roots atomically (stronger than the source flow); editing a projected
+closed sleep cannot accidentally reopen it; replay requires matching content
+rather than silently accepting a changed request; wake notes remain independent,
+and editing a sleep note does not silently rewrite the wake note. Only explicit
+wake operations modify that evidence. Unknown documents remain preserved/readable
+and cannot be silently rewritten by a supported form.
+
+The unsigned development host uses a persistent sandbox store without fake
+history or silent in-memory fallback. None of these checkpoints establishes full
+product, signing, physical-device, family/sync, media, or complete accessibility
+acceptance. Library capability does not expose all its forms automatically.
 
 Text semantics use the shared Kotlin-compatible `AndroidText` helper and UTF-16
 counts. The implemented input adaptation retains overlong input and refuses a
@@ -50,8 +85,8 @@ restriction prevents unreadable round trips; it does not assert every Android
 in-memory combination behaves identically. Legacy numeric-domain values remain
 readable. See [the payload contract](contracts/data-model.md).
 
-Remaining work includes the other 13 ordinary forms, nursing timer handoff,
-care plans, media, and separately coordinated sleep/custom workflows. Full
+Remaining UI work includes the other eight ordinary forms, nursing timer handoff,
+care plans, media, dedicated sleep UI, and concrete custom-item workflows. Full
 navigation, family enrollment and synchronization remain unimplemented here.
 The 12 groups below are a catalog/implementation plan, not an assertion that
 all their UI or complete product parity has been delivered.
@@ -60,7 +95,7 @@ Historical evidence: the earlier pee-only `1e5802a6` checkpoint passed
 [Android 39282387623](https://github.com/tusecwtf/lezi/actions/runs/39282387623)
 and [Apple 39282387612](https://github.com/tusecwtf/lezi/actions/runs/39282387612)
 with 93 package tests and one UI smoke. It is superseded by the latest verified
-checkpoint above; it is not evidence for unpublished health changes.
+checkpoint above; it is not evidence for unpublished sleep changes.
 
 ## 2. Sources and authority
 
@@ -169,8 +204,9 @@ explicitly; no fallback may immediately save or silently use an empty payload.
 
 ## 5. Smallest implementation slices and acceptance
 
-Steps 1–2 and the simple daily group are implemented and verified at `9752aaa`.
-The health subgroup is implemented locally and pending its new-head Apple gate.
+Steps 1–2, the simple daily group and health subgroup are verified at `f7ca7571`.
+Growth is verified at `3f8e449` with 159 Apple package tests and five UI tests; dedicated sleep
+storage is locally verified and unpublished, without a UI entry.
 The remaining groups are planned; storage coverage is not UI acceptance.
 Do not replace the working pee flow with a generic form before its regression
 proof remains green.

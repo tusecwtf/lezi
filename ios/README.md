@@ -95,17 +95,38 @@ corpus scenarios remain unimplemented and are not silently counted as passing.
   Explicit-null media dimensions follow the frozen wire/server representation.
   Negative-zero integer tokens are deliberately rejected at this boundary until
   their cross-language pre-normalization hash semantics are proven.
-- `LeziStorage` is a real file-backed SQLite **offline-only** vertical slice:
-  native schema 2 with atomic schema-1 migration, local identity, baby
-  profiles/preferences and 26 ordinary no-media record types. The existing UI
-  still exposes only pee; sleep/custom writes and photos remain unsupported. Confirmation saves the fact and dirty marker atomically; tests cover
-  restart, failed COMMIT/rollback, replay, wrong identity, original baby after
-  selection changes, blocked offline writes, monotonic edits, migration rollback,
-  opaque-document preservation and metadata-only soft deletion. It does not
-  create a family session or a network-ready frozen mutation. Unsupported record
-  types and photos are rejected rather than dropped. Native stale-edit CAS and
-  Int64-overflow refusal are explicitly scoped safety differences, not claims of
-  identical Android behavior; see `Sources/LeziStorage/StorageScope.swift`.
+- `LeziStorage` is a real file-backed SQLite **offline-only** vertical slice.
+  Current unpublished work implements native schema **3**, with atomic,
+  data-preserving migration from schema 1 or 2. It supports 26 ordinary no-media
+  record types plus dedicated sleep storage. Generic `confirmRecord` still rejects
+  sleep; custom entries and photos remain unsupported. Sleep UI is not exposed.
+  Confirmation saves facts and dirty markers atomically. Original-baby ownership,
+  revision CAS, rollback, replay and opaque preservation remain enforced.
+- Dedicated sleep writes are `createSleepStart`, `recordCompletedSleep`,
+  `recordWake`, `editSleepStart`, `editCompletedSleep`, `updateWake`,
+  `withdrawWake`, and `selectEffectiveWake`. `sleepPage` batch-projects roots and
+  wake evidence in one read snapshot; `sleepDetails`, `openSleep`, and `wakeDetails`
+  provide dedicated reads. UUIDv5 wake identity and durable local observer identity
+  do not create a family member/session or imply family-aware sync authorization.
+- Explicit native differences include stronger atomic completed-sleep two-root
+  creation, refusal to accidentally reopen a projected-closed sleep during start
+  edits, strict content-matching replay, and independent wake notes that sleep-note
+  edits cannot silently overwrite. Native stale-edit CAS and Int64-overflow refusal
+  are also safety differences, not claims of identical Android behavior. See
+  `Sources/LeziStorage/StorageScope.swift` and
+  [the offline expansion specification](../docs/spec/ios-offline-records.md).
+
+Evidence boundaries (2026-10-19): latest dual-green checkpoint **`3f8e449`** has
+18 bounded UI types. [Android run 39318117835](https://github.com/tusecwtf/lezi/actions/runs/39318117835)
+passed **5,908 tests**; [Apple run 39318117841](https://github.com/tusecwtf/lezi/actions/runs/39318117841)
+passed **159 package tests + five Simulator UI tests**. UI execution totaled
+863.188 seconds, with growth taking 147.704 seconds; artifact `12218688971`
+contains the results. This supersedes the 13-type `f7ca7571` checkpoint's 151+4.
+Unpublished schema-3 sleep storage separately passed **159 Linux tests (38 Storage,
+48 Presentation, 48 Domain, 25 Core)**. These local sleep results are not Apple
+acceptance, despite the coincidentally equal total test count. No sleep UI,
+custom-item workflow, full application, signed install or mixed-client sync claim
+follows from these counts.
 
 Two source-derived compatibility questions remain open, without a demonstrated
 production failure: Kotlin's hash projection omits null media dimensions while

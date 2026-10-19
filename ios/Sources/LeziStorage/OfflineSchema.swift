@@ -3,9 +3,9 @@ import Foundation
 /// Native SQLite versions only. These numbers are unrelated to payload schema 2,
 /// Android Room versions, and the family server's schema/wire versions.
 enum OfflineSchema {
-    static let version = 2
+    static let version = 3
     static let applicationID = "1279613513"
-    enum MigrationFailurePoint { case afterCopy, beforeCommit }
+    enum MigrationFailurePoint { case afterCopy, beforeCommit, afterSleepSchema }
 
     static func prepare(_ db: SQLiteConnection, failMigrationAt: MigrationFailurePoint? = nil) throws {
         try db.transaction {
@@ -38,12 +38,34 @@ enum OfflineSchema {
                 try db.execute("DROP TABLE pee_records")
                 try db.execute("PRAGMA user_version=2")
                 if failMigrationAt == .beforeCommit { throw OfflineStoreError.injectedFailure }
-            case "2":
+            case "2", "3":
                 guard application == applicationID else { throw OfflineStoreError.incompatibleDatabase }
             default:
                 throw OfflineStoreError.incompatibleDatabase
             }
+            if version != "3" {
+                try addSleepSchema(db)
+                if failMigrationAt == .afterSleepSchema { throw OfflineStoreError.injectedFailure }
+                try db.execute("PRAGMA user_version=3")
+            }
         }
+    }
+
+    private static func addSleepSchema(_ db: SQLiteConnection) throws {
+        // Published native v2 never admitted sleep writes. Do not invent history
+        // or apply the different wire legacy-migration UUID rule to unknown rows.
+        guard try db.query("SELECT uuid FROM records WHERE type='sleep' LIMIT 1").isEmpty else {
+            throw OfflineStoreError.unsupportedSleepHistory
+        }
+        try db.execute("ALTER TABLE records ADD COLUMN effective_wake_observation_client_uuid TEXT")
+        try db.execute("""
+            CREATE TABLE wake_observations (
+            uuid TEXT PRIMARY KEY, sleep_record_client_uuid TEXT NOT NULL REFERENCES records(uuid),
+            wake_timestamp INTEGER NOT NULL, note TEXT, withdrawn INTEGER NOT NULL CHECK(withdrawn IN (0,1)),
+            local_observer_uuid TEXT NOT NULL, updated_at INTEGER NOT NULL,
+            sync_dirty INTEGER NOT NULL CHECK(sync_dirty IN (0,1)), deleted_at INTEGER)
+            """)
+        try db.execute("CREATE INDEX wake_by_sleep ON wake_observations(sleep_record_client_uuid,wake_timestamp,uuid)")
     }
 
     private static func createRecords(_ db: SQLiteConnection) throws {

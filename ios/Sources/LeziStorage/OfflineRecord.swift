@@ -18,6 +18,18 @@ public struct OfflineRecord: Equatable, Sendable {
     public let updatedAt: Int64
     public let syncDirty: Bool
     public let deletedAt: Int64?
+    public let effectiveWakeObservationClientUUID: UUID?
+
+    public init(clientUUID: UUID, babyClientUUID: UUID, rawType: String, timestampMillis: Int64,
+                endTimestampMillis: Int64?, note: String?, payloadJSON: String, payloadSchemaVersion: Int,
+                payloadDocument: RecordPayloadDocument?, updatedAt: Int64, syncDirty: Bool, deletedAt: Int64?,
+                effectiveWakeObservationClientUUID: UUID? = nil) {
+        self.clientUUID = clientUUID; self.babyClientUUID = babyClientUUID; self.rawType = rawType
+        self.timestampMillis = timestampMillis; self.endTimestampMillis = endTimestampMillis; self.note = note
+        self.payloadJSON = payloadJSON; self.payloadSchemaVersion = payloadSchemaVersion; self.payloadDocument = payloadDocument
+        self.updatedAt = updatedAt; self.syncDirty = syncDirty; self.deletedAt = deletedAt
+        self.effectiveWakeObservationClientUUID = effectiveWakeObservationClientUUID
+    }
 }
 
 public struct OfflineRecordsPage: Equatable, Sendable {

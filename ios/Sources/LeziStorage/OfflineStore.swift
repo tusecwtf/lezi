@@ -1,7 +1,7 @@
 import Foundation
 import LeziCore
 
-/// Native schema 2 (preserves and migrates native schema 1). Not Android Room schema 29; not a family-sync repository.
+/// Native schema 3 (preserves and migrates native schemas 1 and 2). Not Android Room schema 29; not a family-sync repository.
 public struct OfflineContext: Equatable, Sendable {
     public let generation: UUID
     /// UI selection state only; never authorization to retarget an open editor.
@@ -47,10 +47,10 @@ public struct OfflineRecordPage: Equatable, Sendable {
 /// The durable dirty bit is a local fact marker, NOT a frozen mutation/outbox.
 /// Joining a family must first block this API; there is no ACL bypass fallback.
 public actor OfflineStore {
-    private let db: SQLiteConnection
-    private let clock: @Sendable () -> Int64
+    let db: SQLiteConnection
+    let clock: @Sendable () -> Int64
     // Internal deterministic rollback seams; not a public persistence option.
-    enum FailurePoint: Sendable { case afterFact, beforeCommit }
+    enum FailurePoint: Sendable { case afterFact, beforeCommit, afterSleep, afterWake }
     private var nextFailure: FailurePoint?
     func failNextConfirmation(at point: FailurePoint) { nextFailure = point }
 
@@ -192,24 +192,29 @@ public actor OfflineStore {
     private func readPage(baby: UUID, before: OfflineRecordCursor?, limit: Int, peeOnly: Bool) throws -> OfflineRecordsPage {
         guard (1...200).contains(limit) else { throw OfflineStoreError.invalidPageLimit }
         return try db.transaction(begin: "BEGIN") {
-            let generation = try identity().generation
-            if let before {
-                guard before.baby == baby, before.generation == generation,
-                      before.peeOnly == peeOnly else { throw OfflineStoreError.staleContext }
-            }
-            try requireLiveBaby(baby)
-            var values: [SQLiteConnection.Value] = [.text(baby.uuidString)]
-            if let before { values += [.int(before.timestamp), .text(before.recordUUID.uuidString)] }
-            values.append(.int(Int64(limit + 1)))
-            let fetched = try db.query(Self.timelinePageSQL(hasCursor: before != nil, peeOnly: peeOnly), values).map(Self.decodeRecord)
-            let page = Array(fetched.prefix(limit))
-            let cursor = fetched.count > limit ? page.last.map {
-                OfflineRecordCursor(baby: baby, generation: generation, peeOnly: peeOnly, timestamp: $0.timestampMillis, recordUUID: $0.clientUUID)
-            } : nil
-            return OfflineRecordsPage(records: page, nextCursor: cursor)
+            try readPageSnapshot(baby: baby, before: before, limit: limit, peeOnly: peeOnly)
         }
     }
-    private static let recordColumns = "uuid,baby_uuid,type,timestamp,end_timestamp,note,payload_json,payload_schema_version,updated_at,sync_dirty,deleted_at"
+    // Caller owns the read snapshot or write transaction; never starts a nested transaction.
+    func readPageSnapshot(baby: UUID, before: OfflineRecordCursor?, limit: Int, peeOnly: Bool) throws -> OfflineRecordsPage {
+        guard (1...200).contains(limit) else { throw OfflineStoreError.invalidPageLimit }
+        let generation = try identity().generation
+        if let before {
+            guard before.baby == baby, before.generation == generation,
+                  before.peeOnly == peeOnly else { throw OfflineStoreError.staleContext }
+        }
+        try requireLiveBaby(baby)
+        var values: [SQLiteConnection.Value] = [.text(baby.uuidString)]
+        if let before { values += [.int(before.timestamp), .text(before.recordUUID.uuidString)] }
+        values.append(.int(Int64(limit + 1)))
+        let fetched = try db.query(Self.timelinePageSQL(hasCursor: before != nil, peeOnly: peeOnly), values).map(Self.decodeRecord)
+        let page = Array(fetched.prefix(limit))
+        let cursor = fetched.count > limit ? page.last.map {
+            OfflineRecordCursor(baby: baby, generation: generation, peeOnly: peeOnly, timestamp: $0.timestampMillis, recordUUID: $0.clientUUID)
+        } : nil
+        return OfflineRecordsPage(records: page, nextCursor: cursor)
+    }
+    static let recordColumns = "uuid,baby_uuid,type,timestamp,end_timestamp,note,payload_json,payload_schema_version,updated_at,sync_dirty,deleted_at,effective_wake_observation_client_uuid"
     // Shared with EXPLAIN tests so they exercise the shipped SQL.
     static func timelinePageSQL(hasCursor: Bool, peeOnly: Bool = true) -> String {
         "SELECT " + recordColumns + " FROM records WHERE baby_uuid=? AND deleted_at IS NULL" +
@@ -224,7 +229,7 @@ public actor OfflineStore {
         guard let record = try recordDetails(id), record.type == .pee else { return nil }
         return try Self.peeRecord(record)
     }
-    private static func decodeRecord(_ row: [String?]) throws -> OfflineRecord {
+    static func decodeRecord(_ row: [String?]) throws -> OfflineRecord {
         guard let uuid = UUID(uuidString: row[0] ?? ""), let baby = UUID(uuidString: row[1] ?? ""),
               let rawType = row[2], let time = Int64(row[3] ?? ""), let json = row[6],
               let schema = Int(row[7] ?? ""), let updated = Int64(row[8] ?? "") else { throw OfflineStoreError.incompatibleDatabase }
@@ -232,7 +237,8 @@ public actor OfflineStore {
         return OfflineRecord(clientUUID: uuid, babyClientUUID: baby, rawType: rawType, timestampMillis: time,
             endTimestampMillis: row[4].flatMap(Int64.init), note: row[5], payloadJSON: json,
             payloadSchemaVersion: schema, payloadDocument: document, updatedAt: updated,
-            syncDirty: row[9] == "1", deletedAt: row[10].flatMap(Int64.init))
+            syncDirty: row[9] == "1", deletedAt: row[10].flatMap(Int64.init),
+            effectiveWakeObservationClientUUID: row[11].flatMap(UUID.init(uuidString:)))
     }
     private static func peeRecord(_ record: OfflineRecord) throws -> OfflinePeeRecord {
         guard record.type == .pee, case let .pee(amount)? = record.payloadDocument?.payload else { throw OfflineStoreError.opaqueRecord }
@@ -240,11 +246,11 @@ public actor OfflineStore {
             timestampMillis: record.timestampMillis, note: record.note, amount: amount,
             updatedAt: record.updatedAt, syncDirty: record.syncDirty, deletedAt: record.deletedAt)
     }
-    private static func nextRevision(after previous: Int64, now: Int64) throws -> Int64 {
+    static func nextRevision(after previous: Int64, now: Int64) throws -> Int64 {
         guard previous < Int64.max else { throw OfflineStoreError.revisionOverflow }
         return max(now, previous + 1)
     }
-    private func requireOfflineContext(_ captured: OfflineContext) throws {
+    func requireOfflineContext(_ captured: OfflineContext) throws {
         try requireOffline()
         guard try identity().generation == captured.generation else { throw OfflineStoreError.staleContext }
     }
@@ -253,10 +259,10 @@ public actor OfflineStore {
         return row
     }
     private func requireOffline() throws { guard try metadata()[2] == "offline" else { throw OfflineStoreError.offlineOnly } }
-    private func requireLiveBaby(_ id: UUID) throws {
+    func requireLiveBaby(_ id: UUID) throws {
         guard !(try db.query("SELECT uuid FROM babies WHERE uuid=? AND deleted_at IS NULL", [.text(id.uuidString)])).isEmpty else { throw OfflineStoreError.missingBaby }
     }
-    private func inject(_ point: FailurePoint) throws {
+    func inject(_ point: FailurePoint) throws {
         if nextFailure == point { nextFailure = nil; throw OfflineStoreError.injectedFailure }
     }
     private static func normalizedNickname(_ raw: String) throws -> String {

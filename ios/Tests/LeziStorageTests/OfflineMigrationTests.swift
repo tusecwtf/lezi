@@ -31,7 +31,7 @@ final class OfflineMigrationTests: XCTestCase, @unchecked Sendable {
         let preferences = try db.query("SELECT * FROM baby_preferences")
         let old = try db.query("SELECT uuid,baby_uuid,timestamp,note,amount,updated_at,sync_dirty,deleted_at FROM pee_records ORDER BY uuid")
         let store = try OfflineStore(path: file)
-        XCTAssertEqual(try db.query("PRAGMA user_version")[0][0], "2")
+        XCTAssertEqual(try db.query("PRAGMA user_version")[0][0], "3")
         XCTAssertEqual(try db.query("SELECT * FROM local_identity"), identity)
         XCTAssertEqual(try db.query("SELECT * FROM babies"), babies)
         XCTAssertEqual(try db.query("SELECT * FROM baby_preferences"), preferences)
@@ -50,7 +50,7 @@ final class OfflineMigrationTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(try db.query("SELECT count(*) FROM records")[0][0], "3")
     }
     func testMigrationFailureRestoresV1TablesRowsAndVersionThenRetries() throws {
-        for point in [OfflineSchema.MigrationFailurePoint.afterCopy, .beforeCommit] {
+        for point in [OfflineSchema.MigrationFailurePoint.afterCopy, .beforeCommit, .afterSleepSchema] {
             let file = path(); defer { try? FileManager.default.removeItem(atPath: file) }
             let db = try SQLiteConnection(path: file)
             _ = try seedV1(db)
@@ -62,7 +62,7 @@ final class OfflineMigrationTests: XCTestCase, @unchecked Sendable {
             XCTAssertEqual(try db.query("SELECT * FROM local_identity"), identity)
             XCTAssertTrue(try db.query("SELECT name FROM sqlite_master WHERE name='records'").isEmpty)
             try OfflineSchema.prepare(db)
-            XCTAssertEqual(try db.query("PRAGMA user_version")[0][0], "2")
+            XCTAssertEqual(try db.query("PRAGMA user_version")[0][0], "3")
         }
     }
     func testBlockedIdentityRemainsBlockedAfterMigration() async throws {
@@ -72,8 +72,33 @@ final class OfflineMigrationTests: XCTestCase, @unchecked Sendable {
         do { _ = try await store.createBaby(nickname: "二宝", birthday: "2026-01-01"); XCTFail("Must stay blocked") }
         catch { XCTAssertEqual(error as? OfflineStoreError, .offlineOnly) }
     }
+    func testV2IncrementPreservesOpaqueTombstonesAndRollsBackDDL() throws {
+        let file = path(); defer { try? FileManager.default.removeItem(atPath: file) }
+        let db = try SQLiteConnection(path: file); let baby = try seedV1(db)
+        // Frozen published v2 table shape, independent of the schema under test.
+        try db.execute("CREATE TABLE records (uuid TEXT PRIMARY KEY,baby_uuid TEXT NOT NULL REFERENCES babies(uuid),type TEXT NOT NULL,timestamp INTEGER NOT NULL,end_timestamp INTEGER,note TEXT,payload_json TEXT NOT NULL,payload_schema_version INTEGER NOT NULL,updated_at INTEGER NOT NULL,sync_dirty INTEGER NOT NULL CHECK(sync_dirty IN(0,1)),deleted_at INTEGER)")
+        try db.execute("CREATE INDEX record_timeline ON records(baby_uuid,timestamp DESC,uuid DESC) WHERE deleted_at IS NULL")
+        try db.execute("CREATE INDEX record_type_timeline ON records(baby_uuid,type,timestamp DESC,uuid DESC) WHERE deleted_at IS NULL")
+        try db.execute("INSERT INTO records VALUES (?,?,'future',7,9,'opaque',' {future raw} ',99,42,0,42)", [.text(UUID().uuidString), .text(baby.uuidString)])
+        try db.execute("DROP TABLE pee_records"); try db.execute("PRAGMA user_version=2")
+        let old = try db.query("SELECT * FROM records")
+        let identity = try db.query("SELECT * FROM local_identity")
+        XCTAssertThrowsError(try OfflineSchema.prepare(db, failMigrationAt: .afterSleepSchema))
+        XCTAssertEqual(try db.query("PRAGMA user_version")[0][0], "2")
+        XCTAssertEqual(try db.query("SELECT * FROM records"), old)
+        XCTAssertTrue(try db.query("SELECT name FROM sqlite_master WHERE name='wake_observations'").isEmpty)
+        try db.execute("UPDATE records SET type='sleep'")
+        XCTAssertThrowsError(try OfflineSchema.prepare(db)) { XCTAssertEqual($0 as? OfflineStoreError, .unsupportedSleepHistory) }
+        XCTAssertEqual(try db.query("PRAGMA user_version")[0][0], "2")
+        try db.execute("UPDATE records SET type='future'")
+        try OfflineSchema.prepare(db); try OfflineSchema.prepare(db)
+        XCTAssertEqual(try db.query("SELECT * FROM local_identity"), identity)
+        let migrated = try db.query("SELECT * FROM records")
+        XCTAssertEqual(Array(migrated[0].dropLast()), old[0]); XCTAssertNil(migrated[0].last!)
+        XCTAssertEqual(try db.query("PRAGMA user_version")[0][0], "3")
+    }
     func testUnknownNativeVersionsAndForeignV1AreRejectedWithoutReset() throws {
-        for version in [-1, 3, 29] {
+        for version in [-1, 4, 29] {
             let file = path(); defer { try? FileManager.default.removeItem(atPath: file) }
             let db = try SQLiteConnection(path: file); _ = try seedV1(db)
             try db.execute("PRAGMA user_version=\(version)")

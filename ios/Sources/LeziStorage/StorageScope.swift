@@ -2,16 +2,32 @@ import LeziCore
 
 /// Acceptance boundary for this additive native storage checkpoint.
 ///
-/// Implemented: independent native SQLite schema 2 with atomic native schema-1 migration; file-backed offline identity
+/// Implemented: independent native SQLite schema 3 with atomic native schema-1/2 migration; file-backed offline identity
 /// and store generation; baby nickname/birthday facts plus separate local color
 /// and ordering preferences; explicit-confirm no-media ordinary built-in record create/edit/soft-delete;
 /// live-baby/context/CAS gates; atomic fact + syncDirty writes; replay protection.
 ///
 /// NOT implemented: family enrollment/session/membership ACL, family reads or
-/// writes while disconnected, media, sleep/custom writes, full Baby metadata,
+/// writes while disconnected, media, custom writes, full Baby metadata,
 /// reset, publication, canonical Record root encoding, causal envelope
 /// freezing, receipts/conflicts, generic outbox, sync transport or a complete shipping
 /// iOS application. syncDirty is not a mutation envelope and is never sent.
+///
+/// Dedicated sleep commands persist SleepStart and WakeObservation as separate
+/// roots; raw sleep end_timestamp stays NULL. Completed creation uses a stronger
+/// dual-root transaction than Android's separate start/wake commits. Correction
+/// and withdrawal also keep both roots atomic. Projected-closed start edits
+/// cannot reopen sleep accidentally; explicit withdrawal can. Wake replay binds
+/// the captured sleep and baby rather than Android's UUID-only early return.
+/// Completed time correction preserves the independent wake note, unlike Android
+/// copying the sleep draft note; updateWake explicitly edits observation notes.
+/// CAS and local dirty/actor ownership are offline gates, not family ACL parity.
+/// Native v2 admitted no sleep: unexpected historical sleep rows reject migration.
+/// New completed sleep uses the Android backfill UUIDv5 helper, never the separate
+/// wire legacy migration identity. Local observer UUID is not a membership stamp.
+/// Soft-deleting sleep preserves all wake evidence. Batch page projection reads
+/// roots, their observations, and latest-open target within one SQLite snapshot.
+/// Ordinary writer support below intentionally excludes the dedicated sleep path.
 ///
 /// Product text forms (note length, nursing input, food-amount editing and
 /// display-unit conversion) remain UI/domain responsibilities. Typed storage
@@ -30,6 +46,6 @@ import LeziCore
 /// visible. Family authority needs a separate integrated ACL-aware coordinator;
 /// absence of a network connection must never select this offline-only writer.
 public enum OfflineStorageScope {
-    public static let schemaVersion = 2
+    public static let schemaVersion = 3
     public static let supportedRecordTypes = RecordType.allCases.filter { $0 != .sleep && $0 != .custom }
 }

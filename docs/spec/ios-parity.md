@@ -44,25 +44,38 @@ tests plus one Simulator UI smoke test** and built the
 unsigned `LeziDevelopment` host. These results supersede the previously pending
 Apple evidence, not the complete product acceptance matrix.
 
-The latest verified published checkpoint is **`9752aaa`**, with green Android
-CI (**5,908 tests**) and Apple CI (**144 package tests plus three Simulator UI
-tests**). It includes native schema 1→2 migration, unified transactional storage
-for 26 ordinary no-media types, and real create/edit/soft-delete UI for six types:
-`pee`, `poop`, `both_diaper`, `diary`, `bath`, `walk`. The tests cover bounded
-restart persistence, dirty exit and original-baby/revision ownership. The older
-93+1 result above is historical, not the latest acceptance count.
+The earlier **dual-green** checkpoint **`f7ca7571`** covered 13 forms:
+Android **5,908 tests**, Apple **151 package tests plus four Simulator UI tests**.
+It supports real create/edit/soft-delete UI for 13 ordinary types: pee, poop,
+both_diaper, diary, bath, walk, cough, rash, vomit, injury, medicine, hospital,
+and vaccine. Original-baby/revision ownership, dirty exit, commit-before-success
+and bounded restart persistence are exercised. The earlier 93+1 result is historical.
 
-Current **local, unpublished** code adds seven health forms (`cough`, `rash`,
-`vomit`, `injury`, `medicine`, `hospital`, `vaccine`) using the same record owner,
-for 13 implemented UI types. Local feature tests passed 30/30; the new Apple model
-and fourth UI scenario await new-head CI. This work does not inherit `9752aaa`'s
-acceptance. Storage's 26-type support does not expose the remaining forms.
+The latest verified **dual-green** checkpoint **`3f8e449`** adds five growth forms (height, weight, head, chest,
+foot_size), for **18 verified bounded UI types**. [Android run 39318117835](https://github.com/tusecwtf/lezi/actions/runs/39318117835)
+passed **5,908 tests**; [Apple run 39318117841](https://github.com/tusecwtf/lezi/actions/runs/39318117841)
+passed **159 package tests plus five Simulator UI tests** (863.188 seconds total UI,
+147.704 seconds growth; artifact `12218688971`). Unchanged
+growth payload precision is preserved rather than copying Android's lossy
+two-decimal editor refill; changed input uses the shared Core conversion rules.
 
-The development host remains bounded: no family, production transport, media,
-signed-device or full-product support is implied. Sleep/custom need separately
-coordinated workflows and remain incomplete. The [offline expansion plan](ios-offline-records.md)
-distinguishes verified and unpublished code, remaining field groups and acceptance
-gates. The entire product matrix remains open until each row has complete evidence.
+**Unpublished local storage work** adds atomic data-preserving native schema
+**1/2→3** migration and dedicated sleep persistence alongside the 26 ordinary
+no-media types. The full Linux run passed **159 tests (38 Storage, 48 Presentation,
+48 Domain, 25 Core)**; this is not new-head Apple acceptance. Eight explicit sleep
+commands handle start/completed creation, wake creation, start/completed editing,
+wake update/withdrawal, and effective-wake selection. Dedicated reads batch-project
+sleep and wake evidence. No family session or observer is fabricated, and **sleep
+UI is not open**; custom/media writes remain unsupported. Completed creation uses
+stronger two-root atomicity; closed projections cannot accidentally reopen during
+start editing; replay is strict; independent wake notes are not changed by sleep
+note edits. See the [offline expansion plan](ios-offline-records.md) for exact APIs
+and scope differences.
+
+The development host remains bounded: no family, production transport, signed-device
+or full-product support is implied. Storage support does not expose the eight
+remaining ordinary forms or dedicated sleep UI. Concrete custom workflows remain
+incomplete. The full product matrix stays open until each row has complete evidence.
 
 Native stale-edit CAS and revision-overflow refusal, and opaque preservation of
 nonstandard local JSON escape cases, are explicitly documented differences.
@@ -303,8 +316,9 @@ this plan. No production family data in fixtures, logs, screenshots or CI artifa
 
 CI in `.github/workflows/ios-core.yml` now tests the Swift package, compiles the
 Apple library code, builds the unsigned SwiftUI development host and runs its
-bounded Simulator UI scenarios. The `9752aaa` checkpoint above has green Apple
-and Android evidence for six offline forms. This does not validate the complete app, widget extension,
+bounded Simulator UI scenarios. The `3f8e449` checkpoint above has green Apple
+and Android evidence for 18 offline forms; unpublished schema-3 sleep storage
+still has only local Linux evidence. This does not validate the complete app, widget extension,
 signed device installation or real mixed-client sync. The complete application
 gates below remain required; later unverified code cannot inherit this result.
 

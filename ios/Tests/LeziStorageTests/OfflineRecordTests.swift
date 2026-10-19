@@ -140,7 +140,7 @@ final class OfflineRecordTests: XCTestCase, @unchecked Sendable {
             ("formula", 2, "{broken\0text"), ("future_record", 7, " [1,2,3] ")]
         for (type, schema, json) in inputs {
             let id = UUID()
-            try db.execute("INSERT INTO records VALUES (?,?,?,100,NULL,'备注',?,?,1000,0,NULL)", [.text(id.uuidString), .text(context.babyClientUUID.uuidString), .text(type), .text(json), .int(Int64(schema))])
+            try db.execute("INSERT INTO records (uuid,baby_uuid,type,timestamp,end_timestamp,note,payload_json,payload_schema_version,updated_at,sync_dirty,deleted_at) VALUES (?,?,?,100,NULL,'备注',?,?,1000,0,NULL)", [.text(id.uuidString), .text(context.babyClientUUID.uuidString), .text(type), .text(json), .int(Int64(schema))])
             let readValue = try await store.recordDetails(id)
             let read = try XCTUnwrap(readValue)
             XCTAssertTrue(read.isOpaque); XCTAssertEqual(read.rawType, type); XCTAssertEqual(read.payloadJSON, json)
