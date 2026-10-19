@@ -1,0 +1,67 @@
+name: iOS core contracts
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - "ios/**"
+      - "config/conflict-v2-golden*"
+      - "config/next-feed-plan-marker.v1.json"
+      - ".github/workflows/ios-core.yml"
+  push:
+    branches: [master]
+    paths:
+      - "ios/**"
+      - "config/conflict-v2-golden*"
+      - "config/next-feed-plan-marker.v1.json"
+      - ".github/workflows/ios-core.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-core-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Record exact source and Apple toolchain
+        run: |
+          git rev-parse HEAD
+          xcodebuild -version
+          xcrun swift --version
+      - name: Run portable domain and wire behavior tests
+        run: swift test --package-path ios
+      - name: Compile core against the iOS Simulator SDK
+        run: |
+          set -euo pipefail
+          sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+          mkdir -p "$RUNNER_TEMP/lezi-ios-core"
+          sources=()
+          while IFS= read -r file; do sources+=("$file"); done < <(find ios/Sources/LeziCore -name '*.swift' -type f | sort)
+          test "${#sources[@]}" -gt 0
+          xcrun swiftc -swift-version 6 -parse-as-library \
+            -sdk "$sdk" -target arm64-apple-ios17.0-simulator \
+            -module-name LeziCore -emit-module \
+            -emit-module-path "$RUNNER_TEMP/lezi-ios-core/LeziCore.swiftmodule" \
+            "${sources[@]}"
+          ui_sources=()
+          while IFS= read -r file; do ui_sources+=("$file"); done < <(find ios/Sources/LeziUI -name '*.swift' -type f | sort)
+          test "${#ui_sources[@]}" -gt 0
+          xcrun swiftc -swift-version 6 -parse-as-library \
+            -sdk "$sdk" -target arm64-apple-ios17.0-simulator \
+            -I "$RUNNER_TEMP/lezi-ios-core" \
+            -module-name LeziUI -emit-module \
+            -emit-module-path "$RUNNER_TEMP/lezi-ios-core/LeziUI.swiftmodule" \
+            "${ui_sources[@]}"
+      - name: Record verification boundary
+        run: |
+          {
+            echo 'Portable core/presentation tests and iOS Simulator SDK library compilation only.'
+            echo 'This is not an app build, simulator UI test, mixed-client server proof, signing, or device acceptance.'
+          } >> "$GITHUB_STEP_SUMMARY"
