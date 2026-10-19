@@ -1,5 +1,6 @@
 #if canImport(SwiftUI)
 import SwiftUI
+import LeziCore
 import LeziStorage
 
 /// Embed in an Apple host with its real file-backed OfflineStore and LeziTheme.
@@ -16,8 +17,8 @@ public struct OfflinePeeView: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: theme.density.sectionGap) {
-            LeziText("离线开发组件 · 宝宝与尿记录", role: .title)
-            LeziText("仅保存在此设备。当前仅支持宝宝昵称、生日和无照片尿记录。", role: .label)
+            LeziText("离线开发组件 · 宝宝与排泄记录", role: .title)
+            LeziText("仅保存在此设备。当前支持宝宝昵称、生日和无照片尿、便、尿+便记录。", role: .label)
             if let message = model.message { LeziText(message).accessibilityIdentifier("offline.result") }
             babySelection
             ScrollView {
@@ -25,7 +26,7 @@ public struct OfflinePeeView: View {
                         Button(creatingBaby ? "收起新建宝宝" : "新建宝宝") { creatingBaby.toggle() }
                             .accessibilityIdentifier("offline.baby.new")
                         if creatingBaby { babyForm }
-                        Button("记录尿") { model.openEditor() }
+                        Button("记录排泄") { model.openEditor() }
                             .accessibilityIdentifier("offline.pee.new")
                             .disabled(model.selected == nil || model.busy)
                             .frame(minHeight: theme.primaryTouchMinimum)
@@ -57,7 +58,7 @@ public struct OfflinePeeView: View {
                     Button("放弃修改", role: .destructive) { model.discardChanges() }
                         .accessibilityIdentifier("offline.discard.confirm")
                 } message: { Text("这些修改尚未写入本机。") }
-                .alert("删除这条尿记录？", isPresented: $model.showingDeleteConfirmation) {
+                .alert("删除这条\(model.editor?.draft.kind.label ?? "排泄记录")？", isPresented: $model.showingDeleteConfirmation) {
                     Button("取消", role: .cancel) { model.cancelDelete() }
                         .accessibilityIdentifier("offline.delete.cancel")
                     Button("确认删除", role: .destructive) { model.confirmDelete() }
@@ -103,7 +104,7 @@ public struct OfflinePeeView: View {
     }
     private var recordList: some View {
         VStack(alignment: .leading, spacing: 12) {
-            LeziText("本机记录（当前仅支持编辑尿记录）", role: .titleSmall)
+            LeziText("本机记录（当前仅支持编辑排泄记录）", role: .titleSmall)
             if model.records.isEmpty {
                 LeziText(model.selected == nil ? "创建或选择宝宝后查看记录" : "尚无本机记录")
                     .accessibilityIdentifier("offline.records.empty")
@@ -111,17 +112,12 @@ public struct OfflinePeeView: View {
             ForEach(model.records, id: \.clientUUID) { record in
                 VStack(alignment: .leading, spacing: 4) {
                     Text(Date(timeIntervalSince1970: Double(record.timestampMillis) / 1000), format: .dateTime)
-                    if case let .pee(amount)? = record.payloadDocument?.payload {
-                        LeziText("尿量：\(Self.amountLabel(amount))")
-                            .accessibilityIdentifier("offline.record.amount")
-                    } else {
-                        LeziText(record.isOpaque ? "暂不支持的记录格式 · 只读" : "其他记录类型 · 只读")
-                    }
+                    recordSummary(record)
                     if let note = record.note, !note.isEmpty {
                         LeziText(note).accessibilityIdentifier("offline.record.note")
                     }
                     if OfflinePeeState.canEdit(record) {
-                        Button("编辑尿记录") { model.openEditor(record: record) }
+                        Button("编辑\(OfflineExcretionKind(rawValue: record.rawType)?.label ?? "排泄记录")") { model.openEditor(record: record) }
                             .disabled(model.busy)
                             .accessibilityIdentifier("offline.record.edit")
                     } else {
@@ -130,6 +126,8 @@ public struct OfflinePeeView: View {
                 }
                 .padding(theme.density.cardPad)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("offline.record.row.\(record.clientUUID.uuidString)")
                 Divider()
             }
             if model.nextCursor != nil {
@@ -143,7 +141,7 @@ public struct OfflinePeeView: View {
         LeziConfirmationPanel(
             session: Binding(get: { model.editor?.session ?? editor.session },
                              set: { model.editor?.session = $0 }),
-            draft: editor.draft.confirmation, title: editor.isEditing ? "编辑尿记录 · 本机" : "记录尿 · 本机",
+            draft: editor.draft.confirmation, title: "\(editor.isEditing ? "编辑" : "新建")\(editor.draft.kind.label) · 本机",
             confirmTitle: editor.isEditing ? "保存修改" : "确认保存到本机",
             canWrite: true, externallyBusy: model.busy || editor.deletionAttemptID != nil,
             preventDismiss: editor.isDirty, nowMillis: { Int64(Date().timeIntervalSince1970 * 1000) },
@@ -154,11 +152,20 @@ public struct OfflinePeeView: View {
                     get: { Date(timeIntervalSince1970: Double(model.editor?.draft.timestampMillis ?? editor.draft.timestampMillis) / 1000) },
                     set: { model.editor?.edit(timestampMillis: Int64($0.timeIntervalSince1970 * 1000)) }
                 ))
-                Picker("尿量", selection: Binding(
-                    get: { model.editor?.draft.amount ?? editor.draft.amount },
-                    set: { model.editor?.edit(amount: $0) }
-                )) { ForEach(1...3, id: \.self) { Text(Self.amountLabel($0)).tag($0).accessibilityIdentifier("offline.pee.amount.\($0)") } }
-                .accessibilityIdentifier("offline.pee.amount")
+                if editor.isEditing {
+                    LeziText("类型：\(editor.draft.kind.label)（不可更改）", role: .label)
+                        .accessibilityIdentifier("offline.excretion.kind.fixed")
+                } else {
+                    Picker("记录类型", selection: Binding(
+                        get: { model.editor?.draft.kind ?? editor.draft.kind },
+                        set: { model.editor?.edit(kind: $0) }
+                    )) {
+                        ForEach(OfflineExcretionKind.allCases, id: \.self) { kind in
+                            Text(kind.label).tag(kind).accessibilityIdentifier("offline.excretion.kind.\(kind.rawValue)")
+                        }
+                    }.accessibilityIdentifier("offline.excretion.kind")
+                }
+                excretionFields(editor)
                 TextField("备注", text: Binding(
                     get: { model.editor?.draft.note ?? editor.draft.note },
                     set: { model.editor?.edit(note: $0) }
@@ -176,8 +183,56 @@ public struct OfflinePeeView: View {
             }
         }
     }
-    private static func amountLabel(_ amount: Int) -> String {
-        switch amount { case 1: "小"; case 2: "中"; case 3: "大"; default: "未知" }
+    @ViewBuilder
+    private func excretionFields(_ editor: OfflinePeeState) -> some View {
+        if editor.draft.kind.hasPee {
+            choice("尿量", id: "offline.pee.amount", values: 1...3, label: OfflineExcretionLabels.pee,
+                   selection: Binding(get: { model.editor?.draft.amount ?? editor.draft.amount },
+                                      set: { model.editor?.edit(amount: $0) }))
+        }
+        if editor.draft.kind.hasStool {
+            choice("便量", id: "offline.stool.amount", values: 1...4, label: OfflineExcretionLabels.amount,
+                   selection: Binding(get: { model.editor?.draft.stoolAmount ?? editor.draft.stoolAmount },
+                                      set: { model.editor?.edit(stoolAmount: $0) }))
+            choice("软硬", id: "offline.stool.consistency", values: 1...4, label: OfflineExcretionLabels.consistency,
+                   selection: Binding(get: { model.editor?.draft.stoolConsistency ?? editor.draft.stoolConsistency },
+                                      set: { model.editor?.edit(stoolConsistency: $0) }))
+            choice("颜色", id: "offline.stool.color", values: 0...7, label: OfflineExcretionLabels.color,
+                   selection: Binding(get: { model.editor?.draft.stoolColor ?? editor.draft.stoolColor },
+                                      set: { model.editor?.edit(stoolColor: $0) }))
+        }
+    }
+    private func choice(_ title: String, id: String, values: ClosedRange<Int>,
+                        label: @escaping (Int) -> String, selection: Binding<Int>) -> some View {
+        Picker(title, selection: selection) {
+            ForEach(Array(values), id: \.self) { value in
+                Text(label(value)).tag(value).accessibilityIdentifier("\(id).\(value)")
+            }
+        }.accessibilityIdentifier(id)
+    }
+    @ViewBuilder
+    private func recordSummary(_ record: OfflineRecord) -> some View {
+        if let kind = OfflineExcretionKind(rawValue: record.rawType), !record.isOpaque {
+            LeziText(kind.label, role: .titleSmall).accessibilityIdentifier("offline.record.kind")
+        }
+        switch record.payloadDocument?.payload {
+        case let .pee(amount):
+            LeziText("尿量：\(OfflineExcretionLabels.pee(amount))").accessibilityIdentifier("offline.record.amount")
+        case let .stool(amount, consistency, color):
+            stoolSummary(amount: amount, consistency: consistency, color: color)
+        case let .bothDiaper(pee, amount, consistency, color):
+            LeziText("尿量：\(OfflineExcretionLabels.pee(pee))").accessibilityIdentifier("offline.record.amount")
+            stoolSummary(amount: amount, consistency: consistency, color: color)
+        default:
+            LeziText(record.isOpaque ? "暂不支持的记录格式 · 只读" : "其他记录类型 · 只读")
+        }
+    }
+    private func stoolSummary(amount: Int, consistency: Int, color: Int) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            LeziText("便量：\(OfflineExcretionLabels.amount(amount))").accessibilityIdentifier("offline.record.stool.amount")
+            LeziText("软硬：\(OfflineExcretionLabels.consistency(consistency))").accessibilityIdentifier("offline.record.stool.consistency")
+            LeziText("颜色：\(OfflineExcretionLabels.color(color))").accessibilityIdentifier("offline.record.stool.color")
+        }
     }
 }
 #endif

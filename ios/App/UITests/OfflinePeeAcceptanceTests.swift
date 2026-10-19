@@ -127,6 +127,142 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         XCTAssertFalse(app.buttons["offline.delete.request"].exists)
     }
 
+    func testPoopAndCombinedDiaperRetainKindsAndIndependentRecords() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let babyName = "UI-Diaper-002"
+        let poopNote = "ui-poop"
+        let bothNote = "ui-both"
+        app.launch()
+        tap(app.buttons["offline.baby.new"])
+        let nickname = app.textFields["offline.baby.nickname"]
+        tap(nickname)
+        nickname.typeText(babyName)
+        tap(app.buttons["offline.baby.create"])
+        waitFor(app.staticTexts["offline.result"], "label == %@", "已在本机创建宝宝：\(babyName)")
+        waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
+        tap(app.buttons["offline.baby.new"])
+        assertSelectedBaby(app, name: babyName)
+        assertEmptyHistory(app)
+
+        openDiaper(kind: "poop", in: app)
+        chooseDiaperOption("offline.stool.amount", value: 1, in: app)
+        chooseDiaperOption("offline.stool.consistency", value: 1, in: app)
+        chooseDiaperOption("offline.stool.color", value: 1, in: app)
+        revealDiaperControl(noteField(in: app), in: app)
+        enterNote(poopNote, in: app)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "便记录")
+        let poopRow = diaperRow(in: app, note: poopNote)
+        waitFor(poopRow, "exists == true")
+        let poopRowID = poopRow.identifier
+        assertDiaperRow(poopRow, kind: "便记录", amount: "一点", consistency: "稀", color: "白")
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        let persistedPoop = app.otherElements[poopRowID]
+        assertDiaperRow(persistedPoop, kind: "便记录", amount: "一点", consistency: "稀", color: "白")
+        tap(persistedPoop.buttons["offline.record.edit"])
+        waitFor(app.staticTexts["offline.excretion.kind.fixed"], "label == %@", "类型：便记录（不可更改）")
+        XCTAssertFalse(app.buttons["offline.excretion.kind"].exists)
+        chooseDiaperOption("offline.stool.amount", value: 4, in: app)
+        chooseDiaperOption("offline.stool.consistency", value: 4, in: app)
+        chooseDiaperOption("offline.stool.color", value: 6, in: app)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "便记录")
+        assertDiaperRow(app.otherElements[poopRowID], kind: "便记录", amount: "偏多", consistency: "偏硬", color: "红")
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+
+        openDiaper(kind: "both_diaper", in: app)
+        chooseDiaperOption("offline.pee.amount", value: 3, in: app)
+        chooseDiaperOption("offline.stool.amount", value: 2, in: app)
+        chooseDiaperOption("offline.stool.consistency", value: 2, in: app)
+        chooseDiaperOption("offline.stool.color", value: 3, in: app)
+        revealDiaperControl(noteField(in: app), in: app)
+        enterNote(bothNote, in: app)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "尿+便记录")
+        let bothRow = diaperRow(in: app, note: bothNote)
+        waitFor(bothRow, "exists == true")
+        let bothRowID = bothRow.identifier
+        XCTAssertNotEqual(bothRowID, poopRowID)
+        assertDiaperRow(bothRow, kind: "尿+便记录", amount: "偏少", consistency: "偏软", color: "橙", pee: "大")
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 2)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        assertDiaperRow(app.otherElements[poopRowID], kind: "便记录", amount: "偏多", consistency: "偏硬", color: "红")
+        assertDiaperRow(app.otherElements[bothRowID], kind: "尿+便记录", amount: "偏少", consistency: "偏软", color: "橙", pee: "大")
+        waitFor(app.otherElements[poopRowID].staticTexts["offline.record.note"], "label == %@", poopNote)
+        waitFor(app.otherElements[bothRowID].staticTexts["offline.record.note"], "label == %@", bothNote)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 2)
+        tap(app.otherElements[bothRowID].buttons["offline.record.edit"])
+        waitFor(app.staticTexts["offline.excretion.kind.fixed"], "label == %@", "类型：尿+便记录（不可更改）")
+        XCTAssertFalse(app.buttons["offline.excretion.kind"].exists)
+        revealDiaperControl(app.buttons["offline.delete.request"], in: app)
+        tap(app.buttons["offline.delete.request"])
+        tap(app.buttons["offline.delete.confirm"])
+        waitFor(app.staticTexts["offline.result"], "label == %@", "已删除本机尿+便记录")
+        waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
+        waitFor(app.otherElements[bothRowID], "exists == false")
+        assertDiaperRow(app.otherElements[poopRowID], kind: "便记录", amount: "偏多", consistency: "偏硬", color: "红")
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        XCTAssertFalse(app.otherElements[bothRowID].exists)
+        XCTAssertFalse(app.staticTexts[bothNote].exists)
+        assertDiaperRow(app.otherElements[poopRowID], kind: "便记录", amount: "偏多", consistency: "偏硬", color: "红")
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+    }
+
+    private func openDiaper(kind: String, in app: XCUIApplication) {
+        tap(app.buttons["offline.pee.new"])
+        tap(app.buttons["offline.excretion.kind"])
+        tap(app.buttons["offline.excretion.kind.\(kind)"])
+    }
+
+    private func revealDiaperControl(_ element: XCUIElement, in app: XCUIApplication) {
+        waitFor(element, "exists == true")
+        let editorScroll = app.scrollViews.containing(.any, identifier: "offline.pee.note").firstMatch
+        // Bounded content scrolling, not a timed wait. The combined editor is
+        // taller than pee-only; scope gestures to its scroll view, never the sheet header.
+        for _ in 0..<4 {
+            if element.isHittable { return }
+            editorScroll.swipeUp()
+        }
+        waitFor(element, "hittable == true")
+    }
+
+    private func diaperRow(in app: XCUIApplication, note: String) -> XCUIElement {
+        app.otherElements.matching(NSPredicate(format: "identifier BEGINSWITH %@", "offline.record.row."))
+            .containing(.staticText, identifier: note).firstMatch
+    }
+
+    private func chooseDiaperOption(_ identifier: String, value: Int, in app: XCUIApplication) {
+        revealDiaperControl(app.buttons[identifier], in: app)
+        tap(app.buttons[identifier])
+        tap(app.buttons["\(identifier).\(value)"])
+    }
+
+    private func saveDiaper(in app: XCUIApplication, babyName: String, kindLabel: String) {
+        tap(app.buttons["confirmation.save"])
+        waitFor(app.staticTexts["offline.result"], "label == %@", "已保存到本机：\(babyName)的\(kindLabel)")
+        waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
+    }
+
+    private func assertDiaperRow(_ row: XCUIElement, kind: String, amount: String,
+                                 consistency: String, color: String, pee: String? = nil) {
+        waitFor(row, "exists == true")
+        waitFor(row.staticTexts["offline.record.kind"], "label == %@", kind)
+        waitFor(row.staticTexts["offline.record.stool.amount"], "label == %@", "便量：\(amount)")
+        waitFor(row.staticTexts["offline.record.stool.consistency"], "label == %@", "软硬：\(consistency)")
+        waitFor(row.staticTexts["offline.record.stool.color"], "label == %@", "颜色：\(color)")
+        if let pee {
+            waitFor(row.staticTexts["offline.record.amount"], "label == %@", "尿量：\(pee)")
+        } else {
+            XCTAssertFalse(row.staticTexts["offline.record.amount"].exists)
+        }
+    }
+
     private func swipeEditorDown(in app: XCUIApplication) {
         // Start on the dedicated, non-interactive header rather than a field,
         // picker, button, or scroll view. Derive the drag from actual UI geometry.

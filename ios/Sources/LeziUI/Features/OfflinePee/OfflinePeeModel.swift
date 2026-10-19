@@ -163,7 +163,7 @@ final class OfflinePeeModel: ObservableObject {
                       self.editor?.deletionAttemptID == attempt else { return }
                 self.editor?.finishDeletion(attemptID: attempt)
                 self.clearEditor()
-                self.message = deleted ? "已删除本机尿记录" : "这条记录已不在本机列表中"
+                self.message = deleted ? "已删除本机\(current.draft.kind.label)" : "这条记录已不在本机列表中"
                 self.refresh()
             } catch {
                 guard !Task.isCancelled, let self,
@@ -174,6 +174,7 @@ final class OfflinePeeModel: ObservableObject {
     }
     func persist(_ frozen: LeziConfirmedRecord) {
         guard !busy, editor?.accepts(frozen) == true, let context = editorContext,
+              let kind = OfflineExcretionKind(rawValue: frozen.draft.payload.type.rawValue),
               context.babyClientUUID == frozen.draft.babyClientUUID,
               editor?.beginPersistence(frozen) == true else { return }
         let store = store
@@ -181,11 +182,11 @@ final class OfflinePeeModel: ObservableObject {
         save = Task { [weak self] in
             do {
                 // This returns only after SQLite COMMIT. Never complete on dispatch/enqueue.
-                _ = try await store.confirmPee(frozen.draft, context: context, expectedUpdatedAt: revision)
+                _ = try await store.confirmRecord(frozen.draft, context: context, expectedUpdatedAt: revision)
                 guard !Task.isCancelled, let self, self.editor?.accepts(frozen) == true else { return }
                 self.editor?.finish(attemptID: frozen.attemptID)
                 self.clearEditor()
-                self.message = "已保存到本机：\(frozen.context.babyName)的尿记录"
+                self.message = "已保存到本机：\(frozen.context.babyName)的\(kind.label)"
                 self.refresh()
             } catch {
                 guard !Task.isCancelled, let self, self.editor?.accepts(frozen) == true else { return }
