@@ -316,6 +316,155 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 2)
     }
 
+    func testHealthFormsAndSymptomEditsPersistWithDeletionIsolation() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let babyName = "UI-Health-004"
+        let forms = [
+            HealthForm(kind: "medicine", label: "用药记录", primary: "name", secondary: "dose",
+                       primaryValue: "synthetic-med", secondaryValue: "synthetic-dose-text",
+                       primaryCaption: "药品名称", secondaryCaption: "剂量", requiredMessage: "药品名称不能为空"),
+            HealthForm(kind: "hospital", label: "就医记录", primary: "reason", secondary: "advice",
+                       primaryValue: "synthetic-reason", secondaryValue: "synthetic-advice",
+                       primaryCaption: "就诊原因", secondaryCaption: "医嘱", requiredMessage: "就诊原因不能为空"),
+            HealthForm(kind: "vaccine", label: "疫苗记录", primary: "name", secondary: "batch",
+                       primaryValue: "synthetic-vaccine", secondaryValue: "synthetic-batch",
+                       primaryCaption: "疫苗名称", secondaryCaption: "批次 / 针次", requiredMessage: "疫苗名称不能为空"),
+        ]
+        var rowIDs: [String: String] = [:]
+        app.launch()
+        tap(app.buttons["offline.baby.new"])
+        let nickname = app.textFields["offline.baby.nickname"]
+        tap(nickname)
+        nickname.typeText(babyName)
+        tap(app.buttons["offline.baby.create"])
+        waitFor(app.staticTexts["offline.result"], "label == %@", "已在本机创建宝宝：\(babyName)")
+        waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
+        tap(app.buttons["offline.baby.new"])
+        assertSelectedBaby(app, name: babyName)
+        assertEmptyHistory(app)
+
+        for (index, form) in forms.enumerated() {
+            openDiaper(kind: form.kind, in: app)
+            enterHealthText("offline.health.\(form.kind).\(form.secondary)", text: form.secondaryValue, in: app)
+            revealDiaperControl(noteField(in: app), in: app)
+            enterNote(form.note, in: app)
+            tap(app.buttons["confirmation.save"])
+            // Optional fields and a note cannot substitute for this kind's required field.
+            waitFor(app.staticTexts["confirmation.reason"], "label == %@", form.requiredMessage)
+            waitFor(noteField(in: app), "value == %@", form.note)
+            let primary = healthField("offline.health.\(form.kind).\(form.primary)", in: app)
+            tap(primary) // The validation action focuses and reveals the required field.
+            primary.typeText(form.primaryValue)
+            waitFor(primary, "value == %@", form.primaryValue)
+            saveDiaper(in: app, babyName: babyName, kindLabel: form.label)
+            let row = diaperRow(in: app, note: form.note)
+            waitFor(row, "exists == true")
+            rowIDs[form.kind] = row.identifier
+            assertHealthRow(row, form: form)
+            XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, index + 1)
+        }
+
+        // The four symptom kinds share portable matrix coverage. Exercise one
+        // complete representative UI lifecycle here instead of repeating restarts.
+        let symptomNote = "ui-cough-note"
+        let description = "ui-symptom"
+        let editedDescription = "ui-symptom-edited"
+        openDiaper(kind: "cough", in: app)
+        chooseDiaperOption("offline.health.severity", value: 3, in: app)
+        enterHealthText("offline.health.description", text: description, in: app)
+        revealDiaperControl(noteField(in: app), in: app)
+        enterNote(symptomNote, in: app)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "咳嗽记录")
+        let symptomRow = diaperRow(in: app, note: symptomNote)
+        waitFor(symptomRow, "exists == true")
+        let symptomID = symptomRow.identifier
+        assertSymptomRow(symptomRow, severity: "明显", description: description, note: symptomNote)
+        tap(symptomRow.buttons["offline.record.edit"])
+        waitFor(app.staticTexts["offline.excretion.kind.fixed"], "label == %@", "类型：咳嗽记录（不可更改）")
+        XCTAssertFalse(app.buttons["offline.excretion.kind"].exists)
+        chooseDiaperOption("offline.health.severity", value: 1, in: app)
+        let symptomDescription = healthField("offline.health.description", in: app)
+        revealDiaperControl(symptomDescription, in: app)
+        waitFor(symptomDescription, "value == %@", description)
+        symptomDescription.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.1)).tap()
+        symptomDescription.typeText("-edited")
+        waitFor(symptomDescription, "value == %@", editedDescription)
+        waitFor(noteField(in: app), "value == %@", symptomNote)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "咳嗽记录")
+        assertSymptomRow(app.otherElements[symptomID], severity: "轻微", description: editedDescription, note: symptomNote)
+        XCTAssertEqual(Set(rowIDs.values).union([symptomID]).count, 4)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 4)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        for form in forms {
+            assertHealthRow(app.otherElements[rowIDs[form.kind]!], form: form)
+        }
+        assertSymptomRow(app.otherElements[symptomID], severity: "轻微", description: editedDescription, note: symptomNote)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 4)
+        tap(app.otherElements[symptomID].buttons["offline.record.edit"])
+        revealDiaperControl(app.buttons["offline.delete.request"], in: app)
+        tap(app.buttons["offline.delete.request"])
+        tap(app.buttons["offline.delete.confirm"])
+        waitFor(app.staticTexts["offline.result"], "label == %@", "已删除本机咳嗽记录")
+        waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
+        waitFor(app.otherElements[symptomID], "exists == false")
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 3)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        for form in forms {
+            assertHealthRow(app.otherElements[rowIDs[form.kind]!], form: form)
+        }
+        XCTAssertFalse(app.otherElements[symptomID].exists)
+        XCTAssertFalse(app.staticTexts[symptomNote].exists)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 3)
+    }
+
+    private struct HealthForm {
+        let kind: String
+        let label: String
+        let primary: String
+        let secondary: String
+        let primaryValue: String
+        let secondaryValue: String
+        let primaryCaption: String
+        let secondaryCaption: String
+        let requiredMessage: String
+        var note: String { "ui-\(kind)-note" }
+    }
+
+    private func healthField(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    private func enterHealthText(_ identifier: String, text: String, in app: XCUIApplication) {
+        let field = healthField(identifier, in: app)
+        revealDiaperControl(field, in: app)
+        tap(field)
+        field.typeText(text)
+        waitFor(field, "value == %@", text)
+    }
+
+    private func assertHealthRow(_ row: XCUIElement, form: HealthForm) {
+        waitFor(row, "exists == true")
+        waitFor(row.staticTexts["offline.record.kind"], "label == %@", form.label)
+        waitFor(row.staticTexts["offline.record.health.\(form.kind).\(form.primary)"], "label == %@",
+                "\(form.primaryCaption)：\(form.primaryValue)")
+        waitFor(row.staticTexts["offline.record.health.\(form.kind).\(form.secondary)"], "label == %@",
+                "\(form.secondaryCaption)：\(form.secondaryValue)")
+        waitFor(row.staticTexts["offline.record.note"], "label == %@", form.note)
+    }
+
+    private func assertSymptomRow(_ row: XCUIElement, severity: String, description: String, note: String) {
+        waitFor(row, "exists == true")
+        waitFor(row.staticTexts["offline.record.kind"], "label == %@", "咳嗽记录")
+        waitFor(row.staticTexts["offline.record.health.severity"], "label == %@", "程度：\(severity)")
+        waitFor(row.staticTexts["offline.record.health.description"], "label == %@", description)
+        waitFor(row.staticTexts["offline.record.note"], "label == %@", note)
+    }
+
     private func assertDiaryRow(_ row: XCUIElement, body: String, note: String) {
         waitFor(row, "exists == true")
         waitFor(row.staticTexts["offline.record.kind"], "label == %@", "日记")

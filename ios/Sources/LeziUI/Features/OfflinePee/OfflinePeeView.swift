@@ -19,7 +19,7 @@ public struct OfflinePeeView: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: theme.density.sectionGap) {
             LeziText("离线开发组件 · 宝宝与本机护理记录", role: .title)
-            LeziText("仅保存在此设备。支持无照片排泄记录、日记、洗澡与散步；护理计划尚未开放。", role: .label)
+            LeziText("仅保存在此设备。支持无照片排泄、日常、症状、用药、就医与疫苗记录；护理计划尚未开放。", role: .label)
             if let message = model.message { LeziText(message).accessibilityIdentifier("offline.result") }
             babySelection
             ScrollView {
@@ -105,7 +105,7 @@ public struct OfflinePeeView: View {
     }
     private var recordList: some View {
         VStack(alignment: .leading, spacing: 12) {
-            LeziText("本机记录（当前支持排泄、日记、洗澡与散步）", role: .titleSmall)
+            LeziText("本机记录（当前支持排泄、日常与健康记录）", role: .titleSmall)
             if model.records.isEmpty {
                 LeziText(model.selected == nil ? "创建或选择宝宝后查看记录" : "尚无本机记录")
                     .accessibilityIdentifier("offline.records.empty")
@@ -168,6 +168,10 @@ public struct OfflinePeeView: View {
                     }.accessibilityIdentifier("offline.excretion.kind")
                 }
                 excretionFields(editor)
+                OfflineHealthFields(kind: editor.draft.kind, draft: Binding(
+                    get: { model.editor?.draft.health ?? editor.draft.health },
+                    set: { model.editor?.edit(health: $0) }
+                ), focus: $focusedField)
                 if editor.draft.kind == .diary {
                     TextField("日记正文", text: Binding(
                         get: { model.editor?.draft.body ?? editor.draft.body },
@@ -241,6 +245,8 @@ public struct OfflinePeeView: View {
         case let .bothDiaper(pee, amount, consistency, color):
             LeziText("尿量：\(OfflineExcretionLabels.pee(pee))").accessibilityIdentifier("offline.record.amount")
             stoolSummary(amount: amount, consistency: consistency, color: color)
+        case let payload? where [.cough, .rash, .vomit, .injury, .medicine, .hospital, .vaccine].contains(payload.type):
+            OfflineHealthSummary(payload: payload)
         case let .diary(body):
             LeziText(body).accessibilityIdentifier("offline.record.body")
         case .bath, .walk:

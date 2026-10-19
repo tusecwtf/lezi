@@ -4,13 +4,13 @@ import LeziStorage
 
 /// Bounded supported record types; unsupported kinds never fall back to empty facts.
 public enum OfflineRecordKind: String, CaseIterable, Hashable, Sendable {
-    case pee, poop, bothDiaper = "both_diaper", diary, bath, walk
+    case pee, poop, bothDiaper = "both_diaper", diary, bath, walk, cough, rash, vomit, injury, medicine, hospital, vaccine
     public static let excretionCases: [Self] = [.pee, .poop, .bothDiaper]
     public var recordType: RecordType {
-        switch self { case .pee: .pee; case .poop: .poop; case .bothDiaper: .bothDiaper; case .diary: .diary; case .bath: .bath; case .walk: .walk }
+        switch self { case .pee: .pee; case .poop: .poop; case .bothDiaper: .bothDiaper; case .diary: .diary; case .bath: .bath; case .walk: .walk; case .cough: .cough; case .rash: .rash; case .vomit: .vomit; case .injury: .injury; case .medicine: .medicine; case .hospital: .hospital; case .vaccine: .vaccine }
     }
     public var label: String {
-        switch self { case .pee: "尿记录"; case .poop: "便记录"; case .bothDiaper: "尿+便记录"; case .diary: "日记"; case .bath: "洗澡记录"; case .walk: "散步记录" }
+        switch self { case .pee: "尿记录"; case .poop: "便记录"; case .bothDiaper: "尿+便记录"; case .diary: "日记"; case .bath: "洗澡记录"; case .walk: "散步记录"; case .cough: "咳嗽记录"; case .rash: "皮疹记录"; case .vomit: "呕吐记录"; case .injury: "受伤记录"; case .medicine: "用药记录"; case .hospital: "就医记录"; case .vaccine: "疫苗记录" }
     }
     public var hasPee: Bool { self == .pee || self == .bothDiaper }
     public var hasStool: Bool { self == .poop || self == .bothDiaper }
@@ -52,24 +52,25 @@ public struct OfflinePeeDraft: Equatable, Sendable {
     public let stoolColor: Int
     public let note: String
     public let body: String
+    public let health: OfflineHealthDraft
 
     public init(clientUUID: UUID = UUID(), babyClientUUID: UUID, timestampMillis: Int64,
                 amount: Int = 2, note: String = "", kind: OfflineRecordKind = .pee,
-                stoolAmount: Int = 3, stoolConsistency: Int = 3, stoolColor: Int = 0, body: String = "") {
+                stoolAmount: Int = 3, stoolConsistency: Int = 3, stoolColor: Int = 0, body: String = "", health: OfflineHealthDraft = .init()) {
         self.clientUUID = clientUUID; self.babyClientUUID = babyClientUUID
         self.timestampMillis = timestampMillis; self.amount = amount; self.note = note
         self.kind = kind; self.stoolAmount = stoolAmount
-        self.stoolConsistency = stoolConsistency; self.stoolColor = stoolColor; self.body = body
+        self.stoolConsistency = stoolConsistency; self.stoolColor = stoolColor; self.body = body; self.health = health
     }
     public func editing(timestampMillis: Int64? = nil, amount: Int? = nil, note: String? = nil,
                         kind: OfflineRecordKind? = nil, stoolAmount: Int? = nil,
-                        stoolConsistency: Int? = nil, stoolColor: Int? = nil, body: String? = nil) -> Self {
+                        stoolConsistency: Int? = nil, stoolColor: Int? = nil, body: String? = nil, health: OfflineHealthDraft? = nil) -> Self {
         Self(clientUUID: clientUUID, babyClientUUID: babyClientUUID,
              timestampMillis: timestampMillis ?? self.timestampMillis,
              amount: amount ?? self.amount, note: note ?? self.note, kind: kind ?? self.kind,
              stoolAmount: stoolAmount ?? self.stoolAmount,
              stoolConsistency: stoolConsistency ?? self.stoolConsistency, stoolColor: stoolColor ?? self.stoolColor,
-             body: body ?? self.body)
+             body: body ?? self.body, health: health ?? self.health)
     }
     public var payload: RecordPayload {
         switch kind {
@@ -80,6 +81,13 @@ public struct OfflinePeeDraft: Equatable, Sendable {
         case .diary: .diary(body: OfflineRecordText.trimmed(body))
         case .bath: .bath
         case .walk: .walk
+        case .cough: .symptom(kind: .cough, severity: health.severity, description: OfflineRecordText.optional(health.description))
+        case .rash: .symptom(kind: .rash, severity: health.severity, description: OfflineRecordText.optional(health.description))
+        case .vomit: .symptom(kind: .vomit, severity: health.severity, description: OfflineRecordText.optional(health.description))
+        case .injury: .symptom(kind: .injury, severity: health.severity, description: OfflineRecordText.optional(health.description))
+        case .medicine: .medicine(name: OfflineRecordText.trimmed(health.medicineName), dose: OfflineRecordText.optional(health.medicineDose))
+        case .hospital: .hospital(reason: OfflineRecordText.trimmed(health.hospitalReason), advice: OfflineRecordText.optional(health.hospitalAdvice))
+        case .vaccine: .vaccine(name: OfflineRecordText.trimmed(health.vaccineName), batch: OfflineRecordText.optional(health.vaccineBatch))
         }
     }
     public var confirmation: RecordConfirmationDraft {
@@ -127,23 +135,23 @@ public struct OfflinePeeState: Equatable, Sendable {
         case let .bothDiaper(amount, poop, soft, shade): (pee, stool, consistency, color) = (amount, poop, soft, shade)
         case let .diary(text):
             (pee, stool, consistency, color) = (2, 3, 3, 0); body = text
-        case .bath, .walk: (pee, stool, consistency, color) = (2, 3, 3, 0)
+        case .bath, .walk, .symptom, .medicine, .hospital, .vaccine: (pee, stool, consistency, color) = (2, 3, 3, 0)
         default: return nil
         }
         draft = .init(clientUUID: record.clientUUID, babyClientUUID: record.babyClientUUID,
                       timestampMillis: record.timestampMillis, amount: pee, note: record.note ?? "", kind: kind,
-                      stoolAmount: stool, stoolConsistency: consistency, stoolColor: color, body: body)
+                      stoolAmount: stool, stoolConsistency: consistency, stoolColor: color, body: body, health: .init(payload: payload))
         initialDraft = draft; expectedUpdatedAt = record.updatedAt
         session = .init(context: .init(babyClientUUID: record.babyClientUUID, babyName: babyName))
     }
     public mutating func edit(timestampMillis: Int64? = nil, amount: Int? = nil, note: String? = nil,
                               kind: OfflineRecordKind? = nil, stoolAmount: Int? = nil,
-                              stoolConsistency: Int? = nil, stoolColor: Int? = nil, body: String? = nil) {
+                              stoolConsistency: Int? = nil, stoolColor: Int? = nil, body: String? = nil, health: OfflineHealthDraft? = nil) {
         guard session.canInteract, !isBusy else { return }
         // Editing a stored fact never changes its type, including programmatic calls.
         guard !isEditing || kind == nil || kind == draft.kind else { return }
         draft = draft.editing(timestampMillis: timestampMillis, amount: amount, note: note, kind: kind,
-                              stoolAmount: stoolAmount, stoolConsistency: stoolConsistency, stoolColor: stoolColor, body: body)
+                              stoolAmount: stoolAmount, stoolConsistency: stoolConsistency, stoolColor: stoolColor, body: body, health: health)
         session.draftEdited(); deletionFailure = nil
     }
     public func featureIssue(nowMillis: Int64) -> LeziConfirmationIssue? {
@@ -160,7 +168,7 @@ public struct OfflinePeeState: Equatable, Sendable {
                 return .init(message: "日记正文最多 800 字", fieldID: "body")
             }
         }
-        return nil
+        return draft.health.issue(kind: draft.kind, original: isEditing ? initialDraft.health : nil)
     }
     public mutating func confirm(nowMillis: Int64) -> LeziConfirmationSession.TapResult {
         let issue = featureIssue(nowMillis: nowMillis)

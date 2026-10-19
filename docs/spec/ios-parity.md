@@ -44,17 +44,25 @@ tests plus one Simulator UI smoke test** and built the
 unsigned `LeziDevelopment` host. These results supersede the previously pending
 Apple evidence, not the complete product acceptance matrix.
 
-The development host is deliberately limited to that offline flow. No family,
-production transport, media, signed-device or full-product support is implied.
-Subsequent native schema 1→2 migration and unified storage for 26 ordinary
-no-media record types are now implemented and independently reviewed with no
-blocking issue; locked Linux tests pass **106/106**, including **28 storage
-tests**. New-head Apple CI is pending, so this code is not accepted by the older
-checkpoint. UI remains the baby/pee flow; library support does not imply a
-26-type editor. The [offline record expansion plan](ios-offline-records.md)
-separates implemented behavior, current storage work, 12 planned field groups and
-acceptance gates; sleep/custom need separately coordinated workflows. The entire
-product matrix remains open until each row has its complete acceptance evidence.
+The latest verified published checkpoint is **`9752aaa`**, with green Android
+CI (**5,908 tests**) and Apple CI (**144 package tests plus three Simulator UI
+tests**). It includes native schema 1→2 migration, unified transactional storage
+for 26 ordinary no-media types, and real create/edit/soft-delete UI for six types:
+`pee`, `poop`, `both_diaper`, `diary`, `bath`, `walk`. The tests cover bounded
+restart persistence, dirty exit and original-baby/revision ownership. The older
+93+1 result above is historical, not the latest acceptance count.
+
+Current **local, unpublished** code adds seven health forms (`cough`, `rash`,
+`vomit`, `injury`, `medicine`, `hospital`, `vaccine`) using the same record owner,
+for 13 implemented UI types. Local feature tests passed 30/30; the new Apple model
+and fourth UI scenario await new-head CI. This work does not inherit `9752aaa`'s
+acceptance. Storage's 26-type support does not expose the remaining forms.
+
+The development host remains bounded: no family, production transport, media,
+signed-device or full-product support is implied. Sleep/custom need separately
+coordinated workflows and remain incomplete. The [offline expansion plan](ios-offline-records.md)
+distinguishes verified and unpublished code, remaining field groups and acceptance
+gates. The entire product matrix remains open until each row has complete evidence.
 
 Native stale-edit CAS and revision-overflow refusal, and opaque preservation of
 nonstandard local JSON escape cases, are explicitly documented differences.
@@ -295,8 +303,8 @@ this plan. No production family data in fixtures, logs, screenshots or CI artifa
 
 CI in `.github/workflows/ios-core.yml` now tests the Swift package, compiles the
 Apple library code, builds the unsigned SwiftUI development host and runs its
-bounded Simulator UI smoke. The `1e5802a6` checkpoint above has green Apple and
-Android evidence. This does not validate the complete app, widget extension,
+bounded Simulator UI scenarios. The `9752aaa` checkpoint above has green Apple
+and Android evidence for six offline forms. This does not validate the complete app, widget extension,
 signed device installation or real mixed-client sync. The complete application
 gates below remain required; later unverified code cannot inherit this result.
 

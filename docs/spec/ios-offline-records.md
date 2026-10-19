@@ -1,75 +1,66 @@
 # iOS offline records: bounded editor expansion plan
 
-> Status as of 2026-10-19: **pee UI implemented; broader storage implemented
-> and locally verified, pending new-head Apple CI; generic editor planned**. This document refines the
-> [iOS parity inventory](ios-parity.md), not the Android product contract. Native
-> offline mode means a device that has not joined a family. It is not permission
-> to bypass membership/ACL while an enrolled device cannot reach its server.
+> Status as of 2026-10-19: **six-type offline UI verified at `9752aaa`;
+> seven additional health types implemented locally, pending new-head Apple CI**.
+> This document refines the [iOS parity inventory](ios-parity.md), not the Android
+> product contract. Native offline mode is not permission to bypass membership/ACL
+> while an enrolled device cannot reach its server.
 
 ## 1. Implemented checkpoint versus proposed work
 
-The published checkpoint `1e5802a6eeaec8521b89e812e33c9e328e66c736` has green
-Android and Apple CI. Apple evidence comprises **93 package tests plus one
-Simulator UI smoke test**, and the unsigned development host build. This proves
-the bounded paths exercised there, not full iOS/Android parity, signing, physical
-installation, family synchronization, or every visual/accessibility scenario.
+The latest verified published checkpoint is **`9752aaa`**: green Android CI
+(**5,908 tests**) and Apple CI (**144 package tests plus three real Simulator
+UI tests**). Its bounded UI supports `pee`, `poop`, `both_diaper`, `diary`, `bath`,
+and `walk`: create, revision-checked edit, explicit soft-delete, dirty-exit
+confirmation, and restart persistence. The unsigned development host uses a
+persistent sandbox store and does not seed fake history or silently fall back to
+an in-memory store. This is not full-product, signed-device, family/sync, media,
+visual/accessibility, or physical installation acceptance.
 
-Evidence verified 2026-10-19 16:25 UTC:
+The native schema 1→2 migration preserves existing data. Unified SQLite storage
+supports create/edit/soft-delete for **26 ordinary no-media types**. Its APIs are
+`confirmRecord`, `recordDetails`, `recordPage`, and `deleteRecord`; older pee APIs
+remain compatibility wrappers. Unknown documents are preserved/readable and
+cannot be silently rewritten. Sleep/custom/media writes remain rejected. Native
+database schema version and payload document schema version are separate concepts.
+Library capability does not imply all 26 forms are implemented.
 
-- [Android run 39282387623](https://github.com/tusecwtf/lezi/actions/runs/39282387623): completed/success.
-- [Apple run 39282387612](https://github.com/tusecwtf/lezi/actions/runs/39282387612): completed/success;
-  93 macOS unit tests and one real XCUITest (61.124 seconds). Artifact `12202077796`
-  contains the result bundle and screenshots; screenshots were inspected.
-- Head tree `5062478e241b159ee8bf091224c7c0c63d7c70ed` matched synthetic PR merge
-  `73263baf`. The PR remains draft and unmerged. These run results apply to that
-  tree only.
+**Current local, unpublished expansion:** `cough`, `rash`, `vomit`, `injury`,
+`medicine`, `hospital`, and `vaccine` extend the same owner to **13 UI types**.
+The fields, typed payloads, original-baby binding, immutable edit type, captured
+revision, explicit confirmation, commit-before-success, error retention and
+save/delete duplicate-task gates are implemented. A bounded health field value
+and SwiftUI component avoid duplicating the transaction flow. Local feature
+regression passed **30 portable tests**, including six new health tests; one new
+Apple-only model test and the fourth Simulator UI path await new-head Apple CI.
+These changes do not inherit acceptance from `9752aaa`.
 
-Implemented at that checkpoint:
+Text semantics use the shared Kotlin-compatible `AndroidText` helper and UTF-16
+counts. The implemented input adaptation retains overlong input and refuses a
+changed/new overlong field rather than Android's `take` truncation. Unchanged
+legacy diary/health text can remain over its input cap because Android loads it
+without truncation and has no corresponding confirmation length gate; required,
+severity, note and future-time validation still applies. Notes over 200 remain
+blocked even when unchanged. Body, note and health text fields are independent.
+See the feature directory README and tests for each field's source anchors.
 
-- Real native SQLite schema 1: local identity, baby nickname/birthday, separate
-  local baby preferences, and no-media pee records.
-- SwiftUI baby creation/selection, immutable pee draft, explicit confirmation,
-  real transaction completion before success, and bounded read-only pagination.
-- Original-baby ownership survives selection changes. Matching attempt ownership
-  prevents duplicate callback dispatch; failures retain the draft. Portable and
-  Apple model tests cover these gates, including real store commits/rollback.
-- An unsigned Simulator-only development host opens a persistent sandbox store.
-  It does not seed sample history or substitute an in-memory store on failure.
+Core typed-structure validation refuses non-formula milk with prepared/duration
+fields and invalid nursing order/mode before encoding. This native safety
+restriction prevents unreadable round trips; it does not assert every Android
+in-memory combination behaves identically. Legacy numeric-domain values remain
+readable. See [the payload contract](contracts/data-model.md).
 
-Subsequent local implementation, **not part of that published checkpoint's
-Apple acceptance**: native schema 1→2 migration preserving existing data and a
-unified storage table supporting create, revision-checked edit and soft-delete
-for all 26 ordinary no-media types below. Independent source review found no
-blocking issue. The locked Linux full-package run passed **106/106 tests**,
-including **28 storage tests** covering migration and each supported type's
-lifecycle with actual payload edits. New-head Apple CI remains pending; the
-older green runs above cannot accept these changes.
+Remaining work includes the other 13 ordinary forms, nursing timer handoff,
+care plans, media, and separately coordinated sleep/custom workflows. Full
+navigation, family enrollment and synchronization remain unimplemented here.
+The 12 groups below are a catalog/implementation plan, not an assertion that
+all their UI or complete product parity has been delivered.
 
-The unified APIs are `confirmRecord`, `recordDetails`, `recordPage` and
-`deleteRecord`; the existing pee APIs remain compatibility wrappers. Opaque
-records remain preserved/readable through the generic read path and cannot be
-silently rewritten by a pee wrapper. Sleep/custom/media writes remain rejected.
-The current UI still exposes only the existing baby/pee flow; these library
-capabilities do not expose a 26-type editor. A native database schema number is
-distinct from the schema-2 payload codec document format in LeziCore.
-
-A subsequent local Core change adds shared typed-structure validation before
-validation/encoding: non-formula milk cannot carry `preparedMl`/`durationMinutes`,
-and invalid nursing order/mode cannot be encoded. Local validation reported
-60 passing Core/Domain tests. No new-head CI acceptance is claimed here. This prevents a typed
-payload from serializing into a document its own decoder cannot safely read;
-it is an explicit native safety restriction, not a claim that every Android
-in-memory combination behaves identically. Legacy numeric-domain values retain
-their existing readable-preservation behavior. See
-[the payload contract](contracts/data-model.md) and Android
-`core/model/src/main/kotlin/com/lezi/babylog/core/model/RecordPayload.kt`.
-
-Planned, **not currently implemented UI**: generic record selection, these 26
-editors, general create/edit/delete flows, and Android-equivalent dirty-exit
-handling. A storage API supporting a type does not expose its UI automatically.
-Sleep and concrete custom items require separately coordinated workflows and
-remain excluded. Media, nursing timer handoff, care plans, family enrollment,
-sync, and full-product navigation are not implied by this work.
+Historical evidence: the earlier pee-only `1e5802a6` checkpoint passed
+[Android 39282387623](https://github.com/tusecwtf/lezi/actions/runs/39282387623)
+and [Apple 39282387612](https://github.com/tusecwtf/lezi/actions/runs/39282387612)
+with 93 package tests and one UI smoke. It is superseded by the latest verified
+checkpoint above; it is not evidence for unpublished health changes.
 
 ## 2. Sources and authority
 
@@ -167,8 +158,10 @@ explicitly; no fallback may immediately save or silently use an empty payload.
 8. **Dirty exit.** Match `decideRecordComposerDismiss` for footer cancel, header
    close, system back and sheet dismissal: busy ignores exit, changed drafts ask
    to discard, unchanged/view-only drafts close. Cancel/discard never writes a
-   care fact. The existing pee component's simpler cancel is a limited checkpoint,
-   not proof that Android's dirty-exit behavior is already implemented.
+   care fact. The current SwiftUI adaptation blocks dirty/busy swipe dismissal;
+   explicit close/cancel offers discard confirmation, and clean swipe closes.
+   Native sheet lifecycle is exercised by the bounded UI tests, not a claim of
+   every Android/system-back gesture being identical.
 9. **Scope remains visible.** No fabricated family/session, sync status, media
    controls, timer navigation or recent history. A local dirty marker is not a
    family pending-publication status. The development host remains clearly
@@ -176,16 +169,17 @@ explicitly; no fallback may immediately save or silently use an empty payload.
 
 ## 5. Smallest implementation slices and acceptance
 
-All UI steps below are **planned**. Storage is locally verified as above; its
-new-head Apple gate remains pending and does not substitute for UI acceptance.
+Steps 1–2 and the simple daily group are implemented and verified at `9752aaa`.
+The health subgroup is implemented locally and pending its new-head Apple gate.
+The remaining groups are planned; storage coverage is not UI acceptance.
 Do not replace the working pee flow with a generic form before its regression
 proof remains green.
 
-1. **Pee integration first:** adapt existing pee to the unified repository while
+1. **Pee integration (verified):** adapt existing pee to the unified repository while
    preserving existing database rows/UUIDs, then add genuine edit, explicit
    soft-delete and dirty-exit confirmation. Prove opening/selecting/canceling
    writes no record and that create/edit/delete survive ordinary process restart.
-2. **Excretion family:** add poop and both-diaper with the same shell and composed
+2. **Excretion family (verified):** add poop and both-diaper with the same shell and composed
    controls. Prove defaults, every choice boundary, full payload round-trip and
    correct original-baby scope. Only these working entries become visible.
 3. **Incremental remaining groups:** simple/text, symptoms/measurements, milk,

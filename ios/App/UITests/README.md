@@ -2,7 +2,7 @@
 
 `OfflinePeeAcceptanceTests` exercises the actual `LeziDevelopment` application
 and its ordinary file-backed SQLite store. Run on a fresh, ephemeral Simulator
-sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, and `UI-Daily-003` names are
+sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, `UI-Daily-003`, and `UI-Health-004` names are
 unique in that fresh sandbox, one per test. Reusing an already-tested sandbox intentionally
 fails rather than deleting or modifying existing records to make the test pass.
 No special app launch arguments, fake stores, reset paths, or network are used.
@@ -32,6 +32,16 @@ walk as point events without fabricated durations, relaunches to verify all thre
 distinct rows, deletes walk, and relaunches again to verify diary and bath survive
 unchanged. Two relaunches cover the persisted changes without duplicating the
 existing cancellation and gesture flows.
+
+The health flow fills the optional dose/advice/batch and note while leaving each
+medicine/hospital/vaccine required field empty, verifies the specific validation
+message, then supplies that field and verifies all values remain distinct. Dose
+is synthetic free text, not a generated medical recommendation or numeric amount.
+A representative cough record exercises severity, independent description/note,
+type-locked editing, and deletion. Two batch relaunches check four independent
+UUIDs and that deletion leaves the three other health forms unchanged. Portable
+per-kind tests cover the other symptom variants without repeating expensive UI
+relaunches. Existing pee, diaper, and daily-event UI assertions remain unchanged.
 
 Expectations poll observable UI states; there are no fixed sleeps. Cancel uses
 the existing `取消` button label; other controls and history probes use stable IDs.
