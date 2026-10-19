@@ -81,3 +81,48 @@ input exists. Its unconfirmable growth snapshot uses an explicitly invalid
 infinite value, not a zero/old-value fallback. Feature validation, domain
 validation and encoding reject it; `OfflineGrowthDraft.payload` returns nil for
 invalid input. Tests assert invalid input cannot launch a write or encode a fact.
+
+Milk forms: formula 配方奶, pumped_feed 母乳瓶喂, pump_express 挤奶. The three
+inputs live in one `OfflineMilkDraft` and one field component; switching a new
+draft's type preserves each input separately. Existing record type remains fixed.
+Formula alone supports optional prepared volume (0–999 ml) and duration (0–1440
+minutes); blank is nil, explicit zero remains zero. Other milk types reject those
+fields instead of silently dropping them. All amounts must be 1–999 ml.
+
+Android source anchors: QuickRecordPurposeFields.kt MilkFields; QuickRecordDraft.kt
+create/validationResult/payloadDocument/fromRecord; QuickRecordSheetControls.kt
+IntegerField; domain/.../CareLogQueries.kt recentMilkAmounts; LogScreen.kt
+openComposer; core/datastore/.../SettingsDataSource.kt AMOUNT_STEP.
+
+- The global device-local step preference uses a dedicated AppStorage key,
+  `lezi.offline.milkAmountStepMl`. Valid choices are 5/10/15 ml, invalid values fall
+  back to 5. Each editor captures its initial step; changing it updates that
+  preference without changing the amount, record type or care-fact dirty state.
+  This explicit preference write can survive cancel; cancel never writes a fact.
+- Refresh reads all three types' real recent amounts from one SQLite snapshot,
+  bound to the selected baby. The query walks beyond the visible page, skips
+  opaque/deleted records, and returns up to three distinct valid amounts for each
+  exact type. New editors capture that data; switching the selected baby does not
+  retarget their inputs or recents. Read failure is reported, not presented as
+  empty history. A successful save refreshes the source values.
+- Without a valid recent value the defaults are formula/pumped feed 120 ml and
+  express 60 ml. Quick choices are recent values followed by current−step,
+  current, current+step and current+2×step, clamped to 1–999 and de-duplicated.
+  Invalid raw input contributes no fabricated neighboring values.
+- Android's separate `lastAmountMl` override is not a persistent preference:
+  LogScreen passes the first same-type amount in its selected baby's current-day
+  record list. This development host has no day-screen launch intent and does
+  not fabricate that override. It uses genuine recent values then the defaults;
+  the missing upstream launch behavior is not claimed as full product parity.
+- Android IntegerField filters digits/takes four UTF-16 units; its amount callback
+  retains the previous amount when parsing fails. This UI deliberately retains
+  the user's raw invalid text and refuses confirmation. It accepts BMP decimal
+  digits as Kotlin's parser does, with four UTF-16 units maximum; no signs, units,
+  decimal separators or whitespace around a number are silently removed. Optional
+  Kotlin-blank input becomes nil. No timer, nursing editor, inventory or future
+  care plan is implied by the duration field.
+
+Before valid input exists the existing panel's typed snapshot uses invalid
+amount −1, never a valid default/old amount. The optional payload accessor returns
+nil and feature/domain checks prevent persistence. This representation is not a
+new wire payload or a saved measurement.

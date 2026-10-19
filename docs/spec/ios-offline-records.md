@@ -1,7 +1,7 @@
 # iOS offline records: bounded editor expansion plan
 
-> Status as of 2026-10-19: **18-type offline UI verified at `3f8e449`; dedicated sleep
-> storage is locally implemented but unpublished, with no sleep UI**.
+> Status as of 2026-10-19: **18-type offline UI plus schema-3 sleep storage verified at `3d8e0b`;
+> local milk expansion reaches 21 UI types but awaits publication/CI. No sleep UI**.
 > This document refines the [iOS parity inventory](ios-parity.md), not the Android
 > product contract. Native offline mode is not permission to bypass membership/ACL
 > while an enrolled device cannot reach its server.
@@ -17,7 +17,7 @@ confirmation and restart persistence. The health UI scroll failure was resolved
 by a test gesture starting in measured content padding rather than a TextField;
 the application layout was not altered to hide it.
 
-The latest verified **dual-green** checkpoint **`3f8e449`** adds `height`, `weight`, `head`, `chest`, and `foot_size`,
+The earlier **dual-green** growth checkpoint **`3f8e449`** adds `height`, `weight`, `head`, `chest`, and `foot_size`,
 for **18 verified bounded UI types**. [Android run 39318117835](https://github.com/tusecwtf/lezi/actions/runs/39318117835)
 passed **5,908 tests**; [Apple run 39318117841](https://github.com/tusecwtf/lezi/actions/runs/39318117841)
 passed **159 package tests plus five Simulator UI tests**. UI execution totaled
@@ -28,14 +28,34 @@ two-decimal editor refill. Changed values use shared Core range/conversion rules
 weight kg converts to integer g, with rounded zero refused. This is an explicit
 native interaction difference, not exact Android editor parity.
 
-**Current unpublished storage work:** native schema **1/2→3** migration preserves
-existing data atomically. Unified SQLite storage supports **26 ordinary no-media
-types plus dedicated sleep commands**. The locked full-package Linux run passed
-**159 tests: 38 Storage, 48 Presentation, 48 Domain, 25 Core**. This is local
-verification, not Apple acceptance and not part of either published checkpoint
-above. The development host still has **no sleep UI**; concrete custom items and
-media remain unsupported. Database schema version and payload document schema
-version are separate concepts.
+The latest verified **dual-green** checkpoint is **`3d8e0b`**. Native schema
+**1/2→3** migration preserves existing data atomically. Storage supports **26
+ordinary no-media types plus dedicated sleep commands**, while UI remains at
+**18 types**. [Apple run 39321168082](https://github.com/tusecwtf/lezi/actions/runs/39321168082)
+passed **174 package tests + five Simulator UI tests**;
+[Android run 39321168588](https://github.com/tusecwtf/lezi/actions/runs/39321168588)
+passed **5,908 tests**. Artifact `12221398420` includes the acceptance evidence.
+Fresh schema-3 development-host launch passed; this is **not sleep UI acceptance**.
+Concrete custom items and media remain unsupported. Database schema version and
+payload document schema version are separate concepts.
+
+**Current local, unpublished milk expansion:** formula, pumped_feed and
+pump_express bring the UI to **21 types**. The full Linux run passed **168 tests
+(40 Storage, 55 Presentation, 48 Domain, 25 Core)**. Three new Apple model tests
+and the sixth UI scenario are unverified; the older green Apple count cannot
+accept this code. Formula-only optional fields stay separate from the other two
+types, and invalid input remains visible instead of silently restoring defaults.
+
+Milk recent amounts are read for all three types in one SQLite snapshot using
+bounded keyset batches across history, not just the visible UI page. Following
+Android's query, a decoded milk payload contributes when its amount is 1–999;
+this query does not apply full optional-field payload validation. Actual editing
+and saving still enforce their full validation/structure gates. Values are
+baby/type-bound, distinct and limited to three; opaque/tombstoned rows are skipped.
+The editor captures this real snapshot without following later baby switches.
+Step 5/10/15 (fallback 5) is a global local AppStorage preference, not per-baby.
+Android's separate day-list `lastAmountMl` launch override is absent from this
+host; genuine recent defaults are not presented as that missing intent.
 
 Ordinary APIs remain `confirmRecord`, `recordDetails`, `recordPage`, and
 `deleteRecord`, with pee compatibility wrappers. Generic ordinary confirmation
@@ -85,7 +105,7 @@ restriction prevents unreadable round trips; it does not assert every Android
 in-memory combination behaves identically. Legacy numeric-domain values remain
 readable. See [the payload contract](contracts/data-model.md).
 
-Remaining UI work includes the other eight ordinary forms, nursing timer handoff,
+Remaining UI work includes the other five ordinary forms, nursing timer handoff,
 care plans, media, dedicated sleep UI, and concrete custom-item workflows. Full
 navigation, family enrollment and synchronization remain unimplemented here.
 The 12 groups below are a catalog/implementation plan, not an assertion that
@@ -95,7 +115,7 @@ Historical evidence: the earlier pee-only `1e5802a6` checkpoint passed
 [Android 39282387623](https://github.com/tusecwtf/lezi/actions/runs/39282387623)
 and [Apple 39282387612](https://github.com/tusecwtf/lezi/actions/runs/39282387612)
 with 93 package tests and one UI smoke. It is superseded by the latest verified
-checkpoint above; it is not evidence for unpublished sleep changes.
+checkpoint above; it is not evidence for unpublished milk changes.
 
 ## 2. Sources and authority
 
@@ -205,8 +225,9 @@ explicitly; no fallback may immediately save or silently use an empty payload.
 ## 5. Smallest implementation slices and acceptance
 
 Steps 1–2, the simple daily group and health subgroup are verified at `f7ca7571`.
-Growth is verified at `3f8e449` with 159 Apple package tests and five UI tests; dedicated sleep
-storage is locally verified and unpublished, without a UI entry.
+Growth and dedicated schema-3 sleep storage are verified at `3d8e0b` with
+174 Apple package tests and five UI tests, without a sleep UI entry. Milk is
+locally implemented and awaiting publication and its Apple acceptance gate.
 The remaining groups are planned; storage coverage is not UI acceptance.
 Do not replace the working pee flow with a generic form before its regression
 proof remains green.

@@ -51,7 +51,7 @@ both_diaper, diary, bath, walk, cough, rash, vomit, injury, medicine, hospital,
 and vaccine. Original-baby/revision ownership, dirty exit, commit-before-success
 and bounded restart persistence are exercised. The earlier 93+1 result is historical.
 
-The latest verified **dual-green** checkpoint **`3f8e449`** adds five growth forms (height, weight, head, chest,
+The earlier **dual-green** growth checkpoint **`3f8e449`** adds five growth forms (height, weight, head, chest,
 foot_size), for **18 verified bounded UI types**. [Android run 39318117835](https://github.com/tusecwtf/lezi/actions/runs/39318117835)
 passed **5,908 tests**; [Apple run 39318117841](https://github.com/tusecwtf/lezi/actions/runs/39318117841)
 passed **159 package tests plus five Simulator UI tests** (863.188 seconds total UI,
@@ -59,10 +59,13 @@ passed **159 package tests plus five Simulator UI tests** (863.188 seconds total
 growth payload precision is preserved rather than copying Android's lossy
 two-decimal editor refill; changed input uses the shared Core conversion rules.
 
-**Unpublished local storage work** adds atomic data-preserving native schema
-**1/2→3** migration and dedicated sleep persistence alongside the 26 ordinary
-no-media types. The full Linux run passed **159 tests (38 Storage, 48 Presentation,
-48 Domain, 25 Core)**; this is not new-head Apple acceptance. Eight explicit sleep
+The latest verified **dual-green** checkpoint **`3d8e0b`** adds atomic,
+data-preserving native schema **1/2→3** migration and dedicated sleep persistence
+alongside 26 ordinary no-media types. [Apple run 39321168082](https://github.com/tusecwtf/lezi/actions/runs/39321168082)
+passed **174 package tests + five UI tests**; [Android run 39321168588](https://github.com/tusecwtf/lezi/actions/runs/39321168588)
+passed **5,908 tests** (artifact `12221398420`). Fresh schema-3 host launch is
+verified, while UI remains at **18 types**, with no sleep editor.
+Eight explicit sleep
 commands handle start/completed creation, wake creation, start/completed editing,
 wake update/withdrawal, and effective-wake selection. Dedicated reads batch-project
 sleep and wake evidence. No family session or observer is fabricated, and **sleep
@@ -72,8 +75,17 @@ start editing; replay is strict; independent wake notes are not changed by sleep
 note edits. See the [offline expansion plan](ios-offline-records.md) for exact APIs
 and scope differences.
 
+**Unpublished local milk expansion** implements formula, pumped_feed and
+pump_express, bringing UI to **21 types**. Linux passed **168 tests (40 Storage,
+55 Presentation, 48 Domain, 25 Core)**; three new Apple model tests and the sixth
+UI test have not yet run. Milk recents use one three-type SQLite snapshot and
+keyset traversal beyond the visible page. As in Android, the history query filters
+valid amount 1–999, not full optional-field validation; persistence retains its
+full validation gates. Step is a global device-local AppStorage preference. This
+host does not implement Android's separate day-list lastAmount launch override.
+
 The development host remains bounded: no family, production transport, signed-device
-or full-product support is implied. Storage support does not expose the eight
+or full-product support is implied. Storage support does not expose the five
 remaining ordinary forms or dedicated sleep UI. Concrete custom workflows remain
 incomplete. The full product matrix stays open until each row has complete evidence.
 
@@ -316,9 +328,9 @@ this plan. No production family data in fixtures, logs, screenshots or CI artifa
 
 CI in `.github/workflows/ios-core.yml` now tests the Swift package, compiles the
 Apple library code, builds the unsigned SwiftUI development host and runs its
-bounded Simulator UI scenarios. The `3f8e449` checkpoint above has green Apple
-and Android evidence for 18 offline forms; unpublished schema-3 sleep storage
-still has only local Linux evidence. This does not validate the complete app, widget extension,
+bounded Simulator UI scenarios. The `3d8e0b` checkpoint above has green Apple
+and Android evidence for 18 offline forms plus schema-3 sleep storage, with no
+sleep UI. The local 21-form milk expansion still awaits publication and Apple CI. This does not validate the complete app, widget extension,
 signed device installation or real mixed-client sync. The complete application
 gates below remain required; later unverified code cannot inherit this result.
 

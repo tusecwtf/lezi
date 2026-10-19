@@ -2,6 +2,7 @@
 import Foundation
 import SwiftUI
 import LeziStorage
+import LeziCore
 
 /// A library feature owner, not an application/session or a sync coordinator.
 @MainActor
@@ -15,6 +16,7 @@ final class OfflinePeeModel: ObservableObject {
     @Published var editor: OfflinePeeState?
     @Published var showingDiscardConfirmation = false
     @Published var showingDeleteConfirmation = false
+    private var milkRecent: [RecordType: [Int]] = [:]
     private var editorContext: OfflineContext?
     private var pendingDiscardSession: UUID?
     private var pendingDeleteSession: UUID?
@@ -29,6 +31,7 @@ final class OfflinePeeModel: ObservableObject {
         let babies: [OfflineBaby]
         let context: OfflineContext?
         let page: OfflineRecordsPage?
+        let milkRecent: [RecordType: [Int]]
     }
     private static func snapshot(_ store: OfflineStore) async throws -> Snapshot {
         let babies = try await store.babies()
@@ -38,9 +41,13 @@ final class OfflinePeeModel: ObservableObject {
         let page: OfflineRecordsPage?
         if let context { page = try await store.recordPage(baby: context.babyClientUUID) }
         else { page = nil }
-        return Snapshot(babies: babies, context: context, page: page)
+        let milkRecent: [RecordType: [Int]]
+        if let context { milkRecent = try await store.recentMilkAmounts(baby: context.babyClientUUID) }
+        else { milkRecent = [:] }
+        return Snapshot(babies: babies, context: context, page: page, milkRecent: milkRecent)
     }
     private func apply(_ snapshot: Snapshot) {
+        milkRecent = snapshot.milkRecent
         babies = snapshot.babies; selected = snapshot.context
         records = snapshot.page?.records ?? []; nextCursor = snapshot.page?.nextCursor
     }
@@ -100,18 +107,18 @@ final class OfflinePeeModel: ObservableObject {
             } catch { self?.fail(error) }
         }
     }
-    func openEditor() {
+    func openEditor(milkStep: Int = 5) {
         guard editor == nil, !busy, let selected,
               let baby = babies.first(where: { $0.clientUUID == selected.babyClientUUID }) else { return }
         editorContext = selected
         editor = .init(babyClientUUID: baby.clientUUID, babyName: baby.nickname,
-                       timestampMillis: Int64(Date().timeIntervalSince1970 * 1000))
+                       timestampMillis: Int64(Date().timeIntervalSince1970 * 1000), milkRecent: milkRecent, milkStep: milkStep)
     }
-    func openEditor(record: OfflineRecord) {
+    func openEditor(record: OfflineRecord, milkStep: Int = 5) {
         guard editor == nil, !busy, let selected,
               selected.babyClientUUID == record.babyClientUUID,
               let baby = babies.first(where: { $0.clientUUID == record.babyClientUUID }) else { return }
-        guard let state = OfflinePeeState(record: record, babyName: baby.nickname) else {
+        guard let state = OfflinePeeState(record: record, babyName: baby.nickname, milkRecent: milkRecent, milkStep: milkStep) else {
             message = "此记录暂不支持安全编辑，原始内容已保留。"
             return
         }

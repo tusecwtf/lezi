@@ -96,7 +96,7 @@ corpus scenarios remain unimplemented and are not silently counted as passing.
   Negative-zero integer tokens are deliberately rejected at this boundary until
   their cross-language pre-normalization hash semantics are proven.
 - `LeziStorage` is a real file-backed SQLite **offline-only** vertical slice.
-  Current unpublished work implements native schema **3**, with atomic,
+  Verified checkpoint `3d8e0b` implements native schema **3**, with atomic,
   data-preserving migration from schema 1 or 2. It supports 26 ordinary no-media
   record types plus dedicated sleep storage. Generic `confirmRecord` still rejects
   sleep; custom entries and photos remain unsupported. Sleep UI is not exposed.
@@ -116,16 +116,24 @@ corpus scenarios remain unimplemented and are not silently counted as passing.
   `Sources/LeziStorage/StorageScope.swift` and
   [the offline expansion specification](../docs/spec/ios-offline-records.md).
 
-Evidence boundaries (2026-10-19): latest dual-green checkpoint **`3f8e449`** has
-18 bounded UI types. [Android run 39318117835](https://github.com/tusecwtf/lezi/actions/runs/39318117835)
-passed **5,908 tests**; [Apple run 39318117841](https://github.com/tusecwtf/lezi/actions/runs/39318117841)
-passed **159 package tests + five Simulator UI tests**. UI execution totaled
-863.188 seconds, with growth taking 147.704 seconds; artifact `12218688971`
-contains the results. This supersedes the 13-type `f7ca7571` checkpoint's 151+4.
-Unpublished schema-3 sleep storage separately passed **159 Linux tests (38 Storage,
-48 Presentation, 48 Domain, 25 Core)**. These local sleep results are not Apple
-acceptance, despite the coincidentally equal total test count. No sleep UI,
-custom-item workflow, full application, signed install or mixed-client sync claim
+Evidence boundaries (2026-10-19): latest dual-green checkpoint **`3d8e0b`** has
+18 bounded UI types plus schema-3 dedicated sleep storage.
+[Apple run 39321168082](https://github.com/tusecwtf/lezi/actions/runs/39321168082)
+passed **174 package tests + five Simulator UI tests**;
+[Android run 39321168588](https://github.com/tusecwtf/lezi/actions/runs/39321168588)
+passed **5,908 tests**. Artifact `12221398420` includes the acceptance evidence.
+Fresh schema-3 app launch passed, but no sleep UI was implemented or accepted.
+This supersedes growth checkpoint `3f8e449`'s 159+5 result.
+
+Current unpublished milk forms (formula, pumped_feed, pump_express) bring UI to
+**21 types**. Linux passed **168 tests (40 Storage, 55 Presentation, 48 Domain,
+25 Core)**; three new Apple model tests and the sixth UI scenario remain unverified.
+The three-type recent-amount map is read in one SQLite snapshot through bounded
+keyset pages across history. It follows Android's amount-only 1–999 filtering,
+not full optional-payload validation; save/edit still enforce full validation.
+Step 5/10/15 is a global local AppStorage preference. Android's day-list lastAmount
+launch override is not implemented or simulated by recent values in this host.
+No custom-item workflow, complete app, signed install or mixed-client sync claim
 follows from these counts.
 
 Two source-derived compatibility questions remain open, without a demonstrated

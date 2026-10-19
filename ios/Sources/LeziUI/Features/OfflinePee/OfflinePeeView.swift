@@ -12,6 +12,7 @@ public struct OfflinePeeView: View {
     @State private var nickname = ""
     @State private var birthday = Date()
     @State private var creatingBaby = false
+    @AppStorage("lezi.offline.milkAmountStepMl") private var storedMilkStep = 5
     @FocusState private var focusedField: String?
 
     public init(store: OfflineStore) { _model = StateObject(wrappedValue: OfflinePeeModel(store: store)) }
@@ -19,7 +20,7 @@ public struct OfflinePeeView: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: theme.density.sectionGap) {
             LeziText("离线开发组件 · 宝宝与本机护理记录", role: .title)
-            LeziText("仅保存在此设备。支持无照片排泄、日常、症状、用药、就医、疫苗与成长测量记录；护理计划尚未开放。", role: .label)
+            LeziText("仅保存在此设备。支持无照片排泄、日常、症状、用药、就医、疫苗、成长测量与奶量记录；护理计划尚未开放。", role: .label)
             if let message = model.message { LeziText(message).accessibilityIdentifier("offline.result") }
             babySelection
             ScrollView {
@@ -27,7 +28,7 @@ public struct OfflinePeeView: View {
                         Button(creatingBaby ? "收起新建宝宝" : "新建宝宝") { creatingBaby.toggle() }
                             .accessibilityIdentifier("offline.baby.new")
                         if creatingBaby { babyForm }
-                        Button("新建记录") { model.openEditor() }
+                        Button("新建记录") { model.openEditor(milkStep: storedMilkStep) }
                             .accessibilityIdentifier("offline.pee.new")
                             .disabled(model.selected == nil || model.busy)
                             .frame(minHeight: theme.primaryTouchMinimum)
@@ -105,7 +106,7 @@ public struct OfflinePeeView: View {
     }
     private var recordList: some View {
         VStack(alignment: .leading, spacing: 12) {
-            LeziText("本机记录（当前支持排泄、日常、健康与成长记录）", role: .titleSmall)
+            LeziText("本机记录（当前支持排泄、日常、健康、成长与奶量记录）", role: .titleSmall)
             if model.records.isEmpty {
                 LeziText(model.selected == nil ? "创建或选择宝宝后查看记录" : "尚无本机记录")
                     .accessibilityIdentifier("offline.records.empty")
@@ -118,7 +119,7 @@ public struct OfflinePeeView: View {
                         LeziText(note).accessibilityIdentifier("offline.record.note")
                     }
                     if OfflinePeeState.canEdit(record) {
-                        Button("编辑\(OfflineRecordKind(rawValue: record.rawType)?.label ?? "记录")") { model.openEditor(record: record) }
+                        Button("编辑\(OfflineRecordKind(rawValue: record.rawType)?.label ?? "记录")") { model.openEditor(record: record, milkStep: storedMilkStep) }
                             .disabled(model.busy)
                             .accessibilityIdentifier("offline.record.edit")
                     } else {
@@ -168,6 +169,19 @@ public struct OfflinePeeView: View {
                     }.accessibilityIdentifier("offline.excretion.kind")
                 }
                 excretionFields(editor)
+                if let kind = editor.draft.kind.milkKind {
+                    OfflineMilkFields(kind: kind, draft: Binding(
+                        get: { model.editor?.draft.milk ?? editor.draft.milk },
+                        set: { model.editor?.edit(milk: $0) }
+                    ), step: Binding(
+                        get: { model.editor?.milkStep ?? editor.milkStep },
+                        set: { value in
+                            guard model.editor?.isBusy == false, !model.busy else { return }
+                            model.editor?.setMilkStep(value)
+                            storedMilkStep = OfflineMilkDraft.step(value)
+                        }
+                    ), focus: $focusedField)
+                }
                 OfflineGrowthFields(kind: editor.draft.kind, draft: Binding(
                     get: { model.editor?.draft.growth ?? editor.draft.growth },
                     set: { model.editor?.edit(growth: $0) }
@@ -251,6 +265,8 @@ public struct OfflinePeeView: View {
             stoolSummary(amount: amount, consistency: consistency, color: color)
         case let payload? where [.cough, .rash, .vomit, .injury, .medicine, .hospital, .vaccine].contains(payload.type):
             OfflineHealthSummary(payload: payload)
+        case let .milk(_, amount, prepared, duration):
+            OfflineMilkSummary(amount: amount, prepared: prepared, duration: duration)
         case let .measurement(kind, value, unit):
             OfflineGrowthSummary(kind: kind, value: value, unit: unit)
         case let .diary(body):

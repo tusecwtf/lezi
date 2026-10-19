@@ -524,6 +524,140 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         waitFor(row.staticTexts["offline.record.note"], "label == %@", note)
     }
 
+    func testMilkFactsRecentAmountsAndLocalStepPersistIndependently() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let babyName = "UI-Milk-006"
+        let formulaNote = "ui-formula-note"
+        let bottleNote = "ui-pumped-feed-note"
+        app.launch()
+        tap(app.buttons["offline.baby.new"])
+        let nickname = app.textFields["offline.baby.nickname"]
+        tap(nickname)
+        nickname.typeText(babyName)
+        tap(app.buttons["offline.baby.create"])
+        waitFor(app.staticTexts["offline.result"], "label == %@", "已在本机创建宝宝：\(babyName)")
+        waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
+        tap(app.buttons["offline.baby.new"])
+        assertSelectedBaby(app, name: babyName)
+        assertEmptyHistory(app)
+
+        openDiaper(kind: "formula", in: app)
+        revealHealthControl(app.buttons["offline.milk.step"], in: app)
+        tap(app.buttons["offline.milk.step"])
+        tap(app.buttons["offline.milk.step.10"])
+        replaceMilkAmount("120", with: "0", in: app)
+        tap(app.buttons["confirmation.save"])
+        waitFor(app.staticTexts["confirmation.reason"], "label == %@", "奶量需在 1–999 ml 之间")
+        waitFor(healthField("offline.milk.amount", in: app), "value == %@", "0")
+        replaceMilkAmount("0", with: "147", in: app)
+        enterHealthText("offline.milk.prepared", text: "180", in: app)
+        enterHealthText("offline.milk.duration", text: "10", in: app)
+        revealHealthControl(noteField(in: app), in: app)
+        enterNote(formulaNote, in: app)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "配方奶")
+        let formulaRow = diaperRow(in: app, note: formulaNote)
+        waitFor(formulaRow, "exists == true")
+        let formulaID = formulaRow.identifier
+        assertMilkRow(formulaRow, kind: "配方奶", amount: 147, note: formulaNote, prepared: 180, duration: 10)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        assertMilkRow(app.otherElements[formulaID], kind: "配方奶", amount: 147, note: formulaNote, prepared: 180, duration: 10)
+        tap(app.otherElements[formulaID].buttons["offline.record.edit"])
+        waitFor(app.staticTexts["offline.excretion.kind.fixed"], "label == %@", "类型：配方奶（不可更改）")
+        XCTAssertFalse(app.buttons["offline.excretion.kind"].exists)
+        waitFor(healthField("offline.milk.amount", in: app), "value == %@", "147")
+        // The local 10 ml preference survives relaunch and drives real adjustment.
+        revealHealthControl(app.buttons["offline.milk.plus"], in: app)
+        waitFor(app.buttons["offline.milk.plus"], "label == %@", "+10")
+        tap(app.buttons["offline.milk.plus"])
+        waitFor(healthField("offline.milk.amount", in: app), "value == %@", "157")
+        waitFor(healthField("offline.milk.prepared", in: app), "value == %@", "180")
+        waitFor(healthField("offline.milk.duration", in: app), "value == %@", "10")
+        saveDiaper(in: app, babyName: babyName, kindLabel: "配方奶")
+        assertMilkRow(app.otherElements[formulaID], kind: "配方奶", amount: 157, note: formulaNote, prepared: 180, duration: 10)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+
+        openDiaper(kind: "formula", in: app)
+        waitFor(healthField("offline.milk.amount", in: app), "value == %@", "157")
+        // Move far away from the recent value: 157 cannot be a 10 ml neighbor
+        // of 300, so this shortcut must come from the saved formula fact.
+        replaceMilkAmount("157", with: "300", in: app)
+        revealHealthControl(app.buttons["offline.milk.quick.157"], in: app)
+        tap(app.buttons["offline.milk.quick.157"])
+        waitFor(healthField("offline.milk.amount", in: app), "value == %@", "157")
+        enterHealthText("offline.milk.prepared", text: "190", in: app)
+        enterHealthText("offline.milk.duration", text: "11", in: app)
+        revealHealthControl(app.buttons["offline.excretion.kind"], in: app)
+        tap(app.buttons["offline.excretion.kind"])
+        tap(app.buttons["offline.excretion.kind.pumped_feed"])
+        XCTAssertFalse(healthField("offline.milk.prepared", in: app).exists)
+        XCTAssertFalse(healthField("offline.milk.duration", in: app).exists)
+        waitFor(healthField("offline.milk.amount", in: app), "value == %@", "120")
+        XCTAssertFalse(app.buttons["offline.milk.quick.157"].exists)
+        revealHealthControl(app.buttons["offline.milk.plus"], in: app)
+        tap(app.buttons["offline.milk.plus"])
+        waitFor(healthField("offline.milk.amount", in: app), "value == %@", "130")
+        revealHealthControl(noteField(in: app), in: app)
+        enterNote(bottleNote, in: app)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "母乳瓶喂")
+        let bottleRow = diaperRow(in: app, note: bottleNote)
+        waitFor(bottleRow, "exists == true")
+        let bottleID = bottleRow.identifier
+        XCTAssertNotEqual(formulaID, bottleID)
+        assertMilkRow(bottleRow, kind: "母乳瓶喂", amount: 130, note: bottleNote)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 2)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        assertMilkRow(app.otherElements[formulaID], kind: "配方奶", amount: 157, note: formulaNote, prepared: 180, duration: 10)
+        assertMilkRow(app.otherElements[bottleID], kind: "母乳瓶喂", amount: 130, note: bottleNote)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 2)
+        tap(app.otherElements[bottleID].buttons["offline.record.edit"])
+        revealHealthControl(app.buttons["offline.delete.request"], in: app)
+        tap(app.buttons["offline.delete.request"])
+        tap(app.buttons["offline.delete.confirm"])
+        waitFor(app.staticTexts["offline.result"], "label == %@", "已删除本机母乳瓶喂")
+        waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
+        waitFor(app.otherElements[bottleID], "exists == false")
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        XCTAssertFalse(app.otherElements[bottleID].exists)
+        assertMilkRow(app.otherElements[formulaID], kind: "配方奶", amount: 157, note: formulaNote, prepared: 180, duration: 10)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+    }
+
+    private func replaceMilkAmount(_ oldValue: String, with newValue: String, in app: XCUIApplication) {
+        let field = healthField("offline.milk.amount", in: app)
+        revealHealthControl(field, in: app)
+        waitFor(field, "value == %@", oldValue)
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: oldValue.count) + newValue)
+        waitFor(field, "value == %@", newValue)
+    }
+
+    private func assertMilkRow(_ row: XCUIElement, kind: String, amount: Int, note: String,
+                               prepared: Int? = nil, duration: Int? = nil) {
+        waitFor(row, "exists == true")
+        waitFor(row.staticTexts["offline.record.kind"], "label == %@", kind)
+        waitFor(row.staticTexts["offline.record.milk.amount"], "label == %@", "奶量：\(amount) ml")
+        waitFor(row.staticTexts["offline.record.note"], "label == %@", note)
+        if let prepared {
+            waitFor(row.staticTexts["offline.record.milk.prepared"], "label == %@", "冲调量：\(prepared) ml")
+        } else {
+            XCTAssertFalse(row.staticTexts["offline.record.milk.prepared"].exists)
+        }
+        if let duration {
+            waitFor(row.staticTexts["offline.record.milk.duration"], "label == %@", "耗时：\(duration) 分钟")
+        } else {
+            XCTAssertFalse(row.staticTexts["offline.record.milk.duration"].exists)
+        }
+    }
+
     private struct HealthForm {
         let kind: String
         let label: String

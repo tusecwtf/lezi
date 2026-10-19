@@ -2,7 +2,7 @@
 
 `OfflinePeeAcceptanceTests` exercises the actual `LeziDevelopment` application
 and its ordinary file-backed SQLite store. Run on a fresh, ephemeral Simulator
-sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, `UI-Daily-003`, `UI-Health-004`, and `UI-Growth-005` names are
+sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, `UI-Daily-003`, `UI-Health-004`, `UI-Growth-005`, and `UI-Milk-006` names are
 unique in that fresh sandbox, one per test. Reusing an already-tested sandbox intentionally
 fails rather than deleting or modifying existing records to make the test pass.
 No special app launch arguments, fake stores, reset paths, or network are used.
@@ -51,6 +51,17 @@ relaunching must preserve height unchanged. Exact display and editor values
 exercise the kg-to-gram round trip; portable tests cover the five-kind matrix.
 It reuses the health flow's geometry-aware scrolling above the confirmation
 footer and keyboard, with drag starts in measured non-field content padding.
+
+The milk flow rejects zero without a default replacement, saves formula amount,
+prepared amount, and optional duration, then relaunches and edits the same row
+with its type locked. A persisted local 10 ml step drives the adjustment from
+147 to 157 ml. A new formula draft defaults to that actual saved value; after
+changing to 300 ml, its 157 ml shortcut must still restore the recent fact rather
+than a neighboring suggested quantity. Switching that draft to pumped milk
+feeding must expose neither formula-only fields nor formula's recent amount.
+The second saved record has no prepared amount or duration. Batch relaunch and
+deletion checks preserve the formula row and its independent values. Portable
+three-kind coverage includes expressing milk without duplicating this UI flow.
 
 Expectations poll observable UI states; there are no fixed sleeps. Cancel uses
 the existing `取消` button label; other controls and history probes use stable IDs.
