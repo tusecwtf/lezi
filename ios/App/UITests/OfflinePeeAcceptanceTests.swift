@@ -464,6 +464,7 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
                 bottom = min(bottom, app.keyboards.firstMatch.frame.minY - 12)
             }
             let field = element.frame
+            print("Health reveal \(element.identifier) attempt \(attempt): field=\(field), viewport=\(viewport), safeY=\(top)...\(bottom)")
             if element.isHittable && field.minY >= top && field.maxY <= bottom { return }
             if attempt == 4 { break }
             let availableHeight = bottom - top
@@ -476,9 +477,23 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
             let distance = min(max(needed + 16, 40), availableHeight * 0.6)
             let startY = scrollUp ? bottom - 8 : top + 8
             let endY = startY + (scrollUp ? -distance : distance)
+            // Start in the measured content padding, not inside a focused
+            // TextField whose own gesture recognizer may consume the drag.
+            let leftPadding = field.minX - viewport.minX
+            let rightPadding = viewport.maxX - field.maxX
+            let trackX: CGFloat
+            if leftPadding >= 8 {
+                trackX = viewport.minX + leftPadding / 2
+            } else if rightPadding >= 8 {
+                trackX = field.maxX + rightPadding / 2
+            } else {
+                XCTFail("No measured padding track outside \(element.identifier)")
+                return
+            }
+            print("Health reveal drag: (\(trackX), \(startY)) -> (\(trackX), \(endY))")
             let origin = editorScroll.coordinate(withNormalizedOffset: .zero)
-            let start = origin.withOffset(CGVector(dx: viewport.width * 0.85, dy: startY - viewport.minY))
-            let end = origin.withOffset(CGVector(dx: viewport.width * 0.85, dy: endY - viewport.minY))
+            let start = origin.withOffset(CGVector(dx: trackX - viewport.minX, dy: startY - viewport.minY))
+            let end = origin.withOffset(CGVector(dx: trackX - viewport.minX, dy: endY - viewport.minY))
             start.press(forDuration: 0.1, thenDragTo: end)
         }
         XCTFail("Could not reveal \(element.identifier) above the confirmation footer")
