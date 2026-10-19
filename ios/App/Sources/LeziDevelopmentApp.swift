@@ -18,13 +18,13 @@ struct LeziDevelopmentApp: App {
 
 @MainActor
 private struct DevelopmentBootstrapView: View {
-    private enum State {
+    private enum BootstrapPhase {
         case loading
         case ready(OfflineStore)
         case failed
     }
 
-    @State private var state: State = .loading
+    @State private var state: BootstrapPhase = .loading
     @State private var attempt = 0
 
     var body: some View {
