@@ -347,7 +347,7 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         for (index, form) in forms.enumerated() {
             openDiaper(kind: form.kind, in: app)
             enterHealthText("offline.health.\(form.kind).\(form.secondary)", text: form.secondaryValue, in: app)
-            revealDiaperControl(noteField(in: app), in: app)
+            revealHealthControl(noteField(in: app), in: app)
             enterNote(form.note, in: app)
             tap(app.buttons["confirmation.save"])
             // Optional fields and a note cannot substitute for this kind's required field.
@@ -373,7 +373,7 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         openDiaper(kind: "cough", in: app)
         chooseDiaperOption("offline.health.severity", value: 3, in: app)
         enterHealthText("offline.health.description", text: description, in: app)
-        revealDiaperControl(noteField(in: app), in: app)
+        revealHealthControl(noteField(in: app), in: app)
         enterNote(symptomNote, in: app)
         saveDiaper(in: app, babyName: babyName, kindLabel: "咳嗽记录")
         let symptomRow = diaperRow(in: app, note: symptomNote)
@@ -385,7 +385,7 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         XCTAssertFalse(app.buttons["offline.excretion.kind"].exists)
         chooseDiaperOption("offline.health.severity", value: 1, in: app)
         let symptomDescription = healthField("offline.health.description", in: app)
-        revealDiaperControl(symptomDescription, in: app)
+        revealHealthControl(symptomDescription, in: app)
         waitFor(symptomDescription, "value == %@", description)
         symptomDescription.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.1)).tap()
         symptomDescription.typeText("-edited")
@@ -404,7 +404,7 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         assertSymptomRow(app.otherElements[symptomID], severity: "轻微", description: editedDescription, note: symptomNote)
         XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 4)
         tap(app.otherElements[symptomID].buttons["offline.record.edit"])
-        revealDiaperControl(app.buttons["offline.delete.request"], in: app)
+        revealHealthControl(app.buttons["offline.delete.request"], in: app)
         tap(app.buttons["offline.delete.request"])
         tap(app.buttons["offline.delete.confirm"])
         waitFor(app.staticTexts["offline.result"], "label == %@", "已删除本机咳嗽记录")
@@ -441,10 +441,47 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
 
     private func enterHealthText(_ identifier: String, text: String, in app: XCUIApplication) {
         let field = healthField(identifier, in: app)
-        revealDiaperControl(field, in: app)
+        revealHealthControl(field, in: app)
         tap(field)
         field.typeText(text)
         waitFor(field, "value == %@", text)
+    }
+
+    private func revealHealthControl(_ element: XCUIElement, in app: XCUIApplication) {
+        waitFor(element, "exists == true")
+        let editorScroll = app.scrollViews.containing(.any, identifier: "offline.pee.note").firstMatch
+        // isHittable can be true for a field partly covered by the fixed footer.
+        // Require the whole control above that footer before a single tap/type.
+        // Derive both the reveal condition and drag path from the current UI;
+        // the ScrollView's accessibility frame can extend behind the keyboard.
+        for attempt in 0...4 {
+            let viewport = editorScroll.frame
+            let top = viewport.minY + 8
+            var bottom = min(viewport.maxY, app.buttons["confirmation.save"].frame.minY) - 12
+            let reason = app.staticTexts["confirmation.reason"]
+            if reason.exists { bottom = min(bottom, reason.frame.minY - 12) }
+            if app.keyboards.firstMatch.exists {
+                bottom = min(bottom, app.keyboards.firstMatch.frame.minY - 12)
+            }
+            let field = element.frame
+            if element.isHittable && field.minY >= top && field.maxY <= bottom { return }
+            if attempt == 4 { break }
+            let availableHeight = bottom - top
+            guard availableHeight > 60 else {
+                XCTFail("The editor has no unobscured scroll region for \(element.identifier)")
+                return
+            }
+            let scrollUp = field.maxY > bottom
+            let needed = scrollUp ? field.maxY - bottom : top - field.minY
+            let distance = min(max(needed + 16, 40), availableHeight * 0.6)
+            let startY = scrollUp ? bottom - 8 : top + 8
+            let endY = startY + (scrollUp ? -distance : distance)
+            let origin = editorScroll.coordinate(withNormalizedOffset: .zero)
+            let start = origin.withOffset(CGVector(dx: viewport.width * 0.85, dy: startY - viewport.minY))
+            let end = origin.withOffset(CGVector(dx: viewport.width * 0.85, dy: endY - viewport.minY))
+            start.press(forDuration: 0.1, thenDragTo: end)
+        }
+        XCTFail("Could not reveal \(element.identifier) above the confirmation footer")
     }
 
     private func assertHealthRow(_ row: XCUIElement, form: HealthForm) {
