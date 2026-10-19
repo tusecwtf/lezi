@@ -27,8 +27,8 @@ concurrency:
 jobs:
   contracts:
     runs-on: macos-15
-    # Full Simulator interaction coverage now includes four independent record flows.
-    timeout-minutes: 30
+    # Full Simulator interaction coverage now includes five independent record flows.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
       - name: Record exact source and Apple toolchain

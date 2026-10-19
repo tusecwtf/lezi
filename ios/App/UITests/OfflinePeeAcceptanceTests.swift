@@ -422,6 +422,108 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 3)
     }
 
+    func testGrowthValuesPersistInDisplayUnitsWithTypeLockedEdits() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let babyName = "UI-Growth-005"
+        let weightNote = "ui-weight-note"
+        let heightNote = "ui-height-note"
+        app.launch()
+        tap(app.buttons["offline.baby.new"])
+        let nickname = app.textFields["offline.baby.nickname"]
+        tap(nickname)
+        nickname.typeText(babyName)
+        tap(app.buttons["offline.baby.create"])
+        waitFor(app.staticTexts["offline.result"], "label == %@", "已在本机创建宝宝：\(babyName)")
+        waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
+        tap(app.buttons["offline.baby.new"])
+        assertSelectedBaby(app, name: babyName)
+        assertEmptyHistory(app)
+
+        openDiaper(kind: "weight", in: app)
+        let measurement = healthField("offline.growth.value", in: app)
+        enterHealthText("offline.growth.value", text: "0", in: app)
+        tap(app.buttons["confirmation.save"])
+        waitFor(app.staticTexts["confirmation.reason"], "label == %@", "请填写有效数值")
+        waitFor(measurement, "value == %@", "0")
+        // Invalid input must remain in the editor rather than saving a default.
+        waitFor(app.staticTexts["offline.excretion.kind.fixed"], "exists == false")
+        replaceGrowthValue("0", with: "12.345", in: app)
+        revealHealthControl(noteField(in: app), in: app)
+        enterNote(weightNote, in: app)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "体重")
+        let weightRow = diaperRow(in: app, note: weightNote)
+        waitFor(weightRow, "exists == true")
+        let weightID = weightRow.identifier
+        assertGrowthRow(weightRow, kind: "体重", value: "12.345 kg", note: weightNote)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        assertGrowthRow(app.otherElements[weightID], kind: "体重", value: "12.345 kg", note: weightNote)
+        tap(app.otherElements[weightID].buttons["offline.record.edit"])
+        waitFor(app.staticTexts["offline.excretion.kind.fixed"], "label == %@", "类型：体重（不可更改）")
+        XCTAssertFalse(app.buttons["offline.excretion.kind"].exists)
+        replaceGrowthValue("12.345", with: "12.678", in: app)
+        waitFor(noteField(in: app), "value == %@", weightNote)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "体重")
+        assertGrowthRow(app.otherElements[weightID], kind: "体重", value: "12.678 kg", note: weightNote)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+
+        openDiaper(kind: "height", in: app)
+        enterHealthText("offline.growth.value", text: "87.6", in: app)
+        revealHealthControl(noteField(in: app), in: app)
+        enterNote(heightNote, in: app)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "身高")
+        let heightRow = diaperRow(in: app, note: heightNote)
+        waitFor(heightRow, "exists == true")
+        let heightID = heightRow.identifier
+        XCTAssertNotEqual(weightID, heightID)
+        assertGrowthRow(heightRow, kind: "身高", value: "87.6 cm", note: heightNote)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 2)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        assertGrowthRow(app.otherElements[weightID], kind: "体重", value: "12.678 kg", note: weightNote)
+        assertGrowthRow(app.otherElements[heightID], kind: "身高", value: "87.6 cm", note: heightNote)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 2)
+        tap(app.otherElements[weightID].buttons["offline.record.edit"])
+        waitFor(measurement, "value == %@", "12.678")
+        revealHealthControl(app.buttons["offline.delete.request"], in: app)
+        tap(app.buttons["offline.delete.request"])
+        tap(app.buttons["offline.delete.confirm"])
+        waitFor(app.staticTexts["offline.result"], "label == %@", "已删除本机体重")
+        waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
+        waitFor(app.otherElements[weightID], "exists == false")
+        assertGrowthRow(app.otherElements[heightID], kind: "身高", value: "87.6 cm", note: heightNote)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        XCTAssertFalse(app.otherElements[weightID].exists)
+        XCTAssertFalse(app.staticTexts[weightNote].exists)
+        assertGrowthRow(app.otherElements[heightID], kind: "身高", value: "87.6 cm", note: heightNote)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+    }
+
+    private func replaceGrowthValue(_ oldValue: String, with newValue: String, in app: XCUIApplication) {
+        let field = healthField("offline.growth.value", in: app)
+        revealHealthControl(field, in: app)
+        waitFor(field, "value == %@", oldValue)
+        // A single-line field tapped at its trailing edge places the caret after
+        // the checked value; delete exactly that value, then verify replacement.
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: oldValue.count) + newValue)
+        waitFor(field, "value == %@", newValue)
+    }
+
+    private func assertGrowthRow(_ row: XCUIElement, kind: String, value: String, note: String) {
+        waitFor(row, "exists == true")
+        waitFor(row.staticTexts["offline.record.kind"], "label == %@", kind)
+        waitFor(row.staticTexts["offline.record.growth.value"], "label == %@", value)
+        waitFor(row.staticTexts["offline.record.note"], "label == %@", note)
+    }
+
     private struct HealthForm {
         let kind: String
         let label: String

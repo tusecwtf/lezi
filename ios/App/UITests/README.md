@@ -2,7 +2,7 @@
 
 `OfflinePeeAcceptanceTests` exercises the actual `LeziDevelopment` application
 and its ordinary file-backed SQLite store. Run on a fresh, ephemeral Simulator
-sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, `UI-Daily-003`, and `UI-Health-004` names are
+sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, `UI-Daily-003`, `UI-Health-004`, and `UI-Growth-005` names are
 unique in that fresh sandbox, one per test. Reusing an already-tested sandbox intentionally
 fails rather than deleting or modifying existing records to make the test pass.
 No special app launch arguments, fake stores, reset paths, or network are used.
@@ -42,6 +42,15 @@ type-locked editing, and deletion. Two batch relaunches check four independent
 UUIDs and that deletion leaves the three other health forms unchanged. Portable
 per-kind tests cover the other symptom variants without repeating expensive UI
 relaunches. Existing pee, diaper, and daily-event UI assertions remain unchanged.
+
+The growth flow rejects zero instead of substituting a default, creates a weight
+of 12.345 kg, and relaunches before editing it to 12.678 kg with its type locked.
+A separate 87.6 cm height record exercises the centimeter path. A batch relaunch
+checks the edited weight and independent height, then deleting weight and
+relaunching must preserve height unchanged. Exact display and editor values
+exercise the kg-to-gram round trip; portable tests cover the five-kind matrix.
+It reuses the health flow's geometry-aware scrolling above the confirmation
+footer and keyboard, with drag starts in measured non-field content padding.
 
 Expectations poll observable UI states; there are no fixed sleeps. Cancel uses
 the existing `取消` button label; other controls and history probes use stable IDs.
