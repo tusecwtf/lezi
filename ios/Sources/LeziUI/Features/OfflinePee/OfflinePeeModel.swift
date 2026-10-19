@@ -8,12 +8,16 @@ import LeziStorage
 final class OfflinePeeModel: ObservableObject {
     @Published private(set) var babies: [OfflineBaby] = []
     @Published private(set) var selected: OfflineContext?
-    @Published private(set) var records: [OfflinePeeRecord] = []
+    @Published private(set) var records: [OfflineRecord] = []
     @Published private(set) var nextCursor: OfflineRecordCursor?
     @Published private(set) var busy = false
     @Published private(set) var message: String?
     @Published var editor: OfflinePeeState?
+    @Published var showingDiscardConfirmation = false
+    @Published var showingDeleteConfirmation = false
     private var editorContext: OfflineContext?
+    private var pendingDiscardSession: UUID?
+    private var pendingDeleteSession: UUID?
     private let store: OfflineStore
     private var operation: Task<Void, Never>?
     private var save: Task<Void, Never>?
@@ -24,15 +28,15 @@ final class OfflinePeeModel: ObservableObject {
     struct Snapshot: Sendable {
         let babies: [OfflineBaby]
         let context: OfflineContext?
-        let page: OfflineRecordPage?
+        let page: OfflineRecordsPage?
     }
     private static func snapshot(_ store: OfflineStore) async throws -> Snapshot {
         let babies = try await store.babies()
         let context: OfflineContext?
         do { context = try await store.context() }
         catch OfflineStoreError.staleContext { context = nil }
-        let page: OfflineRecordPage?
-        if let context { page = try await store.records(baby: context.babyClientUUID) }
+        let page: OfflineRecordsPage?
+        if let context { page = try await store.recordPage(baby: context.babyClientUUID) }
         else { page = nil }
         return Snapshot(babies: babies, context: context, page: page)
     }
@@ -41,7 +45,7 @@ final class OfflinePeeModel: ObservableObject {
         records = snapshot.page?.records ?? []; nextCursor = snapshot.page?.nextCursor
     }
     func refresh() {
-        guard !busy, editor?.session.isSaving != true else { return }
+        guard !busy, editor?.isBusy != true else { return }
         busy = true
         let store = store
         operation = Task { [weak self] in
@@ -53,7 +57,7 @@ final class OfflinePeeModel: ObservableObject {
         }
     }
     func select(_ id: UUID) {
-        guard !busy else { return }
+        guard !busy, editor?.isBusy != true else { return }
         busy = true; message = nil
         let store = store
         operation = Task { [weak self] in
@@ -67,7 +71,7 @@ final class OfflinePeeModel: ObservableObject {
         }
     }
     func createBaby(nickname: String, birthday: String) {
-        guard !busy else { return }
+        guard !busy, editor?.isBusy != true else { return }
         busy = true; message = nil
         let store = store
         operation = Task { [weak self] in
@@ -88,7 +92,7 @@ final class OfflinePeeModel: ObservableObject {
         let store = store
         operation = Task { [weak self] in
             do {
-                let page = try await store.records(baby: selected.babyClientUUID, before: cursor)
+                let page = try await store.recordPage(baby: selected.babyClientUUID, before: cursor)
                 guard !Task.isCancelled, let self else { return }
                 let known = Set(self.records.map(\.clientUUID))
                 self.records += page.records.filter { !known.contains($0.clientUUID) }
@@ -103,22 +107,84 @@ final class OfflinePeeModel: ObservableObject {
         editor = .init(babyClientUUID: baby.clientUUID, babyName: baby.nickname,
                        timestampMillis: Int64(Date().timeIntervalSince1970 * 1000))
     }
+    func openEditor(record: OfflineRecord) {
+        guard editor == nil, !busy, let selected,
+              selected.babyClientUUID == record.babyClientUUID,
+              let baby = babies.first(where: { $0.clientUUID == record.babyClientUUID }) else { return }
+        guard let state = OfflinePeeState(record: record, babyName: baby.nickname) else {
+            message = "此记录暂不支持安全编辑，原始内容已保留。"
+            return
+        }
+        // Capture the displayed revision, never silently reload and overwrite a newer row.
+        editorContext = selected; editor = state
+    }
     func closeEditor() {
-        guard editor?.session.isSaving != true else { return }
+        guard !busy, let editor else { return }
+        switch editor.dismissDecision {
+        case .ignoreBusy: return
+        case .confirmDiscard:
+            pendingDiscardSession = editor.session.context.sessionID
+            showingDiscardConfirmation = true
+        case .close: clearEditor()
+        }
+    }
+    func discardChanges() {
+        guard let editor, pendingDiscardSession == editor.session.context.sessionID,
+              !busy, !editor.isBusy else { return }
+        clearEditor()
+    }
+    func cancelDiscard() { pendingDiscardSession = nil; showingDiscardConfirmation = false }
+    func cancelDelete() { pendingDeleteSession = nil; showingDeleteConfirmation = false }
+    private func clearEditor() {
         editor = nil; editorContext = nil
+        cancelDiscard(); cancelDelete()
+    }
+    func requestDelete() {
+        guard !busy, editor?.isEditing == true, editor?.isBusy == false,
+              editor?.session.canInteract == true else { return }
+        pendingDeleteSession = editor?.session.context.sessionID
+        showingDeleteConfirmation = true
+    }
+    func confirmDelete() {
+        guard !busy, let context = editorContext,
+              let current = editor, pendingDeleteSession == current.session.context.sessionID,
+              let revision = current.expectedUpdatedAt,
+              current.draft.babyClientUUID == context.babyClientUUID,
+              let attempt = editor?.beginDeletion() else { return }
+        cancelDelete()
+        let store = store
+        let editorID = current.session.context.sessionID
+        save = Task { [weak self] in
+            do {
+                let deleted = try await store.deleteRecord(current.draft.clientUUID, context: context,
+                                                           expectedUpdatedAt: revision)
+                guard !Task.isCancelled, let self,
+                      self.editor?.session.context.sessionID == editorID,
+                      self.editor?.deletionAttemptID == attempt else { return }
+                self.editor?.finishDeletion(attemptID: attempt)
+                self.clearEditor()
+                self.message = deleted ? "已删除本机尿记录" : "这条记录已不在本机列表中"
+                self.refresh()
+            } catch {
+                guard !Task.isCancelled, let self,
+                      self.editor?.session.context.sessionID == editorID else { return }
+                self.editor?.finishDeletion(attemptID: attempt, failure: Self.explanation(error))
+            }
+        }
     }
     func persist(_ frozen: LeziConfirmedRecord) {
-        guard editor?.accepts(frozen) == true, let context = editorContext,
+        guard !busy, editor?.accepts(frozen) == true, let context = editorContext,
               context.babyClientUUID == frozen.draft.babyClientUUID,
               editor?.beginPersistence(frozen) == true else { return }
         let store = store
+        let revision = editor?.expectedUpdatedAt
         save = Task { [weak self] in
             do {
                 // This returns only after SQLite COMMIT. Never complete on dispatch/enqueue.
-                _ = try await store.confirmPee(frozen.draft, context: context)
+                _ = try await store.confirmPee(frozen.draft, context: context, expectedUpdatedAt: revision)
                 guard !Task.isCancelled, let self, self.editor?.accepts(frozen) == true else { return }
                 self.editor?.finish(attemptID: frozen.attemptID)
-                self.editor = nil; self.editorContext = nil
+                self.clearEditor()
                 self.message = "已保存到本机：\(frozen.context.babyName)的尿记录"
                 self.refresh()
             } catch {
@@ -135,6 +201,9 @@ final class OfflinePeeModel: ObservableObject {
     }
     private static func explanation(_ error: Error) -> String {
         switch error {
+        case OfflineStoreError.staleEdit: "这条记录已变化，未覆盖现有内容。草稿已保留；请关闭后重新打开核对。"
+        case OfflineStoreError.deletedRecord: "这条记录已被删除，未重新创建。草稿已保留。"
+        case OfflineStoreError.opaqueRecord: "此记录暂不支持安全编辑，原始内容与草稿已保留。"
         case OfflineStoreError.duplicateNickname: "宝宝昵称已存在，请换一个昵称。"
         case OfflineStoreError.invalidDraft: "请检查输入：昵称最多 20 个 Unicode 字符，日期及记录内容须有效。"
         case OfflineStoreError.offlineOnly: "此数据已不允许离线写入。请保留草稿并关闭此开发组件。"

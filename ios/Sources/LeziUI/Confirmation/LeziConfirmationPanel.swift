@@ -12,6 +12,7 @@ public struct LeziConfirmationPanel<Editor: View>: View {
     private let confirmTitle: String
     private let canWrite: Bool
     private let externallyBusy: Bool
+    private let preventDismiss: Bool
     private let featureIssue: LeziConfirmationIssue?
     private let nowMillis: () -> Int64
     private let onConfirm: (LeziConfirmedRecord) -> Void
@@ -20,7 +21,7 @@ public struct LeziConfirmationPanel<Editor: View>: View {
     private let editor: (Bool) -> Editor
 
     public init(session: Binding<LeziConfirmationSession>, draft: RecordConfirmationDraft,
-                title: String, confirmTitle: String = "保存", canWrite: Bool, externallyBusy: Bool = false,
+                title: String, confirmTitle: String = "保存", canWrite: Bool, externallyBusy: Bool = false, preventDismiss: Bool = false,
                 featureIssue: LeziConfirmationIssue? = nil,
                 nowMillis: @escaping () -> Int64,
                 onConfirm: @escaping (LeziConfirmedRecord) -> Void,
@@ -28,7 +29,8 @@ public struct LeziConfirmationPanel<Editor: View>: View {
                 onFocusIssue: @escaping (LeziConfirmationIssue) -> Void,
                 @ViewBuilder editor: @escaping (Bool) -> Editor) {
         _session = session; self.draft = draft; self.title = title; self.confirmTitle = confirmTitle
-        self.canWrite = canWrite; self.externallyBusy = externallyBusy; self.featureIssue = featureIssue
+        self.canWrite = canWrite; self.externallyBusy = externallyBusy; self.preventDismiss = preventDismiss
+        self.featureIssue = featureIssue
         self.nowMillis = nowMillis; self.onConfirm = onConfirm; self.onCancel = onCancel
         self.onFocusIssue = onFocusIssue; self.editor = editor
     }
@@ -50,7 +52,7 @@ public struct LeziConfirmationPanel<Editor: View>: View {
         }
         .background(palette.background.color)
         .safeAreaInset(edge: .bottom, spacing: 0) { footer }
-        .interactiveDismissDisabled(busy)
+        .interactiveDismissDisabled(busy || preventDismiss)
         .onChange(of: draft) { _, _ in session.draftEdited() }
         .onChange(of: featureIssue) { _, _ in session.clearExplanation() }
         .onChange(of: externallyBusy) { _, busy in if busy { session.clearExplanation() } }

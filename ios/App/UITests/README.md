@@ -7,10 +7,17 @@ unique in that fresh sandbox. Reusing an already-tested sandbox intentionally
 fails rather than deleting or modifying existing records to make the test pass.
 No special app launch arguments, fake stores, reset paths, or network are used.
 
-The single flow creates and selects a baby, edits a note and cancels without a
-record (including a storage reload), explicitly confirms one record, awaits both
-the after-COMMIT success message and readback, then terminates and launches the
-app again to verify the selected baby and exactly one visible persisted record.
+The single flow creates and selects a baby, opens a clean draft and dismisses it
+with a downward drag from the non-interactive sheet header without saving. After
+editing a note, the same drag must keep the sheet and note intact. It chooses to keep editing
+and checks that the note survives, then confirms discarding that dirty draft without a record (including a storage reload), explicitly saves
+exactly one record, then terminates and launches the app again to verify the
+selected baby and persisted record. It edits that record’s amount and note,
+confirms, and relaunches to verify the changes without creating a second record.
+It cancels deletion and reloads the unchanged record, then explicitly confirms
+soft deletion and relaunches to verify the record stays absent while the selected
+baby remains. Save/update/delete checks await the after-COMMIT success message
+and refreshed history before terminating; dispatch is not completion.
 Expectations poll observable UI states; there are no fixed sleeps. Cancel uses
 the existing `取消` button label; other controls and history probes use stable IDs.
 
@@ -27,15 +34,19 @@ xcodebuild test \
   -configuration Debug \
   -sdk iphonesimulator \
   -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
-  -derivedDataPath ios/App/DerivedData \
+  -derivedDataPath ios/App/DerivedData/UITests \
   -clonedSourcePackagesDirPath ios/App/SourcePackages \
   -disableAutomaticPackageResolution \
   -onlyUsePackageVersionsFromResolvedFile \
   -parallel-testing-enabled NO \
   -resultBundlePath ios/App/OfflinePeeAcceptance.xcresult \
-  CODE_SIGNING_ALLOWED=NO
+  ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
 ```
 
+The generic build in CI remains a dual-architecture Simulator compilation gate
+(`ONLY_ACTIVE_ARCH=NO`). The concrete-device UI test uses the active architecture
+consistently for the app, packages and runner, with separate DerivedData to avoid
+overwriting universal package objects. No supported architecture is excluded.
 The result-bundle path must be unused. Test configuration is Simulator-only,
 unsigned, and contains no team, certificate, or provisioning profile. Source
 inspection on Linux cannot establish Apple compilation or UI acceptance. A
