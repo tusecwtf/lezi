@@ -2,17 +2,30 @@ import Foundation
 import LeziCore
 import LeziStorage
 
-/// Bounded record types; no fallback can turn another care kind into excretion.
-public enum OfflineExcretionKind: String, CaseIterable, Hashable, Sendable {
-    case pee, poop, bothDiaper = "both_diaper"
+/// Bounded supported record types; unsupported kinds never fall back to empty facts.
+public enum OfflineRecordKind: String, CaseIterable, Hashable, Sendable {
+    case pee, poop, bothDiaper = "both_diaper", diary, bath, walk
+    public static let excretionCases: [Self] = [.pee, .poop, .bothDiaper]
     public var recordType: RecordType {
-        switch self { case .pee: .pee; case .poop: .poop; case .bothDiaper: .bothDiaper }
+        switch self { case .pee: .pee; case .poop: .poop; case .bothDiaper: .bothDiaper; case .diary: .diary; case .bath: .bath; case .walk: .walk }
     }
     public var label: String {
-        switch self { case .pee: "尿记录"; case .poop: "便记录"; case .bothDiaper: "尿+便记录" }
+        switch self { case .pee: "尿记录"; case .poop: "便记录"; case .bothDiaper: "尿+便记录"; case .diary: "日记"; case .bath: "洗澡记录"; case .walk: "散步记录" }
     }
-    public var hasPee: Bool { self != .poop }
-    public var hasStool: Bool { self != .pee }
+    public var hasPee: Bool { self == .pee || self == .bothDiaper }
+    public var hasStool: Bool { self == .poop || self == .bothDiaper }
+}
+
+/// Source compatibility for the earlier excretion-only checkpoint.
+public typealias OfflineExcretionKind = OfflineRecordKind
+
+/// Kotlin Char.isWhitespace/trim and UTF-16 limits, without lossy surrogate truncation.
+public enum OfflineRecordText {
+    public static func trimmed(_ text: String) -> String { AndroidText.trimmed(text) }
+    public static func optional(_ text: String) -> String? {
+        let value = trimmed(text)
+        return value.isEmpty ? nil : value
+    }
 }
 
 /// Copy aligned with Android RecordSummary.kt; unknown values never masquerade as defaults.
@@ -26,35 +39,37 @@ public enum OfflineExcretionLabels {
 }
 
 /// Historical name retained for source compatibility. One immutable draft owns all
-/// three excretion kinds; inactive values survive a new-draft type switch back.
+/// supported care kinds; inactive values survive a new-draft type switch back.
 public struct OfflinePeeDraft: Equatable, Sendable {
     public let clientUUID: UUID
     public let babyClientUUID: UUID
     public let timestampMillis: Int64
-    public let kind: OfflineExcretionKind
+    public let kind: OfflineRecordKind
     /// Urine amount; kept under its original property name for existing callers.
     public let amount: Int
     public let stoolAmount: Int
     public let stoolConsistency: Int
     public let stoolColor: Int
     public let note: String
+    public let body: String
 
     public init(clientUUID: UUID = UUID(), babyClientUUID: UUID, timestampMillis: Int64,
-                amount: Int = 2, note: String = "", kind: OfflineExcretionKind = .pee,
-                stoolAmount: Int = 3, stoolConsistency: Int = 3, stoolColor: Int = 0) {
+                amount: Int = 2, note: String = "", kind: OfflineRecordKind = .pee,
+                stoolAmount: Int = 3, stoolConsistency: Int = 3, stoolColor: Int = 0, body: String = "") {
         self.clientUUID = clientUUID; self.babyClientUUID = babyClientUUID
         self.timestampMillis = timestampMillis; self.amount = amount; self.note = note
         self.kind = kind; self.stoolAmount = stoolAmount
-        self.stoolConsistency = stoolConsistency; self.stoolColor = stoolColor
+        self.stoolConsistency = stoolConsistency; self.stoolColor = stoolColor; self.body = body
     }
     public func editing(timestampMillis: Int64? = nil, amount: Int? = nil, note: String? = nil,
-                        kind: OfflineExcretionKind? = nil, stoolAmount: Int? = nil,
-                        stoolConsistency: Int? = nil, stoolColor: Int? = nil) -> Self {
+                        kind: OfflineRecordKind? = nil, stoolAmount: Int? = nil,
+                        stoolConsistency: Int? = nil, stoolColor: Int? = nil, body: String? = nil) -> Self {
         Self(clientUUID: clientUUID, babyClientUUID: babyClientUUID,
              timestampMillis: timestampMillis ?? self.timestampMillis,
              amount: amount ?? self.amount, note: note ?? self.note, kind: kind ?? self.kind,
              stoolAmount: stoolAmount ?? self.stoolAmount,
-             stoolConsistency: stoolConsistency ?? self.stoolConsistency, stoolColor: stoolColor ?? self.stoolColor)
+             stoolConsistency: stoolConsistency ?? self.stoolConsistency, stoolColor: stoolColor ?? self.stoolColor,
+             body: body ?? self.body)
     }
     public var payload: RecordPayload {
         switch kind {
@@ -62,11 +77,14 @@ public struct OfflinePeeDraft: Equatable, Sendable {
         case .poop: .stool(amount: stoolAmount, consistency: stoolConsistency, color: stoolColor)
         case .bothDiaper: .bothDiaper(peeAmount: amount, stoolAmount: stoolAmount,
                                     stoolConsistency: stoolConsistency, stoolColor: stoolColor)
+        case .diary: .diary(body: OfflineRecordText.trimmed(body))
+        case .bath: .bath
+        case .walk: .walk
         }
     }
     public var confirmation: RecordConfirmationDraft {
         .init(clientUUID: clientUUID, babyClientUUID: babyClientUUID, item: .builtIn(kind.recordType)!,
-              timestampMillis: timestampMillis, note: note.isEmpty ? nil : note, payload: payload)
+              timestampMillis: timestampMillis, note: OfflineRecordText.optional(note), payload: payload)
     }
 }
 
@@ -86,46 +104,67 @@ public struct OfflinePeeState: Equatable, Sendable {
         isBusy ? .ignoreBusy : (isDirty ? .confirmDiscard : .close)
     }
     private var persistenceAttemptID: UUID?
-    public init(babyClientUUID: UUID, babyName: String, timestampMillis: Int64, kind: OfflineExcretionKind = .pee) {
+    public init(babyClientUUID: UUID, babyName: String, timestampMillis: Int64, kind: OfflineRecordKind = .pee) {
         draft = .init(babyClientUUID: babyClientUUID, timestampMillis: timestampMillis, kind: kind)
         initialDraft = draft; expectedUpdatedAt = nil
         session = .init(context: .init(babyClientUUID: babyClientUUID, babyName: babyName))
     }
     /// Fail closed rather than discarding an unknown payload or unsupported interval.
     public static func canEdit(_ record: OfflineRecord) -> Bool {
-        guard OfflineExcretionKind(rawValue: record.rawType) != nil, !record.isOpaque,
+        guard OfflineRecordKind(rawValue: record.rawType) != nil, !record.isOpaque,
               record.deletedAt == nil, record.endTimestampMillis == nil,
               let payload = record.payloadDocument?.payload, payload.type == record.type else { return false }
         return payload.validationErrors().isEmpty
     }
     public init?(record: OfflineRecord, babyName: String) {
-        guard Self.canEdit(record), let kind = OfflineExcretionKind(rawValue: record.rawType),
+        guard Self.canEdit(record), let kind = OfflineRecordKind(rawValue: record.rawType),
               let payload = record.payloadDocument?.payload else { return nil }
         let pee: Int, stool: Int, consistency: Int, color: Int
+        var body = ""
         switch payload {
         case let .pee(amount): (pee, stool, consistency, color) = (amount, 3, 3, 0)
         case let .stool(amount, soft, shade): (pee, stool, consistency, color) = (2, amount, soft, shade)
         case let .bothDiaper(amount, poop, soft, shade): (pee, stool, consistency, color) = (amount, poop, soft, shade)
+        case let .diary(text):
+            (pee, stool, consistency, color) = (2, 3, 3, 0); body = text
+        case .bath, .walk: (pee, stool, consistency, color) = (2, 3, 3, 0)
         default: return nil
         }
         draft = .init(clientUUID: record.clientUUID, babyClientUUID: record.babyClientUUID,
                       timestampMillis: record.timestampMillis, amount: pee, note: record.note ?? "", kind: kind,
-                      stoolAmount: stool, stoolConsistency: consistency, stoolColor: color)
+                      stoolAmount: stool, stoolConsistency: consistency, stoolColor: color, body: body)
         initialDraft = draft; expectedUpdatedAt = record.updatedAt
         session = .init(context: .init(babyClientUUID: record.babyClientUUID, babyName: babyName))
     }
     public mutating func edit(timestampMillis: Int64? = nil, amount: Int? = nil, note: String? = nil,
-                              kind: OfflineExcretionKind? = nil, stoolAmount: Int? = nil,
-                              stoolConsistency: Int? = nil, stoolColor: Int? = nil) {
+                              kind: OfflineRecordKind? = nil, stoolAmount: Int? = nil,
+                              stoolConsistency: Int? = nil, stoolColor: Int? = nil, body: String? = nil) {
         guard session.canInteract, !isBusy else { return }
         // Editing a stored fact never changes its type, including programmatic calls.
         guard !isEditing || kind == nil || kind == draft.kind else { return }
         draft = draft.editing(timestampMillis: timestampMillis, amount: amount, note: note, kind: kind,
-                              stoolAmount: stoolAmount, stoolConsistency: stoolConsistency, stoolColor: stoolColor)
+                              stoolAmount: stoolAmount, stoolConsistency: stoolConsistency, stoolColor: stoolColor, body: body)
         session.draftEdited(); deletionFailure = nil
     }
+    public func featureIssue(nowMillis: Int64) -> LeziConfirmationIssue? {
+        if draft.timestampMillis > nowMillis {
+            return .init(message: "不能保存未来记录；此开发组件尚不支持护理计划", fieldID: "time")
+        }
+        if draft.note.utf16.count > 200 { return .init(message: "备注最多 200 字", fieldID: "note") }
+        if draft.kind == .diary {
+            if OfflineRecordText.trimmed(draft.body).isEmpty {
+                return .init(message: "正文不能为空", fieldID: "body")
+            }
+            // Android loads legacy body without truncation; its input limit applies on change.
+            if draft.body.utf16.count > 800 && !(isEditing && draft.body == initialDraft.body) {
+                return .init(message: "日记正文最多 800 字", fieldID: "body")
+            }
+        }
+        return nil
+    }
     public mutating func confirm(nowMillis: Int64) -> LeziConfirmationSession.TapResult {
-        session.confirm(draft: draft.confirmation, nowMillis: nowMillis, canWrite: true, externallyBusy: deletionAttemptID != nil)
+        let issue = featureIssue(nowMillis: nowMillis)
+        return session.confirm(draft: draft.confirmation, nowMillis: nowMillis, canWrite: true, externallyBusy: deletionAttemptID != nil, featureIssue: issue)
     }
     public func accepts(_ confirmation: LeziConfirmedRecord) -> Bool {
         session.phase == .saving(confirmation.attemptID) && confirmation.context == session.context &&
@@ -133,7 +172,7 @@ public struct OfflinePeeState: Equatable, Sendable {
     }
     /// The UI callback may be delivered twice; only one writer may claim an attempt.
     public mutating func beginPersistence(_ confirmation: LeziConfirmedRecord) -> Bool {
-        guard accepts(confirmation), deletionAttemptID == nil, persistenceAttemptID == nil else { return false }
+        guard accepts(confirmation), featureIssue(nowMillis: confirmation.confirmedAtMillis) == nil, deletionAttemptID == nil, persistenceAttemptID == nil else { return false }
         persistenceAttemptID = confirmation.attemptID
         return true
     }

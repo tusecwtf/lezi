@@ -30,7 +30,7 @@ let package = Package(
         .target(name: "LeziCore", dependencies: [
             .product(name: "Crypto", package: "swift-crypto", condition: .when(platforms: [.linux])),
         ]),
-        .target(name: "LeziUI", dependencies: ["LeziCore", "LeziStorage"], exclude: ["README.md"]),
+        .target(name: "LeziUI", dependencies: ["LeziCore", "LeziStorage"], exclude: ["README.md", "Features/OfflinePee/README.md"]),
         .testTarget(name: "LeziCoreTests", dependencies: ["LeziCore"]),
         .testTarget(name: "LeziStorageTests", dependencies: ["LeziStorage", "LeziCore", "CSQLite"]),
         .testTarget(name: "LeziDomainTests", dependencies: ["LeziCore"]),

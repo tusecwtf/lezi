@@ -178,25 +178,7 @@ private struct Parser {
     }
 }
 
-/// Kotlin Char.isWhitespace = Java isWhitespace || isSpaceChar. Foundation's
-/// set additionally trims U+0085 and omits U+001C...U+001F, which can otherwise
-/// change capability matching or principal binding across the two clients.
+/// Preserve the existing Kotlin-compatible wire normalization contract.
 func trimAndroidWireString(_ value: String) -> String {
-    func whitespace(_ scalar: Unicode.Scalar) -> Bool {
-        switch scalar.value {
-        case 0x09...0x0D, 0x1C...0x20, 0xA0, 0x1680, 0x2000...0x200A,
-             0x2028, 0x2029, 0x202F, 0x205F, 0x3000: return true
-        default: return false
-        }
-    }
-    let scalars = value.unicodeScalars
-    var start = scalars.startIndex
-    var end = scalars.endIndex
-    while start < end, whitespace(scalars[start]) { start = scalars.index(after: start) }
-    while start < end {
-        let previous = scalars.index(before: end)
-        guard whitespace(scalars[previous]) else { break }
-        end = previous
-    }
-    return String(scalars[start..<end])
+    AndroidText.trimmed(value)
 }

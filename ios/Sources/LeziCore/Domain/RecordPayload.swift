@@ -122,7 +122,7 @@ public enum RecordPayload: Equatable, Sendable {
     }
 }
 
-extension String { var isDomainBlank: Bool { trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } }
+extension String { var isDomainBlank: Bool { AndroidText.isBlank(self) } }
 
 public enum GrowthMeasurementFacts {
     public static func validationError(kind: MeasurementKind, displayValue: Double?) -> String? {

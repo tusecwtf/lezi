@@ -2,7 +2,7 @@
 
 `OfflinePeeAcceptanceTests` exercises the actual `LeziDevelopment` application
 and its ordinary file-backed SQLite store. Run on a fresh, ephemeral Simulator
-sandbox with synthetic data only. The deterministic `UI-Offline-001` and `UI-Diaper-002` names are
+sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, and `UI-Daily-003` names are
 unique in that fresh sandbox, one per test. Reusing an already-tested sandbox intentionally
 fails rather than deleting or modifying existing records to make the test pass.
 No special app launch arguments, fake stores, reset paths, or network are used.
@@ -23,8 +23,15 @@ and color; relaunches; edits those fields without changing its kind; then create
 a combined pee-and-poop record with explicit urine and stool characteristics.
 After relaunch, both records must remain distinct. Deleting one must leave the
 other record and its fields intact, including after another relaunch. Each test
-creates its own baby and owns only its synthetic records, so both can run in the
+creates its own baby and owns only its synthetic records, so all can run in the
 same Simulator sandbox without resetting data or depending on test order.
+
+The daily-events flow rejects a diary with a note but no required body, then
+creates and edits the body independently of the unchanged note. It adds bath and
+walk as point events without fabricated durations, relaunches to verify all three
+distinct rows, deletes walk, and relaunches again to verify diary and bath survive
+unchanged. Two relaunches cover the persisted changes without duplicating the
+existing cancellation and gesture flows.
 
 Expectations poll observable UI states; there are no fixed sleeps. Cancel uses
 the existing `取消` button label; other controls and history probes use stable IDs.

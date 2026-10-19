@@ -12,13 +12,14 @@ public struct OfflinePeeView: View {
     @State private var nickname = ""
     @State private var birthday = Date()
     @State private var creatingBaby = false
+    @FocusState private var focusedField: String?
 
     public init(store: OfflineStore) { _model = StateObject(wrappedValue: OfflinePeeModel(store: store)) }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: theme.density.sectionGap) {
-            LeziText("离线开发组件 · 宝宝与排泄记录", role: .title)
-            LeziText("仅保存在此设备。当前支持宝宝昵称、生日和无照片尿、便、尿+便记录。", role: .label)
+            LeziText("离线开发组件 · 宝宝与本机护理记录", role: .title)
+            LeziText("仅保存在此设备。支持无照片排泄记录、日记、洗澡与散步；护理计划尚未开放。", role: .label)
             if let message = model.message { LeziText(message).accessibilityIdentifier("offline.result") }
             babySelection
             ScrollView {
@@ -26,7 +27,7 @@ public struct OfflinePeeView: View {
                         Button(creatingBaby ? "收起新建宝宝" : "新建宝宝") { creatingBaby.toggle() }
                             .accessibilityIdentifier("offline.baby.new")
                         if creatingBaby { babyForm }
-                        Button("记录排泄") { model.openEditor() }
+                        Button("新建记录") { model.openEditor() }
                             .accessibilityIdentifier("offline.pee.new")
                             .disabled(model.selected == nil || model.busy)
                             .frame(minHeight: theme.primaryTouchMinimum)
@@ -58,7 +59,7 @@ public struct OfflinePeeView: View {
                     Button("放弃修改", role: .destructive) { model.discardChanges() }
                         .accessibilityIdentifier("offline.discard.confirm")
                 } message: { Text("这些修改尚未写入本机。") }
-                .alert("删除这条\(model.editor?.draft.kind.label ?? "排泄记录")？", isPresented: $model.showingDeleteConfirmation) {
+                .alert("删除这条\(model.editor?.draft.kind.label ?? "记录")？", isPresented: $model.showingDeleteConfirmation) {
                     Button("取消", role: .cancel) { model.cancelDelete() }
                         .accessibilityIdentifier("offline.delete.cancel")
                     Button("确认删除", role: .destructive) { model.confirmDelete() }
@@ -104,7 +105,7 @@ public struct OfflinePeeView: View {
     }
     private var recordList: some View {
         VStack(alignment: .leading, spacing: 12) {
-            LeziText("本机记录（当前仅支持编辑排泄记录）", role: .titleSmall)
+            LeziText("本机记录（当前支持排泄、日记、洗澡与散步）", role: .titleSmall)
             if model.records.isEmpty {
                 LeziText(model.selected == nil ? "创建或选择宝宝后查看记录" : "尚无本机记录")
                     .accessibilityIdentifier("offline.records.empty")
@@ -117,7 +118,7 @@ public struct OfflinePeeView: View {
                         LeziText(note).accessibilityIdentifier("offline.record.note")
                     }
                     if OfflinePeeState.canEdit(record) {
-                        Button("编辑\(OfflineExcretionKind(rawValue: record.rawType)?.label ?? "排泄记录")") { model.openEditor(record: record) }
+                        Button("编辑\(OfflineRecordKind(rawValue: record.rawType)?.label ?? "记录")") { model.openEditor(record: record) }
                             .disabled(model.busy)
                             .accessibilityIdentifier("offline.record.edit")
                     } else {
@@ -144,8 +145,9 @@ public struct OfflinePeeView: View {
             draft: editor.draft.confirmation, title: "\(editor.isEditing ? "编辑" : "新建")\(editor.draft.kind.label) · 本机",
             confirmTitle: editor.isEditing ? "保存修改" : "确认保存到本机",
             canWrite: true, externallyBusy: model.busy || editor.deletionAttemptID != nil,
-            preventDismiss: editor.isDirty, nowMillis: { Int64(Date().timeIntervalSince1970 * 1000) },
-            onConfirm: model.persist, onCancel: model.closeEditor, onFocusIssue: { _ in }
+            preventDismiss: editor.isDirty,
+            featureIssue: editor.featureIssue(nowMillis: Int64(Date().timeIntervalSince1970 * 1000)), nowMillis: { Int64(Date().timeIntervalSince1970 * 1000) },
+            onConfirm: model.persist, onCancel: model.closeEditor, onFocusIssue: { focusedField = $0.fieldID }
         ) { _ in
             VStack(alignment: .leading, spacing: 16) {
                 DatePicker("记录时间", selection: Binding(
@@ -160,17 +162,33 @@ public struct OfflinePeeView: View {
                         get: { model.editor?.draft.kind ?? editor.draft.kind },
                         set: { model.editor?.edit(kind: $0) }
                     )) {
-                        ForEach(OfflineExcretionKind.allCases, id: \.self) { kind in
+                        ForEach(OfflineRecordKind.allCases, id: \.self) { kind in
                             Text(kind.label).tag(kind).accessibilityIdentifier("offline.excretion.kind.\(kind.rawValue)")
                         }
                     }.accessibilityIdentifier("offline.excretion.kind")
                 }
                 excretionFields(editor)
+                if editor.draft.kind == .diary {
+                    TextField("日记正文", text: Binding(
+                        get: { model.editor?.draft.body ?? editor.draft.body },
+                        set: { model.editor?.edit(body: $0) }
+                    ), axis: .vertical)
+                    .lineLimit(4...7)
+                    .focused($focusedField, equals: "body")
+                    .accessibilityIdentifier("offline.diary.body")
+                    LeziText("\(editor.draft.body.utf16.count)/800 · 正文必填", role: .label)
+                }
+                if editor.draft.kind == .bath || editor.draft.kind == .walk {
+                    LeziText("单次记录 · 无持续时长", role: .label)
+                        .accessibilityIdentifier("offline.editor.point")
+                }
                 TextField("备注", text: Binding(
                     get: { model.editor?.draft.note ?? editor.draft.note },
                     set: { model.editor?.edit(note: $0) }
                 ), axis: .vertical)
                 .accessibilityIdentifier("offline.pee.note")
+                .focused($focusedField, equals: "note")
+                LeziText("\(editor.draft.note.utf16.count)/200", role: .label)
                 LeziText("按确认后才写入本机；有未保存修改时，请用取消或关闭确认放弃。", role: .label)
                 if let failure = editor.deletionFailure {
                     LeziText(failure).accessibilityIdentifier("offline.delete.error")
@@ -212,7 +230,7 @@ public struct OfflinePeeView: View {
     }
     @ViewBuilder
     private func recordSummary(_ record: OfflineRecord) -> some View {
-        if let kind = OfflineExcretionKind(rawValue: record.rawType), !record.isOpaque {
+        if let kind = OfflineRecordKind(rawValue: record.rawType), !record.isOpaque {
             LeziText(kind.label, role: .titleSmall).accessibilityIdentifier("offline.record.kind")
         }
         switch record.payloadDocument?.payload {
@@ -223,6 +241,10 @@ public struct OfflinePeeView: View {
         case let .bothDiaper(pee, amount, consistency, color):
             LeziText("尿量：\(OfflineExcretionLabels.pee(pee))").accessibilityIdentifier("offline.record.amount")
             stoolSummary(amount: amount, consistency: consistency, color: color)
+        case let .diary(body):
+            LeziText(body).accessibilityIdentifier("offline.record.body")
+        case .bath, .walk:
+            LeziText("单次记录 · 无持续时长").accessibilityIdentifier("offline.record.point")
         default:
             LeziText(record.isOpaque ? "暂不支持的记录格式 · 只读" : "其他记录类型 · 只读")
         }

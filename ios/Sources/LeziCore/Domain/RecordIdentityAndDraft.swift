@@ -22,7 +22,7 @@ public struct RecordItemIdentity: Equatable, Hashable, Sendable {
                 guard localID > 0 else { return nil }
                 return Self(key: "custom:\(localID)", type: .custom, localID: localID)
             }
-            let normalized = suffix.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let normalized = AndroidText.trimmed(suffix).lowercased()
             guard let uuid = UUID(uuidString: normalized), uuid.uuidString.lowercased() == normalized else { return nil }
             return Self(key: "custom:\(normalized)", type: .custom, familyUUID: normalized)
         }
@@ -107,11 +107,11 @@ public enum NextFeedPlanNote {
     public static func visible(_ note: String?) -> String? {
         guard let note else { return nil }
         let remainder = note.hasPrefix(marker) ? String(note.dropFirst(marker.count)) : note
-        let leadingTrimmed = String(remainder.drop(while: { $0.isWhitespace }))
+        let leadingTrimmed = AndroidText.trimmedStart(remainder)
         return leadingTrimmed.isDomainBlank ? nil : leadingTrimmed
     }
     public static func encode(_ visible: String?) -> String {
-        let text = visible?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let text = visible.map(AndroidText.trimmed) ?? ""
         return text.isEmpty ? marker : marker + " " + text
     }
 }

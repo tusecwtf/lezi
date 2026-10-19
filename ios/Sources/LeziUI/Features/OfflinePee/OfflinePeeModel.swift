@@ -174,7 +174,7 @@ final class OfflinePeeModel: ObservableObject {
     }
     func persist(_ frozen: LeziConfirmedRecord) {
         guard !busy, editor?.accepts(frozen) == true, let context = editorContext,
-              let kind = OfflineExcretionKind(rawValue: frozen.draft.payload.type.rawValue),
+              let kind = OfflineRecordKind(rawValue: frozen.draft.payload.type.rawValue),
               context.babyClientUUID == frozen.draft.babyClientUUID,
               editor?.beginPersistence(frozen) == true else { return }
         let store = store

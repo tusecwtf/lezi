@@ -8,7 +8,7 @@ final class OfflineExcretionStateTests: XCTestCase {
         let baby = UUID()
         let expected: [RecordPayload] = [.pee(amount: 2), .stool(amount: 3, consistency: 3, color: 0),
                                         .bothDiaper(peeAmount: 2, stoolAmount: 3, stoolConsistency: 3, stoolColor: 0)]
-        for (kind, payload) in zip(OfflineExcretionKind.allCases, expected) {
+        for (kind, payload) in zip(OfflineExcretionKind.excretionCases, expected) {
             let draft = OfflinePeeDraft(babyClientUUID: baby, timestampMillis: 900, kind: kind)
             XCTAssertEqual(draft.payload, payload)
             XCTAssertEqual(draft.confirmation.item, .builtIn(kind.recordType)!)
@@ -65,7 +65,7 @@ final class OfflineExcretionStateTests: XCTestCase {
         let a = try await store.createBaby(nickname: "甲", birthday: "2026-01-01")
         let b = try await store.createBaby(nickname: "乙", birthday: "2026-01-02")
         let context = try await store.selectBaby(a.clientUUID)
-        for kind in OfflineExcretionKind.allCases {
+        for kind in OfflineExcretionKind.excretionCases {
             var create = OfflinePeeState(babyClientUUID: a.clientUUID, babyName: a.nickname, timestampMillis: 900, kind: kind)
             create.edit(amount: 3, note: "原值", stoolAmount: 1, stoolConsistency: 2, stoolColor: 7)
             guard case let .confirmed(frozen) = create.confirm(nowMillis: 1000) else { return XCTFail() }

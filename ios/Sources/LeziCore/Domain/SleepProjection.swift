@@ -31,7 +31,7 @@ public enum SleepProjection {
                                peerOpenSleepStarts: [(clientUUID: String, timestamp: Int64)] = []) -> SleepIntervalProjection {
         let legal = observations.filter { !$0.deleted && !$0.withdrawn && $0.wakeTimestamp >= startTimestamp }
             .sorted { $0.wakeTimestamp == $1.wakeTimestamp ? $0.clientUUID < $1.clientUUID : $0.wakeTimestamp < $1.wakeTimestamp }
-        let selected = effectiveWakeObservationClientUUID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let selected = effectiveWakeObservationClientUUID.map(AndroidText.trimmed)
         let effective = legal.first { $0.clientUUID == selected }
         let observation = effective ?? legal.first
         let source: SleepEndSource = effective != nil ? .effective : observation != nil ? .provisional : legacyEndTimestamp != nil ? .legacyEnd : .open

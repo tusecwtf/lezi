@@ -214,6 +214,134 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
     }
 
+    func testDiaryBodyAndPointEventsPersistWithoutCrossRecordChanges() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let babyName = "UI-Daily-003"
+        let diaryNote = "ui-diary-note"
+        let diaryBody = "ui-body"
+        let editedBody = "ui-body-edited"
+        let bathNote = "ui-bath"
+        let walkNote = "ui-walk"
+        app.launch()
+        tap(app.buttons["offline.baby.new"])
+        let nickname = app.textFields["offline.baby.nickname"]
+        tap(nickname)
+        nickname.typeText(babyName)
+        tap(app.buttons["offline.baby.create"])
+        waitFor(app.staticTexts["offline.result"], "label == %@", "已在本机创建宝宝：\(babyName)")
+        waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
+        tap(app.buttons["offline.baby.new"])
+        assertSelectedBaby(app, name: babyName)
+        assertEmptyHistory(app)
+
+        openDiaper(kind: "diary", in: app)
+        revealDiaperControl(noteField(in: app), in: app)
+        enterNote(diaryNote, in: app)
+        tap(app.buttons["confirmation.save"])
+        // A note is metadata, not a substitute for the required diary body.
+        waitFor(app.staticTexts["confirmation.reason"], "label == %@", "正文不能为空")
+        waitFor(noteField(in: app), "value == %@", diaryNote)
+        XCTAssertTrue(app.buttons["confirmation.save"].exists)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 0)
+        let body = app.descendants(matching: .any)
+            .matching(identifier: "offline.diary.body").firstMatch
+        tap(body)
+        body.typeText(diaryBody)
+        waitFor(body, "value == %@", diaryBody)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "日记")
+        let diaryRow = diaperRow(in: app, note: diaryNote)
+        waitFor(diaryRow, "exists == true")
+        let diaryID = diaryRow.identifier
+        assertDiaryRow(diaryRow, body: diaryBody, note: diaryNote)
+
+        tap(diaryRow.buttons["offline.record.edit"])
+        waitFor(app.staticTexts["offline.excretion.kind.fixed"], "label == %@", "类型：日记（不可更改）")
+        XCTAssertFalse(app.buttons["offline.excretion.kind"].exists)
+        waitFor(body, "value == %@", diaryBody)
+        waitFor(body, "exists == true AND hittable == true")
+        // The body reserves four lines. Target the trailing edge of the first
+        // line containing this short value, not the blank vertical midpoint.
+        body.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.1)).tap()
+        body.typeText("-edited")
+        waitFor(body, "value == %@", editedBody)
+        waitFor(noteField(in: app), "value == %@", diaryNote)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "日记")
+        assertDiaryRow(app.otherElements[diaryID], body: editedBody, note: diaryNote)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+
+        openDiaper(kind: "bath", in: app)
+        assertPointEditor(app)
+        enterNote(bathNote, in: app)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "洗澡记录")
+        let bathRow = diaperRow(in: app, note: bathNote)
+        waitFor(bathRow, "exists == true")
+        let bathID = bathRow.identifier
+        assertPointRow(bathRow, kind: "洗澡记录", note: bathNote)
+
+        openDiaper(kind: "walk", in: app)
+        assertPointEditor(app)
+        enterNote(walkNote, in: app)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "散步记录")
+        let walkRow = diaperRow(in: app, note: walkNote)
+        waitFor(walkRow, "exists == true")
+        let walkID = walkRow.identifier
+        XCTAssertEqual(Set([diaryID, bathID, walkID]).count, 3)
+        assertPointRow(walkRow, kind: "散步记录", note: walkNote)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 3)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        assertDiaryRow(app.otherElements[diaryID], body: editedBody, note: diaryNote)
+        assertPointRow(app.otherElements[bathID], kind: "洗澡记录", note: bathNote)
+        assertPointRow(app.otherElements[walkID], kind: "散步记录", note: walkNote)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 3)
+        tap(app.otherElements[walkID].buttons["offline.record.edit"])
+        waitFor(app.staticTexts["offline.excretion.kind.fixed"], "label == %@", "类型：散步记录（不可更改）")
+        XCTAssertFalse(app.buttons["offline.excretion.kind"].exists)
+        assertPointEditor(app)
+        tap(app.buttons["offline.delete.request"])
+        tap(app.buttons["offline.delete.confirm"])
+        waitFor(app.staticTexts["offline.result"], "label == %@", "已删除本机散步记录")
+        waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
+        waitFor(app.otherElements[walkID], "exists == false")
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 2)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        assertDiaryRow(app.otherElements[diaryID], body: editedBody, note: diaryNote)
+        assertPointRow(app.otherElements[bathID], kind: "洗澡记录", note: bathNote)
+        XCTAssertFalse(app.otherElements[walkID].exists)
+        XCTAssertFalse(app.staticTexts[walkNote].exists)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 2)
+    }
+
+    private func assertDiaryRow(_ row: XCUIElement, body: String, note: String) {
+        waitFor(row, "exists == true")
+        waitFor(row.staticTexts["offline.record.kind"], "label == %@", "日记")
+        waitFor(row.staticTexts["offline.record.body"], "label == %@", body)
+        waitFor(row.staticTexts["offline.record.note"], "label == %@", note)
+        XCTAssertFalse(row.staticTexts["offline.record.amount"].exists)
+        XCTAssertFalse(row.staticTexts["offline.record.stool.amount"].exists)
+    }
+
+    private func assertPointEditor(_ app: XCUIApplication) {
+        waitFor(app.staticTexts["offline.editor.point"], "label == %@", "单次记录 · 无持续时长")
+        XCTAssertFalse(app.buttons["offline.pee.amount"].exists)
+        XCTAssertFalse(app.buttons["offline.stool.amount"].exists)
+        XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "offline.diary.body").firstMatch.exists)
+    }
+
+    private func assertPointRow(_ row: XCUIElement, kind: String, note: String) {
+        waitFor(row, "exists == true")
+        waitFor(row.staticTexts["offline.record.kind"], "label == %@", kind)
+        waitFor(row.staticTexts["offline.record.point"], "label == %@", "单次记录 · 无持续时长")
+        waitFor(row.staticTexts["offline.record.note"], "label == %@", note)
+        XCTAssertFalse(row.staticTexts["offline.record.body"].exists)
+        XCTAssertFalse(row.staticTexts["offline.record.amount"].exists)
+        XCTAssertFalse(row.staticTexts["offline.record.stool.amount"].exists)
+    }
+
     private func openDiaper(kind: String, in app: XCUIApplication) {
         tap(app.buttons["offline.pee.new"])
         tap(app.buttons["offline.excretion.kind"])
