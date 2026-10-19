@@ -570,8 +570,11 @@ class RealSyncPortSessionLifecycleTest {
             syncPreferences = preferences,
         )
         rig.awaitStartupRecovery()
-        rig.foreground.setForeground(false)
-        rig.backend.pullFailures += SyncHttpException(503)
+        val automaticSyncGate = CompletableDeferred<Unit>()
+        rig.backend.handshakeGate = automaticSyncGate
+        rig.backend.pullStarted = CompletableDeferred()
+        // One failure for the queued initial recovery, one for the explicit retry.
+        repeat(2) { rig.backend.pullFailures += SyncHttpException(503) }
         val payload = MemberLoginQrPayload(
             endpoint = endpoint,
             grant = "grant-0000000000000000000000000000000000000",
@@ -580,17 +583,30 @@ class RealSyncPortSessionLifecycleTest {
             expiresAtEpochSeconds = 1_753_419_000,
         )
 
-        val result = rig.port.claimMemberLoginQr(payload, "Pixel Tablet").getOrThrow()
+        try {
+            val result = rig.port.claimMemberLoginQr(payload, "Pixel Tablet").getOrThrow()
 
-        assertThat(result.session.isJoined).isTrue()
-        assertThat(result.dataRecovery).isEqualTo(InitialFamilyDataRecovery.NotRequired)
-        assertThat(rig.backend.pullCursors).isEmpty()
-        rig.foreground.setForeground(true)
-        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isFailure).isTrue()
-        assertThat(rig.port.session().first().isJoined).isTrue()
-        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Error)
-        assertThat(rig.backend.memberLoginGrantClaims)
-            .containsExactly(Triple(endpoint, payload.grant, "Pixel Tablet"))
+            assertThat(result.session.isJoined).isTrue()
+            assertThat(result.dataRecovery).isEqualTo(InitialFamilyDataRecovery.NotRequired)
+            assertThat(rig.backend.pullCursors).isEmpty()
+            // Backgrounding did not prove that the queued initial-sync kick was dropped.
+            // Keep foreground and release that round explicitly before starting a retry.
+            automaticSyncGate.complete(Unit)
+            rig.backend.pullStarted!!.await()
+            rig.port.status().filter { it == SyncStatus.Error }.first()
+            assertThat(rig.backend.pullCursors).containsExactly(0L)
+            // Error is published after the sync mutex is released. A failed round has
+            // no piggyback discovery or later status writes, so its effects are settled.
+            assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isFailure).isTrue()
+            assertThat(rig.port.session().first().isJoined).isTrue()
+            assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Error)
+            assertThat(rig.backend.pullCursors).containsExactly(0L, 0L).inOrder()
+            assertThat(rig.backend.memberLoginGrantClaims)
+                .containsExactly(Triple(endpoint, payload.grant, "Pixel Tablet"))
+        } finally {
+            rig.foreground.setForeground(false)
+            automaticSyncGate.complete(Unit)
+        }
     }
 
     @Test
