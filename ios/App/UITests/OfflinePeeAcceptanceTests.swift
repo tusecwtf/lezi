@@ -2,8 +2,9 @@ import XCTest
 
 /// Run only on a fresh, ephemeral development Simulator sandbox with synthetic data.
 /// No reset flags, database injection, network access, or production data are used.
+/// XCTest distributes classes across workers; each flow owns its synthetic baby.
 @MainActor
-final class OfflinePeeAcceptanceTests: XCTestCase {
+final class OfflinePeeAcceptanceTests: OfflineAcceptanceSupport {
     func testCancelConfirmAndRelaunchPersistsExactlyOnePee() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -126,7 +127,10 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         XCTAssertFalse(app.buttons["offline.record.edit"].exists)
         XCTAssertFalse(app.buttons["offline.delete.request"].exists)
     }
+}
 
+@MainActor
+final class OfflineDiaperAcceptanceTests: OfflineAcceptanceSupport {
     func testPoopAndCombinedDiaperRetainKindsAndIndependentRecords() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -213,7 +217,10 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         assertDiaperRow(app.otherElements[poopRowID], kind: "便记录", amount: "偏多", consistency: "偏硬", color: "红")
         XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
     }
+}
 
+@MainActor
+final class OfflineDailyAcceptanceTests: OfflineAcceptanceSupport {
     func testDiaryBodyAndPointEventsPersistWithoutCrossRecordChanges() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -315,7 +322,10 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         XCTAssertFalse(app.staticTexts[walkNote].exists)
         XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 2)
     }
+}
 
+@MainActor
+final class OfflineHealthAcceptanceTests: OfflineAcceptanceSupport {
     func testHealthFormsAndSymptomEditsPersistWithDeletionIsolation() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -421,7 +431,10 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         XCTAssertFalse(app.staticTexts[symptomNote].exists)
         XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 3)
     }
+}
 
+@MainActor
+final class OfflineGrowthAcceptanceTests: OfflineAcceptanceSupport {
     func testGrowthValuesPersistInDisplayUnitsWithTypeLockedEdits() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -505,25 +518,10 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         assertGrowthRow(app.otherElements[heightID], kind: "身高", value: "87.6 cm", note: heightNote)
         XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
     }
+}
 
-    private func replaceGrowthValue(_ oldValue: String, with newValue: String, in app: XCUIApplication) {
-        let field = healthField("offline.growth.value", in: app)
-        revealHealthControl(field, in: app)
-        waitFor(field, "value == %@", oldValue)
-        // A single-line field tapped at its trailing edge places the caret after
-        // the checked value; delete exactly that value, then verify replacement.
-        field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
-        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: oldValue.count) + newValue)
-        waitFor(field, "value == %@", newValue)
-    }
-
-    private func assertGrowthRow(_ row: XCUIElement, kind: String, value: String, note: String) {
-        waitFor(row, "exists == true")
-        waitFor(row.staticTexts["offline.record.kind"], "label == %@", kind)
-        waitFor(row.staticTexts["offline.record.growth.value"], "label == %@", value)
-        waitFor(row.staticTexts["offline.record.note"], "label == %@", note)
-    }
-
+@MainActor
+final class OfflineMilkAcceptanceTests: OfflineAcceptanceSupport {
     func testMilkFactsRecentAmountsAndLocalStepPersistIndependently() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -629,34 +627,10 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         assertMilkRow(app.otherElements[formulaID], kind: "配方奶", amount: 157, note: formulaNote, prepared: 180, duration: 10)
         XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
     }
+}
 
-    private func replaceMilkAmount(_ oldValue: String, with newValue: String, in app: XCUIApplication) {
-        let field = healthField("offline.milk.amount", in: app)
-        revealHealthControl(field, in: app)
-        waitFor(field, "value == %@", oldValue)
-        field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
-        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: oldValue.count) + newValue)
-        waitFor(field, "value == %@", newValue)
-    }
-
-    private func assertMilkRow(_ row: XCUIElement, kind: String, amount: Int, note: String,
-                               prepared: Int? = nil, duration: Int? = nil) {
-        waitFor(row, "exists == true")
-        waitFor(row.staticTexts["offline.record.kind"], "label == %@", kind)
-        waitFor(row.staticTexts["offline.record.milk.amount"], "label == %@", "奶量：\(amount) ml")
-        waitFor(row.staticTexts["offline.record.note"], "label == %@", note)
-        if let prepared {
-            waitFor(row.staticTexts["offline.record.milk.prepared"], "label == %@", "冲调量：\(prepared) ml")
-        } else {
-            XCTAssertFalse(row.staticTexts["offline.record.milk.prepared"].exists)
-        }
-        if let duration {
-            waitFor(row.staticTexts["offline.record.milk.duration"], "label == %@", "耗时：\(duration) 分钟")
-        } else {
-            XCTAssertFalse(row.staticTexts["offline.record.milk.duration"].exists)
-        }
-    }
-
+@MainActor
+final class OfflineTemperatureAcceptanceTests: OfflineAcceptanceSupport {
     func testTemperatureUnitConversionAndAdvicePreferencePreserveSavedFacts() {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -736,14 +710,174 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         waitFor(temperature, "exists == false")
         assertTemperatureRow(app.otherElements[recordID], value: "38.2 ℃", note: note)
     }
+}
 
-    private func selectTemperatureUnit(_ unit: String, in app: XCUIApplication) {
+@MainActor
+final class OfflineFoodAcceptanceTests: OfflineAcceptanceSupport {
+    func testFoodAmountsAndIndependentKindsSurviveEditsAndDeletion() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let babyName = "UI-Food-008"
+        let foodNote = "ui-food-note"
+        let snackNote = "ui-snack-note"
+        let drinkNote = "ui-drink-note"
+        app.launch()
+        tap(app.buttons["offline.baby.new"])
+        let nickname = app.textFields["offline.baby.nickname"]
+        tap(nickname)
+        nickname.typeText(babyName)
+        tap(app.buttons["offline.baby.create"])
+        waitFor(app.staticTexts["offline.result"], "label == %@", "已在本机创建宝宝：\(babyName)")
+        waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
+        tap(app.buttons["offline.baby.new"])
+        assertSelectedBaby(app, name: babyName)
+        assertEmptyHistory(app)
+
+        openExtendedRecord(kind: "baby_food", in: app)
+        waitFor(app.staticTexts["offline.food.guidance.stage"], "label == %@", "未满 1 月龄 · 6 月龄前 · 以奶为主")
+        waitFor(app.staticTexts["offline.food.guidance.disclaimer"], "label == %@",
+                "仅供参考，不构成医疗或营养诊疗建议。请结合宝宝发育与儿保/儿科指导调整。")
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "offline.food.suggestion.")).count, 0)
+        revealHealthControl(noteField(in: app), in: app)
+        enterNote(foodNote, in: app)
+        tap(app.buttons["confirmation.save"])
+        waitFor(app.staticTexts["confirmation.reason"], "label == %@", "请填写内容")
+        waitFor(noteField(in: app), "value == %@", foodNote)
+        enterHealthText("offline.food.content", text: "ui-food-content", in: app)
+        tap(app.buttons["confirmation.save"])
+        waitFor(app.staticTexts["confirmation.reason"], "label == %@", "请填写量（如 50g）")
+        enterHealthText("offline.food.amount", text: "few-bites", in: app)
+        tap(app.buttons["confirmation.save"])
+        waitFor(app.staticTexts["confirmation.reason"], "label == %@",
+                "量需包含数字才能统计（「几口」无法统计）；「半碗」会自动记为 0.5碗")
+        waitFor(healthField("offline.food.amount", in: app), "value == %@", "few-bites")
+        replaceFoodField("offline.food.amount", oldValue: "few-bites", newValue: "半碗", in: app)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "辅食")
+        let foodRow = diaperRow(in: app, note: foodNote)
+        waitFor(foodRow, "exists == true")
+        let foodID = foodRow.identifier
+        assertFoodRow(foodRow, kind: "辅食", content: "ui-food-content", amount: "0.5碗", note: foodNote)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+
+        openExtendedRecord(kind: "snack", in: app)
+        enterHealthText("offline.food.content", text: "ui-snack-content", in: app)
+        enterHealthText("offline.food.amount", text: "few-bites", in: app)
+        revealHealthControl(app.buttons["offline.excretion.kind"], in: app)
+        selectExtendedRecordKind("drink", currentKind: "snack", in: app)
+        // Both types share controls but must retain separate raw inputs.
+        waitFor(healthField("offline.food.content", in: app), "value != %@", "ui-snack-content")
+        waitFor(healthField("offline.food.amount", in: app), "value != %@", "few-bites")
+        selectExtendedRecordKind("snack", currentKind: "drink", in: app)
+        waitFor(healthField("offline.food.content", in: app), "value == %@", "ui-snack-content")
+        waitFor(healthField("offline.food.amount", in: app), "value == %@", "few-bites")
+        revealHealthControl(noteField(in: app), in: app)
+        enterNote(snackNote, in: app)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "点心")
+        let snackRow = diaperRow(in: app, note: snackNote)
+        waitFor(snackRow, "exists == true")
+        let snackID = snackRow.identifier
+        assertFoodRow(snackRow, kind: "点心", content: "ui-snack-content", amount: "few-bites", note: snackNote)
+
+        openExtendedRecord(kind: "drink", in: app)
+        enterHealthText("offline.food.content", text: "ui-drink-content", in: app)
+        revealHealthControl(noteField(in: app), in: app)
+        enterNote(drinkNote, in: app)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "饮料")
+        let drinkRow = diaperRow(in: app, note: drinkNote)
+        waitFor(drinkRow, "exists == true")
+        let drinkID = drinkRow.identifier
+        assertFoodRow(drinkRow, kind: "饮料", content: "ui-drink-content", amount: "未填量", note: drinkNote)
+        XCTAssertEqual(Set([foodID, snackID, drinkID]).count, 3)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 3)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        assertFoodRow(app.otherElements[foodID], kind: "辅食", content: "ui-food-content", amount: "0.5碗", note: foodNote)
+        assertFoodRow(app.otherElements[snackID], kind: "点心", content: "ui-snack-content", amount: "few-bites", note: snackNote)
+        assertFoodRow(app.otherElements[drinkID], kind: "饮料", content: "ui-drink-content", amount: "未填量", note: drinkNote)
+        tap(app.otherElements[foodID].buttons["offline.record.edit"])
+        waitFor(app.staticTexts["offline.excretion.kind.fixed"], "label == %@", "类型：辅食（不可更改）")
+        XCTAssertFalse(app.buttons["offline.excretion.kind"].exists)
+        waitFor(healthField("offline.food.amount", in: app), "value == %@", "0.5碗")
+        replaceFoodField("offline.food.content", oldValue: "ui-food-content", newValue: "ui-food-edited", in: app)
+        waitFor(healthField("offline.food.amount", in: app), "value == %@", "0.5碗")
+        waitFor(noteField(in: app), "value == %@", foodNote)
+        saveDiaper(in: app, babyName: babyName, kindLabel: "辅食")
+        assertFoodRow(app.otherElements[foodID], kind: "辅食", content: "ui-food-edited", amount: "0.5碗", note: foodNote)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 3)
+        tap(app.otherElements[drinkID].buttons["offline.record.edit"])
+        revealHealthControl(app.buttons["offline.delete.request"], in: app)
+        tap(app.buttons["offline.delete.request"])
+        tap(app.buttons["offline.delete.confirm"])
+        waitFor(app.staticTexts["offline.result"], "label == %@", "已删除本机饮料")
+        waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
+        waitFor(app.otherElements[drinkID], "exists == false")
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 2)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        XCTAssertFalse(app.otherElements[drinkID].exists)
+        assertFoodRow(app.otherElements[foodID], kind: "辅食", content: "ui-food-edited", amount: "0.5碗", note: foodNote)
+        assertFoodRow(app.otherElements[snackID], kind: "点心", content: "ui-snack-content", amount: "few-bites", note: snackNote)
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 2)
+    }
+}
+
+/// Shared UI operations only: no test methods to inherit or execute twice.
+@MainActor
+class OfflineAcceptanceSupport: XCTestCase {
+    fileprivate func replaceGrowthValue(_ oldValue: String, with newValue: String, in app: XCUIApplication) {
+        let field = healthField("offline.growth.value", in: app)
+        revealHealthControl(field, in: app)
+        waitFor(field, "value == %@", oldValue)
+        // A single-line field tapped at its trailing edge places the caret after
+        // the checked value; delete exactly that value, then verify replacement.
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: oldValue.count) + newValue)
+        waitFor(field, "value == %@", newValue)
+    }
+
+    fileprivate func assertGrowthRow(_ row: XCUIElement, kind: String, value: String, note: String) {
+        waitFor(row, "exists == true")
+        waitFor(row.staticTexts["offline.record.kind"], "label == %@", kind)
+        waitFor(row.staticTexts["offline.record.growth.value"], "label == %@", value)
+        waitFor(row.staticTexts["offline.record.note"], "label == %@", note)
+    }
+
+    fileprivate func replaceMilkAmount(_ oldValue: String, with newValue: String, in app: XCUIApplication) {
+        let field = healthField("offline.milk.amount", in: app)
+        revealHealthControl(field, in: app)
+        waitFor(field, "value == %@", oldValue)
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: oldValue.count) + newValue)
+        waitFor(field, "value == %@", newValue)
+    }
+
+    fileprivate func assertMilkRow(_ row: XCUIElement, kind: String, amount: Int, note: String,
+                               prepared: Int? = nil, duration: Int? = nil) {
+        waitFor(row, "exists == true")
+        waitFor(row.staticTexts["offline.record.kind"], "label == %@", kind)
+        waitFor(row.staticTexts["offline.record.milk.amount"], "label == %@", "奶量：\(amount) ml")
+        waitFor(row.staticTexts["offline.record.note"], "label == %@", note)
+        if let prepared {
+            waitFor(row.staticTexts["offline.record.milk.prepared"], "label == %@", "冲调量：\(prepared) ml")
+        } else {
+            XCTAssertFalse(row.staticTexts["offline.record.milk.prepared"].exists)
+        }
+        if let duration {
+            waitFor(row.staticTexts["offline.record.milk.duration"], "label == %@", "耗时：\(duration) 分钟")
+        } else {
+            XCTAssertFalse(row.staticTexts["offline.record.milk.duration"].exists)
+        }
+    }
+
+    fileprivate func selectTemperatureUnit(_ unit: String, in app: XCUIApplication) {
         revealHealthControl(app.buttons["offline.temperature.unit"], in: app)
         tap(app.buttons["offline.temperature.unit"])
         tap(app.buttons["offline.temperature.unit.\(unit)"])
     }
 
-    private func replaceTemperatureValue(_ oldValue: String, with newValue: String, in app: XCUIApplication) {
+    fileprivate func replaceTemperatureValue(_ oldValue: String, with newValue: String, in app: XCUIApplication) {
         let field = healthField("offline.temperature.value", in: app)
         revealHealthControl(field, in: app)
         waitFor(field, "value == %@", oldValue)
@@ -752,19 +886,19 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         waitFor(field, "value == %@", newValue)
     }
 
-    private func assertTemperatureRow(_ row: XCUIElement, value: String, note: String) {
+    fileprivate func assertTemperatureRow(_ row: XCUIElement, value: String, note: String) {
         waitFor(row, "exists == true")
         waitFor(row.staticTexts["offline.record.kind"], "label == %@", "体温")
         waitFor(row.staticTexts["offline.record.temperature.value"], "label == %@", value)
         waitFor(row.staticTexts["offline.record.note"], "label == %@", note)
     }
 
-    private func openExtendedRecord(kind: String, in app: XCUIApplication) {
+    fileprivate func openExtendedRecord(kind: String, in app: XCUIApplication) {
         tap(app.buttons["offline.pee.new"])
         selectExtendedRecordKind(kind, currentKind: "pee", in: app)
     }
 
-    private func selectExtendedRecordKind(_ kind: String, currentKind: String, in app: XCUIApplication) {
+    fileprivate func selectExtendedRecordKind(_ kind: String, currentKind: String, in app: XCUIApplication) {
         tap(app.buttons["offline.excretion.kind"])
         // The captured Simulator hierarchy exposes the long Picker popup as a
         // CollectionView. Its last options exist below the clipped menu viewport.
@@ -787,7 +921,24 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         tap(option)
     }
 
-    private struct HealthForm {
+    fileprivate func replaceFoodField(_ identifier: String, oldValue: String, newValue: String, in app: XCUIApplication) {
+        let field = healthField(identifier, in: app)
+        revealHealthControl(field, in: app)
+        waitFor(field, "value == %@", oldValue)
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: oldValue.count) + newValue)
+        waitFor(field, "value == %@", newValue)
+    }
+
+    fileprivate func assertFoodRow(_ row: XCUIElement, kind: String, content: String, amount: String, note: String) {
+        waitFor(row, "exists == true")
+        waitFor(row.staticTexts["offline.record.kind"], "label == %@", kind)
+        waitFor(row.staticTexts["offline.record.food.content"], "label == %@", content)
+        waitFor(row.staticTexts["offline.record.food.amount"], "label == %@", amount)
+        waitFor(row.staticTexts["offline.record.note"], "label == %@", note)
+    }
+
+    fileprivate struct HealthForm {
         let kind: String
         let label: String
         let primary: String
@@ -800,11 +951,11 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         var note: String { "ui-\(kind)-note" }
     }
 
-    private func healthField(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
+    fileprivate func healthField(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
     }
 
-    private func enterHealthText(_ identifier: String, text: String, in app: XCUIApplication) {
+    fileprivate func enterHealthText(_ identifier: String, text: String, in app: XCUIApplication) {
         let field = healthField(identifier, in: app)
         revealHealthControl(field, in: app)
         tap(field)
@@ -812,7 +963,7 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         waitFor(field, "value == %@", text)
     }
 
-    private func revealHealthControl(_ element: XCUIElement, in app: XCUIApplication) {
+    fileprivate func revealHealthControl(_ element: XCUIElement, in app: XCUIApplication) {
         waitFor(element, "exists == true")
         let editorScroll = app.scrollViews.containing(.any, identifier: "offline.pee.note").firstMatch
         // isHittable can be true for a field partly covered by the fixed footer.
@@ -864,7 +1015,7 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         XCTFail("Could not reveal \(element.identifier) above the confirmation footer")
     }
 
-    private func assertHealthRow(_ row: XCUIElement, form: HealthForm) {
+    fileprivate func assertHealthRow(_ row: XCUIElement, form: HealthForm) {
         waitFor(row, "exists == true")
         waitFor(row.staticTexts["offline.record.kind"], "label == %@", form.label)
         waitFor(row.staticTexts["offline.record.health.\(form.kind).\(form.primary)"], "label == %@",
@@ -874,7 +1025,7 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         waitFor(row.staticTexts["offline.record.note"], "label == %@", form.note)
     }
 
-    private func assertSymptomRow(_ row: XCUIElement, severity: String, description: String, note: String) {
+    fileprivate func assertSymptomRow(_ row: XCUIElement, severity: String, description: String, note: String) {
         waitFor(row, "exists == true")
         waitFor(row.staticTexts["offline.record.kind"], "label == %@", "咳嗽记录")
         waitFor(row.staticTexts["offline.record.health.severity"], "label == %@", "程度：\(severity)")
@@ -882,7 +1033,7 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         waitFor(row.staticTexts["offline.record.note"], "label == %@", note)
     }
 
-    private func assertDiaryRow(_ row: XCUIElement, body: String, note: String) {
+    fileprivate func assertDiaryRow(_ row: XCUIElement, body: String, note: String) {
         waitFor(row, "exists == true")
         waitFor(row.staticTexts["offline.record.kind"], "label == %@", "日记")
         waitFor(row.staticTexts["offline.record.body"], "label == %@", body)
@@ -891,14 +1042,14 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         XCTAssertFalse(row.staticTexts["offline.record.stool.amount"].exists)
     }
 
-    private func assertPointEditor(_ app: XCUIApplication) {
+    fileprivate func assertPointEditor(_ app: XCUIApplication) {
         waitFor(app.staticTexts["offline.editor.point"], "label == %@", "单次记录 · 无持续时长")
         XCTAssertFalse(app.buttons["offline.pee.amount"].exists)
         XCTAssertFalse(app.buttons["offline.stool.amount"].exists)
         XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "offline.diary.body").firstMatch.exists)
     }
 
-    private func assertPointRow(_ row: XCUIElement, kind: String, note: String) {
+    fileprivate func assertPointRow(_ row: XCUIElement, kind: String, note: String) {
         waitFor(row, "exists == true")
         waitFor(row.staticTexts["offline.record.kind"], "label == %@", kind)
         waitFor(row.staticTexts["offline.record.point"], "label == %@", "单次记录 · 无持续时长")
@@ -908,13 +1059,13 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         XCTAssertFalse(row.staticTexts["offline.record.stool.amount"].exists)
     }
 
-    private func openDiaper(kind: String, in app: XCUIApplication) {
+    fileprivate func openDiaper(kind: String, in app: XCUIApplication) {
         tap(app.buttons["offline.pee.new"])
         tap(app.buttons["offline.excretion.kind"])
         tap(app.buttons["offline.excretion.kind.\(kind)"])
     }
 
-    private func revealDiaperControl(_ element: XCUIElement, in app: XCUIApplication) {
+    fileprivate func revealDiaperControl(_ element: XCUIElement, in app: XCUIApplication) {
         waitFor(element, "exists == true")
         let editorScroll = app.scrollViews.containing(.any, identifier: "offline.pee.note").firstMatch
         // Bounded content scrolling, not a timed wait. The combined editor is
@@ -926,24 +1077,24 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         waitFor(element, "hittable == true")
     }
 
-    private func diaperRow(in app: XCUIApplication, note: String) -> XCUIElement {
+    fileprivate func diaperRow(in app: XCUIApplication, note: String) -> XCUIElement {
         app.otherElements.matching(NSPredicate(format: "identifier BEGINSWITH %@", "offline.record.row."))
             .containing(.staticText, identifier: note).firstMatch
     }
 
-    private func chooseDiaperOption(_ identifier: String, value: Int, in app: XCUIApplication) {
+    fileprivate func chooseDiaperOption(_ identifier: String, value: Int, in app: XCUIApplication) {
         revealDiaperControl(app.buttons[identifier], in: app)
         tap(app.buttons[identifier])
         tap(app.buttons["\(identifier).\(value)"])
     }
 
-    private func saveDiaper(in app: XCUIApplication, babyName: String, kindLabel: String) {
+    fileprivate func saveDiaper(in app: XCUIApplication, babyName: String, kindLabel: String) {
         tap(app.buttons["confirmation.save"])
         waitFor(app.staticTexts["offline.result"], "label == %@", "已保存到本机：\(babyName)的\(kindLabel)")
         waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
     }
 
-    private func assertDiaperRow(_ row: XCUIElement, kind: String, amount: String,
+    fileprivate func assertDiaperRow(_ row: XCUIElement, kind: String, amount: String,
                                  consistency: String, color: String, pee: String? = nil) {
         waitFor(row, "exists == true")
         waitFor(row.staticTexts["offline.record.kind"], "label == %@", kind)
@@ -957,7 +1108,7 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         }
     }
 
-    private func swipeEditorDown(in app: XCUIApplication) {
+    fileprivate func swipeEditorDown(in app: XCUIApplication) {
         // Start on the dedicated, non-interactive header rather than a field,
         // picker, button, or scroll view. Derive the drag from actual UI geometry.
         let header = app.descendants(matching: .any)
@@ -968,23 +1119,23 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         start.press(forDuration: 0.1, thenDragTo: end)
     }
 
-    private func tap(_ element: XCUIElement) {
+    fileprivate func tap(_ element: XCUIElement) {
         waitFor(element, "exists == true AND hittable == true AND enabled == true")
         element.tap()
     }
 
-    private func relaunch(_ app: XCUIApplication) {
+    fileprivate func relaunch(_ app: XCUIApplication) {
         app.terminate()
         app.launch()
         waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
     }
 
-    private func noteField(in app: XCUIApplication) -> XCUIElement {
+    fileprivate func noteField(in app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any)
             .matching(identifier: "offline.pee.note").firstMatch
     }
 
-    private func enterNote(_ note: String, in app: XCUIApplication) {
+    fileprivate func enterNote(_ note: String, in app: XCUIApplication) {
         // SwiftUI's vertically growing TextField is exposed as a text view on iOS.
         // Query by ID across element types to avoid coupling to that implementation detail.
         let field = noteField(in: app)
@@ -994,19 +1145,19 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         waitFor(field, "value == %@", note)
     }
 
-    private func assertSelectedBaby(_ app: XCUIApplication, name: String) {
+    fileprivate func assertSelectedBaby(_ app: XCUIApplication, name: String) {
         let selection = app.descendants(matching: .any)
             .matching(identifier: "offline.baby.selection").firstMatch
         waitFor(selection, "exists == true AND (label CONTAINS %@ OR value CONTAINS %@)", name, name)
     }
 
-    private func assertEmptyHistory(_ app: XCUIApplication) {
+    fileprivate func assertEmptyHistory(_ app: XCUIApplication) {
         waitFor(app.staticTexts["offline.records.empty"], "label == %@", "尚无本机记录")
         XCTAssertEqual(app.staticTexts.matching(identifier: "offline.record.amount").count, 0)
         XCTAssertEqual(app.staticTexts.matching(identifier: "offline.record.note").count, 0)
     }
 
-    private func assertOneSavedRecord(_ app: XCUIApplication, note: String, amount: String = "中") {
+    fileprivate func assertOneSavedRecord(_ app: XCUIApplication, note: String, amount: String = "中") {
         let notes = app.staticTexts.matching(identifier: "offline.record.note")
         waitFor(notes.firstMatch, "exists == true AND label == %@", note)
         XCTAssertEqual(notes.count, 1)
@@ -1017,7 +1168,7 @@ final class OfflinePeeAcceptanceTests: XCTestCase {
         XCTAssertTrue(notes.firstMatch.isHittable, "The persisted record must be visible")
     }
 
-    private func waitFor(_ object: Any, _ format: String, _ arguments: CVarArg...,
+    fileprivate func waitFor(_ object: Any, _ format: String, _ arguments: CVarArg...,
                          file: StaticString = #filePath, line: UInt = #line) {
         let predicate = NSPredicate(format: format, argumentArray: arguments)
         let expectation = XCTNSPredicateExpectation(predicate: predicate, object: object)

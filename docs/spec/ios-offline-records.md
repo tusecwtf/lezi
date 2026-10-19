@@ -1,7 +1,7 @@
 # iOS offline records: bounded editor expansion plan
 
-> Status as of 2026-10-19: **18-type offline UI plus schema-3 sleep storage verified at `3d8e0b`;
-> local milk expansion reaches 21 UI types but awaits publication/CI. No sleep UI**.
+> Status as of 2026-10-19: **22-type offline UI plus schema-3 sleep storage verified at `10016b6a`;
+> local Food expansion reaches 25 UI types but awaits publication/Apple CI. No sleep UI**.
 > This document refines the [iOS parity inventory](ios-parity.md), not the Android
 > product contract. Native offline mode is not permission to bypass membership/ACL
 > while an enrolled device cannot reach its server.
@@ -28,23 +28,33 @@ two-decimal editor refill. Changed values use shared Core range/conversion rules
 weight kg converts to integer g, with rounded zero refused. This is an explicit
 native interaction difference, not exact Android editor parity.
 
-The latest verified **dual-green** checkpoint is **`3d8e0b`**. Native schema
-**1/2→3** migration preserves existing data atomically. Storage supports **26
-ordinary no-media types plus dedicated sleep commands**, while UI remains at
-**18 types**. [Apple run 39321168082](https://github.com/tusecwtf/lezi/actions/runs/39321168082)
-passed **174 package tests + five Simulator UI tests**;
-[Android run 39321168588](https://github.com/tusecwtf/lezi/actions/runs/39321168588)
-passed **5,908 tests**. Artifact `12221398420` includes the acceptance evidence.
-Fresh schema-3 development-host launch passed; this is **not sleep UI acceptance**.
-Concrete custom items and media remain unsupported. Database schema version and
-payload document schema version are separate concepts.
+The latest verified **dual-green** checkpoint is **`10016b6a`**, with **22 bounded
+UI types** (including milk and temperature), native schema **3**, and dedicated
+sleep storage. [Apple run 39329817431](https://github.com/tusecwtf/lezi/actions/runs/39329817431)
+passed **199 package tests + seven Simulator UI tests**;
+[Android run 39329817430](https://github.com/tusecwtf/lezi/actions/runs/39329817430)
+passed **5,908 tests**. UI duration was 1,450.014 seconds (milk 249.255 seconds,
+temperature 184.565 seconds); artifact `12225776079` contains the acceptance
+evidence. Schema **1/2→3** migration preserves data atomically. Storage supports
+26 ordinary no-media types plus dedicated sleep commands. Fresh schema-3 host
+launch is verified, but **sleep UI is not exposed or accepted**. Database schema
+and payload document schema versions are separate concepts.
 
-**Current local, unpublished milk expansion:** formula, pumped_feed and
-pump_express bring the UI to **21 types**. The full Linux run passed **168 tests
-(40 Storage, 55 Presentation, 48 Domain, 25 Core)**. Three new Apple model tests
-and the sixth UI scenario are unverified; the older green Apple count cannot
-accept this code. Formula-only optional fields stay separate from the other two
-types, and invalid input remains visible instead of silently restoring defaults.
+**Current local, unpublished Food expansion:** baby_food, snack and drink bring
+UI to **25 types**. The Food slice passed **190 Linux tests**. Its two new
+Apple-only model tests and eighth UI scenario await Apple validation. The proposed
+eight-class UI suite with two parallel Simulator workers is also unverified; the
+seven-test green run above does not validate that parallel execution setup.
+Food keeps untouched optional legacy amounts exactly (nil, empty, Chinese,
+full-width and whitespace), normalizes only new/changed amounts, and requires a
+parseable amount only for new/changed baby-food facts. Guidance uses the original
+baby's birthday and the record's local date, with Java-compatible completed
+calendar months; suggestion buttons change only content.
+
+A separate **local schema-4 custom-storage workstream** is ready but is excluded
+from this Food publication. Its combined local 195-test result is not the Food
+slice's 190-test result and is not Apple or published evidence. Custom workflows
+remain pending separate integration and validation; no custom UI is claimed.
 
 Milk recent amounts are read for all three types in one SQLite snapshot using
 bounded keyset batches across history, not just the visible UI page. Following
@@ -105,7 +115,7 @@ restriction prevents unreadable round trips; it does not assert every Android
 in-memory combination behaves identically. Legacy numeric-domain values remain
 readable. See [the payload contract](contracts/data-model.md).
 
-Remaining UI work includes the other five ordinary forms, nursing timer handoff,
+After the local Food slice, remaining UI work includes manual nursing, nursing timer handoff,
 care plans, media, dedicated sleep UI, and concrete custom-item workflows. Full
 navigation, family enrollment and synchronization remain unimplemented here.
 The 12 groups below are a catalog/implementation plan, not an assertion that
@@ -115,7 +125,7 @@ Historical evidence: the earlier pee-only `1e5802a6` checkpoint passed
 [Android 39282387623](https://github.com/tusecwtf/lezi/actions/runs/39282387623)
 and [Apple 39282387612](https://github.com/tusecwtf/lezi/actions/runs/39282387612)
 with 93 package tests and one UI smoke. It is superseded by the latest verified
-checkpoint above; it is not evidence for unpublished milk changes.
+checkpoint above; it is not evidence for unpublished Food changes.
 
 ## 2. Sources and authority
 
@@ -156,7 +166,7 @@ do not collapse distinct payload meanings into a dictionary of arbitrary fields.
 | Nursing | `nursing` (1) | Dedicated left/right minute input, order `L/R/LR/RL`, optional estimated ml. Use strict `NursingConfirmInput` text validation, not only payload validation. Preserve source `recordMode` on edit; new manual entry uses Android's default. Do not offer an unimplemented timer action. | A-fields, A-draft, I-domain |
 | Milk | `formula`, `pumped_feed`, `pump_express` (3) | Shared 1–999 ml quantity controls. Only formula exposes optional prepared ml (0–999) and duration minutes (0–1440). Android step options 5/10/15, fallback 5; recent values must come from real data. Defaults are 120 ml for formula/pumped feed and 60 ml for express when no valid recent value exists. Keep type fixed. | A-fields, A-draft |
 | Excretion | `pee`, `poop`, `both_diaper` (3) | Compose urine and stool controls: urine 1–3; stool amount/consistency 1–4; color 0–7. Both-diaper combines the two, not a type-changing toggle in an existing editor. Match labels, defaults and accessible choice meanings. | A-fields, A-copy, I-pee |
-| Temperature | `temperature` (1) | Dedicated numeric value and ℃/℉ conversion; persist Celsius, range 34–43℃. Unit switching follows Android rounding. Its configured low-age fever hint uses birthday and the event's local date, not age today; do not invent medical guidance. | A-fields (`TemperatureFields`, `shouldShowInfantFeverAdvice`), A-draft |
+| Temperature | `temperature` (1) | Dedicated numeric value and ℃/℉ conversion; persist Celsius, range 34–43℃. Android rounds its display on switching; the verified native editor instead preserves the exact canonical value across unit-only changes. Its configured low-age fever hint uses birthday and the event's local date, not age today; do not invent medical guidance. | A-fields (`TemperatureFields`, `shouldShowInfantFeverAdvice`), A-draft |
 | Diary | `diary` (1) | Required multiline body, Android input limit 800; body is separate from note. | A-fields, A-draft |
 | Simple | `bath`, `walk` (2) | Common time/note only. Do not invent duration fields; Android writes walk without `endTimestamp`. | A-draft, A-shell |
 | Symptoms | `cough`, `rash`, `vomit`, `injury` (4) | Shared severity 1/2/3 with labels 轻微/一般/明显 and optional description (input limit 200). Preserve exact type. | A-fields, A-draft |
@@ -224,11 +234,11 @@ explicitly; no fallback may immediately save or silently use an empty payload.
 
 ## 5. Smallest implementation slices and acceptance
 
-Steps 1–2, the simple daily group and health subgroup are verified at `f7ca7571`.
-Growth and dedicated schema-3 sleep storage are verified at `3d8e0b` with
-174 Apple package tests and five UI tests, without a sleep UI entry. Milk is
-locally implemented and awaiting publication and its Apple acceptance gate.
-The remaining groups are planned; storage coverage is not UI acceptance.
+The 22-type checkpoint `10016b6a` verifies the existing daily/health/growth/milk/
+temperature forms and schema-3 sleep storage with 199 Apple package tests and
+seven UI tests, without a sleep UI entry. Food is locally implemented (25 forms)
+and awaits publication, Apple model tests and eighth UI acceptance. Manual nursing
+and dedicated sleep UI remain future slices; storage coverage is not UI acceptance.
 Do not replace the working pee flow with a generic form before its regression
 proof remains green.
 

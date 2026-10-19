@@ -162,3 +162,55 @@ Sources: Android `QuickRecordDraft.kt` (`TemperatureUnit`, defaults, `fromRecord
 birthday ownership, record-date boundaries, opaque/interval protection and real
 SQLite reopen/edit/delete. Two Apple-only tests cover the real model's original
 baby after selection changes, CUD, duplicate dispatch, rollback and discard.
+
+### Food (local implementation; Apple validation pending)
+
+The shared owner now accepts `baby_food` (辅食), `snack` (点心), and `drink` (饮料).
+Each type keeps its own raw content/amount in a new draft; switching types never
+copies an unrelated value into another food kind. Stored types remain frozen.
+Content is required, trimmed with Kotlin-compatible `AndroidText`, with an input
+limit of 80 UTF-16 units. Amount is free-form text with a 30-unit input limit;
+there is no unit picker or unit conversion. Both start empty. As with the other
+native text fields, changed overlong input is retained and rejected instead of
+Android's on-change truncation; unchanged legacy long fields remain editable.
+
+New or changed baby-food amounts must be nonblank and parseable after
+`FoodAmount.normalize`. Zero is accepted, as is the source upper bound of
+1,000,000. `半碗` writes `0.5碗`; full-width supported digits/punctuation are folded;
+ambiguous phrases such as `十几口` are rejected for new baby-food amounts. Snack
+and drink permit empty or nonnumeric amounts. Content/amount errors focus their
+own fields; note is independent and cannot substitute for required content.
+
+Legacy amount preservation is exact: a separate optional source value retains
+nil, empty string, whitespace, Chinese numerals, and full-width text. If the
+loaded amount text is unchanged (including being changed then restored), writes
+reuse that source optional value without normalization. Only a new or changed
+amount is normalized, with blank converted to nil. Reads and summaries display
+the original amount, and do not turn old `半碗` into a numeric statistics value.
+`FoodAmount.parseValue` is available for source-compatible aggregation, but this
+slice does not implement an aggregate statistics screen or claim that snack/drink
+participate in Android's baby-food-only summary.
+
+The baby-food guidance component uses `BabyFoodGuidance.at` with the original
+baby's captured birthday, record timestamp and `TimeZone.current`. Its completed
+calendar months follow Java `Period.between(...).toTotalMonths()`, not a fixed-day
+age or the temperature helper's clamped anniversary boundary. Missing/invalid
+birthday hides guidance; records before birth resolve to zero months, as in the
+source. Stages, suggestions, expandable explanation and disclaimer copy come
+from Android `BabyFoodGuidance.kt`; suggestion buttons modify only baby-food
+content, retaining amount/note/ownership. Expanded state resets when stage changes.
+These are source-defined product tips, not a claim of complete independent
+medical/nutritional validation or new advice authored for the native app.
+
+Android references: `QuickRecordPurposeTextFields.kt:100–221`,
+`QuickRecordDraft.kt:488–506,690–716,855–857`, `BabyFoodGuidance.kt`,
+`core/model/.../FoodAmount.kt`, `QuickRecordDraftFoodAmountTest.kt`, and
+`SummaryAggregation.kt:325–340`. Android plan intents can omit baby-food amount;
+this development host still rejects future facts and exposes no plan, fulfillment,
+media, family or sync workflow.
+
+Six portable tests cover all three forms, UTF-16/trim/numeric boundaries, exact
+legacy optionals through SQLite reopen/edit/delete, type/suggestion isolation,
+future rejection and opaque/interval protection. Two Apple-only model tests
+cover real CUD, original baby after selection changes, duplicate dispatch,
+rollback and discard. Apple SDK and UI acceptance remain separate CI gates.

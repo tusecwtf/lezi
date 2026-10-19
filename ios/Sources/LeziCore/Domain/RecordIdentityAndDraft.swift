@@ -65,7 +65,7 @@ public struct NursingConfirmInput: Equatable, Sendable {
 }
 
 /// An immutable confirmation snapshot, NOT a queued mutation or wire envelope.
-/// Creating it never writes a fact; storage transactions and ACL remain unimplemented.
+/// Creating it never writes a fact; the explicit command coordinator owns persistence and authority checks.
 public struct RecordConfirmationDraft: Equatable, Sendable {
     public static let maximumPhotos = 3
     public let clientUUID: UUID

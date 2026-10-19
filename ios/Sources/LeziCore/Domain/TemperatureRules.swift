@@ -23,25 +23,10 @@ public enum TemperatureRules {
     /// Invalid/nonfinite inputs fail closed rather than showing advice for NaN.
     public static func shouldShowInfantFeverAdvice(birthday: String?, recordTimestampMillis: Int64,
                                                   celsius: Double, enabled: Bool = true, zone: TimeZone) -> Bool {
-        guard enabled, celsius.isFinite, celsius >= 38, let birthday,
-              birthday.utf8.count == 10,
-              birthday.range(of: #"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"#, options: .regularExpression) != nil else { return false }
-        let parts = birthday.split(separator: "-").compactMap { Int($0) }
-        guard parts.count == 3, parts[0] > 0 else { return false }
-        // Date arithmetic uses UTC noon as a representation of Gregorian dates,
-        // so a skipped local midnight/date cannot change the baby's birthday.
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-        guard let birthDate = calendar.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2], hour: 12)) else { return false }
-        let checked = calendar.dateComponents([.year, .month, .day], from: birthDate)
-        guard checked.year == parts[0], checked.month == parts[1], checked.day == parts[2],
-              let threeMonths = calendar.date(byAdding: .month, value: 3, to: birthDate) else { return false }
-        var localCalendar = calendar
-        localCalendar.timeZone = zone
-        let instant = Date(timeIntervalSince1970: Double(recordTimestampMillis) / 1000)
-        var recordComponents = localCalendar.dateComponents([.year, .month, .day], from: instant)
-        recordComponents.hour = 12
-        guard let recordDate = calendar.date(from: recordComponents) else { return false }
+        guard enabled, celsius.isFinite, celsius >= 38,
+              let birthDate = GregorianRecordDate.birthday(birthday),
+              let recordDate = GregorianRecordDate.localDate(timestampMillis: recordTimestampMillis, zone: zone),
+              let threeMonths = GregorianRecordDate.calendar.date(byAdding: .month, value: 3, to: birthDate) else { return false }
         return recordDate >= birthDate && recordDate < threeMonths
     }
 }

@@ -59,12 +59,18 @@ passed **159 package tests plus five Simulator UI tests** (863.188 seconds total
 growth payload precision is preserved rather than copying Android's lossy
 two-decimal editor refill; changed input uses the shared Core conversion rules.
 
-The latest verified **dual-green** checkpoint **`3d8e0b`** adds atomic,
-data-preserving native schema **1/2→3** migration and dedicated sleep persistence
-alongside 26 ordinary no-media types. [Apple run 39321168082](https://github.com/tusecwtf/lezi/actions/runs/39321168082)
-passed **174 package tests + five UI tests**; [Android run 39321168588](https://github.com/tusecwtf/lezi/actions/runs/39321168588)
-passed **5,908 tests** (artifact `12221398420`). Fresh schema-3 host launch is
-verified, while UI remains at **18 types**, with no sleep editor.
+The latest verified **dual-green** checkpoint is **`10016b6a`**, with **22 bounded
+UI types** (including milk and temperature), native schema **3**, and dedicated
+sleep storage. [Apple run 39329817431](https://github.com/tusecwtf/lezi/actions/runs/39329817431)
+passed **199 package tests + seven Simulator UI tests**;
+[Android run 39329817430](https://github.com/tusecwtf/lezi/actions/runs/39329817430)
+passed **5,908 tests**. UI duration was 1,450.014 seconds (milk 249.255 seconds,
+temperature 184.565 seconds); artifact `12225776079` contains the acceptance
+evidence. Schema **1/2→3** migration preserves data atomically. Storage supports
+26 ordinary no-media types plus dedicated sleep commands. Fresh schema-3 host
+launch is verified, but **sleep UI is not exposed or accepted**. Database schema
+and payload document schema versions are separate concepts.
+
 Eight explicit sleep
 commands handle start/completed creation, wake creation, start/completed editing,
 wake update/withdrawal, and effective-wake selection. Dedicated reads batch-project
@@ -75,18 +81,31 @@ start editing; replay is strict; independent wake notes are not changed by sleep
 note edits. See the [offline expansion plan](ios-offline-records.md) for exact APIs
 and scope differences.
 
-**Unpublished local milk expansion** implements formula, pumped_feed and
-pump_express, bringing UI to **21 types**. Linux passed **168 tests (40 Storage,
-55 Presentation, 48 Domain, 25 Core)**; three new Apple model tests and the sixth
-UI test have not yet run. Milk recents use one three-type SQLite snapshot and
+**Current local, unpublished Food expansion:** baby_food, snack and drink bring
+UI to **25 types**. The Food slice passed **190 Linux tests**. Its two new
+Apple-only model tests and eighth UI scenario await Apple validation. The proposed
+eight-class UI suite with two parallel Simulator workers is also unverified; the
+seven-test green run above does not validate that parallel execution setup.
+Food keeps untouched optional legacy amounts exactly (nil, empty, Chinese,
+full-width and whitespace), normalizes only new/changed amounts, and requires a
+parseable amount only for new/changed baby-food facts. Guidance uses the original
+baby's birthday and the record's local date, with Java-compatible completed
+calendar months; suggestion buttons change only content.
+
+A separate **local schema-4 custom-storage workstream** is ready but is excluded
+from this Food publication. Its combined local 195-test result is not the Food
+slice's 190-test result and is not Apple or published evidence. Custom workflows
+remain pending separate integration and validation; no custom UI is claimed.
+
+Milk recents use one three-type SQLite snapshot and
 keyset traversal beyond the visible page. As in Android, the history query filters
 valid amount 1–999, not full optional-field validation; persistence retains its
 full validation gates. Step is a global device-local AppStorage preference. This
 host does not implement Android's separate day-list lastAmount launch override.
 
 The development host remains bounded: no family, production transport, signed-device
-or full-product support is implied. Storage support does not expose the five
-remaining ordinary forms or dedicated sleep UI. Concrete custom workflows remain
+or full-product support is implied. The local Food slice leaves manual nursing as the remaining ordinary form;
+storage support does not expose that form or dedicated sleep UI. Concrete custom workflows remain
 incomplete. The full product matrix stays open until each row has complete evidence.
 
 Native stale-edit CAS and revision-overflow refusal, and opaque preservation of
@@ -328,9 +347,10 @@ this plan. No production family data in fixtures, logs, screenshots or CI artifa
 
 CI in `.github/workflows/ios-core.yml` now tests the Swift package, compiles the
 Apple library code, builds the unsigned SwiftUI development host and runs its
-bounded Simulator UI scenarios. The `3d8e0b` checkpoint above has green Apple
-and Android evidence for 18 offline forms plus schema-3 sleep storage, with no
-sleep UI. The local 21-form milk expansion still awaits publication and Apple CI. This does not validate the complete app, widget extension,
+bounded Simulator UI scenarios. The `10016b6a` checkpoint above has green Apple
+and Android evidence for 22 offline forms plus schema-3 sleep storage, with no
+sleep UI. The local 25-form Food expansion and eight-class/two-worker UI execution
+setup still await publication and Apple CI. This does not validate the complete app, widget extension,
 signed device installation or real mixed-client sync. The complete application
 gates below remain required; later unverified code cannot inherit this result.
 

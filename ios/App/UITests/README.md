@@ -1,8 +1,8 @@
 # Offline Simulator acceptance
 
-`OfflinePeeAcceptanceTests` exercises the actual `LeziDevelopment` application
+The eight `Offline*AcceptanceTests` classes in `OfflinePeeAcceptanceTests.swift` exercise the actual `LeziDevelopment` application
 and its ordinary file-backed SQLite store. Run on a fresh, ephemeral Simulator
-sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, `UI-Daily-003`, `UI-Health-004`, `UI-Growth-005`, `UI-Milk-006`, and `UI-Temperature-007` names are
+sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, `UI-Daily-003`, `UI-Health-004`, `UI-Growth-005`, `UI-Milk-006`, `UI-Temperature-007`, and `UI-Food-008` names are
 unique in that fresh sandbox, one per test. Reusing an already-tested sandbox intentionally
 fails rather than deleting or modifying existing records to make the test pass.
 No special app launch arguments, fake stores, reset paths, or network are used.
@@ -77,6 +77,16 @@ inside the opened Picker menu’s actual CollectionView, only when the target
 button is offscreen. The captured menu hierarchy establishes the scope; the
 gesture uses current menu/window geometry and retains the target ID checks.
 
+The food flow verifies that a note cannot replace required content, and that
+baby food rejects empty or unparseable quantities without replacing the raw text.
+It saves 半碗 as 0.5碗, allows descriptive snack quantity and an omitted drink
+quantity, and checks per-kind draft inputs survive switching without leaking.
+Two batch relaunches cover all three facts, content-only editing that preserves
+the food amount and note, and deletion of the drink while food and snack remain.
+The current-day baby receives the exact pre-six-month stage and disclaimer,
+which have no suggestion buttons. Suggestion-button interaction is not exercised
+by this UI flow; content-only suggestion mutation is covered by model tests.
+
 Expectations poll observable UI states; there are no fixed sleeps. Cancel uses
 the existing `取消` button label; other controls and history probes use stable IDs.
 
@@ -97,7 +107,8 @@ xcodebuild test \
   -clonedSourcePackagesDirPath ios/App/SourcePackages \
   -disableAutomaticPackageResolution \
   -onlyUsePackageVersionsFromResolvedFile \
-  -parallel-testing-enabled NO \
+  -parallel-testing-enabled YES \
+  -parallel-testing-worker-count 2 \
   -resultBundlePath ios/App/OfflinePeeAcceptance.xcresult \
   ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
 ```
@@ -110,3 +121,31 @@ The result-bundle path must be unused. Test configuration is Simulator-only,
 unsigned, and contains no team, certificate, or provisioning profile. Source
 inspection on Linux cannot establish Apple compilation or UI acceptance. A
 successful macOS test execution and its `.xcresult` are required evidence.
+
+
+## Parallel execution and evidence
+
+Each of the eight flows is a separate `XCTestCase` subclass with one test method.
+`OfflineAcceptanceSupport` has no test methods and shares helpers without copying
+them. All original test actions, assertions, and synthetic data names are retained.
+The shared scheme enables parallel execution and CI requests exactly two workers,
+keeping the full scheme test action and the 40-minute job limit. There are no test
+filters, skips, or retries.
+
+XCTest distributes **classes**, not individual methods within one class, across
+runners. Each Simulator runner uses a separate clone of the selected destination;
+a worker may execute several classes serially. Assignment is not deterministic,
+so flows cannot rely on a particular clone or order. See Apple's
+[Xcode 10 testing release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-10-release-notes)
+and [Get your test results faster](https://developer.apple.com/videos/play/wwdc2020/10221/).
+Use a fresh base Simulator with synthetic data only, even when using clones.
+
+`first-launch.png` and `base-simulator-smoke-after-tests.png` capture only the
+original base Simulator's smoke launch. They do **not** show the clones' final
+acceptance data and do not establish that any acceptance test passed. The retained
+`OfflinePeeAcceptance.xcresult` is the evidence for all eight test outcomes and
+runner assignments. Review its per-test results and available diagnostics in
+Xcode; this change does not add a guaranteed final-state screenshot attachment.
+Apple CI must verify that all eight methods are discovered once, execute on the
+two workers, and pass. Linux syntax/configuration checks cannot establish that
+runtime behavior or a speedup.

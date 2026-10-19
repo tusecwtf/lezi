@@ -27,7 +27,7 @@ concurrency:
 jobs:
   contracts:
     runs-on: macos-15
-    # Full Simulator interaction coverage now includes seven independent record flows.
+    # Full Simulator interaction coverage now includes eight independent record flows.
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
@@ -112,12 +112,15 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/lezi-ui-test-build" \
             -clonedSourcePackagesDirPath "$RUNNER_TEMP/lezi-source-packages" \
             -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
-            -parallel-testing-enabled NO \
+            -parallel-testing-enabled YES \
+            -parallel-testing-worker-count 2 \
             -resultBundlePath "$RUNNER_TEMP/lezi-ios-evidence/OfflinePeeAcceptance.xcresult" \
             ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
+          # Parallel UI tests run on clones. This base-device image is only smoke
+          # evidence; use the xcresult test outcomes for all eight acceptance flows.
           xcrun simctl launch --terminate-running-process "$SIMULATOR_UDID" com.lezi.babylog.ios.dev
           sleep 2
-          xcrun simctl io "$SIMULATOR_UDID" screenshot "$RUNNER_TEMP/lezi-ios-evidence/offline-acceptance.png"
+          xcrun simctl io "$SIMULATOR_UDID" screenshot "$RUNNER_TEMP/lezi-ios-evidence/base-simulator-smoke-after-tests.png"
       - name: Shut down ephemeral Simulator
         if: always() && env.SIMULATOR_UDID != ''
         run: xcrun simctl shutdown "$SIMULATOR_UDID"

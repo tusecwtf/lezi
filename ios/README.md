@@ -96,7 +96,7 @@ corpus scenarios remain unimplemented and are not silently counted as passing.
   Negative-zero integer tokens are deliberately rejected at this boundary until
   their cross-language pre-normalization hash semantics are proven.
 - `LeziStorage` is a real file-backed SQLite **offline-only** vertical slice.
-  Verified checkpoint `3d8e0b` implements native schema **3**, with atomic,
+  Verified checkpoint `10016b6a` includes native schema **3**, with atomic,
   data-preserving migration from schema 1 or 2. It supports 26 ordinary no-media
   record types plus dedicated sleep storage. Generic `confirmRecord` still rejects
   sleep; custom entries and photos remain unsupported. Sleep UI is not exposed.
@@ -116,18 +116,36 @@ corpus scenarios remain unimplemented and are not silently counted as passing.
   `Sources/LeziStorage/StorageScope.swift` and
   [the offline expansion specification](../docs/spec/ios-offline-records.md).
 
-Evidence boundaries (2026-10-19): latest dual-green checkpoint **`3d8e0b`** has
-18 bounded UI types plus schema-3 dedicated sleep storage.
-[Apple run 39321168082](https://github.com/tusecwtf/lezi/actions/runs/39321168082)
-passed **174 package tests + five Simulator UI tests**;
-[Android run 39321168588](https://github.com/tusecwtf/lezi/actions/runs/39321168588)
-passed **5,908 tests**. Artifact `12221398420` includes the acceptance evidence.
-Fresh schema-3 app launch passed, but no sleep UI was implemented or accepted.
-This supersedes growth checkpoint `3f8e449`'s 159+5 result.
+Evidence boundaries (2026-10-19):
 
-Current unpublished milk forms (formula, pumped_feed, pump_express) bring UI to
-**21 types**. Linux passed **168 tests (40 Storage, 55 Presentation, 48 Domain,
-25 Core)**; three new Apple model tests and the sixth UI scenario remain unverified.
+The latest verified **dual-green** checkpoint is **`10016b6a`**, with **22 bounded
+UI types** (including milk and temperature), native schema **3**, and dedicated
+sleep storage. [Apple run 39329817431](https://github.com/tusecwtf/lezi/actions/runs/39329817431)
+passed **199 package tests + seven Simulator UI tests**;
+[Android run 39329817430](https://github.com/tusecwtf/lezi/actions/runs/39329817430)
+passed **5,908 tests**. UI duration was 1,450.014 seconds (milk 249.255 seconds,
+temperature 184.565 seconds); artifact `12225776079` contains the acceptance
+evidence. Schema **1/2→3** migration preserves data atomically. Storage supports
+26 ordinary no-media types plus dedicated sleep commands. Fresh schema-3 host
+launch is verified, but **sleep UI is not exposed or accepted**. Database schema
+and payload document schema versions are separate concepts.
+
+**Current local, unpublished Food expansion:** baby_food, snack and drink bring
+UI to **25 types**. The Food slice passed **190 Linux tests**. Its two new
+Apple-only model tests and eighth UI scenario await Apple validation. The proposed
+eight-class UI suite with two parallel Simulator workers is also unverified; the
+seven-test green run above does not validate that parallel execution setup.
+Food keeps untouched optional legacy amounts exactly (nil, empty, Chinese,
+full-width and whitespace), normalizes only new/changed amounts, and requires a
+parseable amount only for new/changed baby-food facts. Guidance uses the original
+baby's birthday and the record's local date, with Java-compatible completed
+calendar months; suggestion buttons change only content.
+
+A separate **local schema-4 custom-storage workstream** is ready but is excluded
+from this Food publication. Its combined local 195-test result is not the Food
+slice's 190-test result and is not Apple or published evidence. Custom workflows
+remain pending separate integration and validation; no custom UI is claimed.
+
 The three-type recent-amount map is read in one SQLite snapshot through bounded
 keyset pages across history. It follows Android's amount-only 1–999 filtering,
 not full optional-payload validation; save/edit still enforce full validation.
