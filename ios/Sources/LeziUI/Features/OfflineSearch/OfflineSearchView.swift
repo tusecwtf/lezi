@@ -74,7 +74,9 @@ public struct OfflineSearchView: View {
         .padding(theme.pageInset)
         // The host hides its own navigation bar. This page owns an explicit Back
         // control rather than depending on inherited toolbar visibility.
+        #if os(iOS)
         .toolbar(.hidden, for: .navigationBar)
+        #endif
         .onAppear { model.start() }
         .onDisappear { model.stop() }
         .onChange(of: scenePhase) { _, phase in if phase == .active { model.activate() } }

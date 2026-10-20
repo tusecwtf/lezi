@@ -281,9 +281,12 @@ commits invalidate queries. No novel date/category filters, timeline rail,
 family authority, schema, server or media changes are included.
 
 The complete Linux suite passed 301 tests (69 storage, 115 portable presentation,
-92 domain, 25 core). Expected Apple 340 package tests and fourteen real-store UI
-flows remain unverified for this new head. Existing thirteen UI bodies/helpers
-are unchanged. The new case covers a raw-key suffix non-match, English alias,
+92 domain, 25 core). On search head `a6fdc3c4`, Apple CI stopped during macOS
+package compilation because the new navigation-bar toolbar modifier is iOS-only;
+no Apple package tests or Simulator acceptance ran. Both call sites now compile
+that unchanged modifier only on iOS. Expected Apple 340 package tests and fourteen
+real-store UI flows remain unverified until the repaired head completes CI.
+Existing thirteen UI bodies/helpers are unchanged. The new case covers a raw-key suffix non-match, English alias,
 literal percent/underscore, UUID-preserving open/cancel/edit, committed refresh,
 delete cancellation/confirmation, two-baby isolation and relaunch. The complete
 serial scheme keeps its 75-minute budget with no skip/filter/retry.

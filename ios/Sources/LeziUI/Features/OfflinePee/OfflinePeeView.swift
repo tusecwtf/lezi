@@ -63,7 +63,9 @@ public struct OfflinePeeView: View {
             }
         }
         .padding(theme.pageInset)
+        #if os(iOS)
         .toolbar(.hidden, for: .navigationBar)
+        #endif
         .navigationDestination(isPresented: $showingSearch) {
             OfflineSearchView(store: store, onOpenRecord: openSearchRecord)
         }
