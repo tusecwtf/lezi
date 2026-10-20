@@ -1426,6 +1426,7 @@ final class OfflineWakeObservationAcceptanceTests: OfflineAcceptanceSupport {
         let open = row.buttons["offline.sleep.observations.open"]
         revealHistoryControl(open, paddingRow: row, in: app)
         tap(open)
+        attachWakeDiagnostics("opened-observations", in: app)
         waitFor(app.buttons["offline.wake.close"], "exists == true AND enabled == true AND hittable == true")
     }
 

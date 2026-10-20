@@ -13,7 +13,6 @@ struct OfflineWakeObservationView: View {
             if let editor = model.editor { correction(editor) }
             else if let details = model.details { observations(details) }
         }
-        .accessibilityIdentifier("offline.wake.sheet")
         .disabled(model.busy)
         .interactiveDismissDisabled(model.busy || model.editor?.isDirty == true)
         .alert("放弃未保存的修改？", isPresented: $model.showingDiscard) {

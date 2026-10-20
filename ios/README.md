@@ -224,7 +224,7 @@ See `Sources/LeziUI/README.md` for presentation-slice scope as it lands. The
 [next sync-adapter design](../docs/spec/ios-sync-adapter.md) remains a proposal;
 its release compatibility policy is neither decided nor implemented.
 
-## Wake-observation continuation (Apple validation pending)
+## Wake-observation continuation (Apple UI repair pending)
 
 The preceding `a0874310` checkpoint passed Android [39368766299](https://github.com/tusecwtf/lezi/actions/runs/39368766299)
 (5,910 tests, zero failures/errors/skips) and Apple [39368766367](https://github.com/tusecwtf/lezi/actions/runs/39368766367)
@@ -243,10 +243,21 @@ is an offline adaptation, not proof of family membership or owner authority.
 
 The thirteenth actual-store Simulator flow preserves the existing twelve cases.
 The complete Linux package suite passed 251 tests (57 storage, 96 portable
-presentation, 73 domain, 25 core). Four additional Apple-only model tests
-bring the expected Apple total to 289; this is not an observed result.
-Apple compilation and execution for this new slice remain pending. The serial
-workflow budget is 75 minutes because the preceding twelve-flow suite took
-46.8 minutes excluding build/boot; no filters, skips or retries were introduced.
+presentation, 73 domain, 25 core). On `0c061e26`, Android
+[39375330332](https://github.com/tusecwtf/lezi/actions/runs/39375330332) passed
+5,910 tests with zero failures/errors/skips. Apple
+[39375330342](https://github.com/tusecwtf/lezi/actions/runs/39375330342) passed
+289 package tests, iOS SDK compilation, unsigned app build and smoke launch.
+All thirteen UI cases executed once; the original twelve passed. The new
+observation case opened its list but failed its first Close-control assertion:
+retained AX exposed `Button identifier: offline.wake.sheet, label: 关闭`, because
+the outer SwiftUI Group identifier overrode the control's `offline.wake.close`.
+
+The repair removes only that unused Group-wide identifier and captures AX and a
+screenshot immediately after opening. The Close-control wait and all remaining
+business assertions stay unchanged. Observation correction, withdrawal and
+relaunch acceptance remain unverified until the repaired flow executes on Apple.
+The serial workflow budget is 75 minutes because the preceding twelve-flow suite
+took 46.8 minutes excluding build/boot; no filters, skips or retries were introduced.
 Full product parity, mixed-client synchronization, signing and physical-device
 acceptance remain incomplete. The PR stays draft and must not merge.
