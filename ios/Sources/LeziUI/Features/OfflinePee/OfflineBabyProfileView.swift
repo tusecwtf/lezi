@@ -24,14 +24,14 @@ struct OfflineBabyProfileView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         LeziText("仅修改此宝宝的本机档案，不改变护理记录或当前宝宝。", role: .label)
                         TextField("昵称（不可重复）", text: Binding(
-                            get: { editor.nickname }, set: model.editNickname
+                            get: { editor.nickname }, set: { model.editNickname($0) }
                         ))
                         .accessibilityIdentifier("offline.profile.nickname")
                         if let error = editor.nicknameError {
                             LeziText(error, role: .label).accessibilityIdentifier("offline.profile.nickname.error")
                         }
                         Picker("性别", selection: Binding<String?>(
-                            get: { editor.sex }, set: model.editSex
+                            get: { editor.sex }, set: { model.editSex($0) }
                         )) {
                             if let value = editor.sex, value != "female", value != "male" {
                                 Text("原值未识别，请重新选择").tag(Optional(value)).disabled(true)
@@ -59,7 +59,7 @@ struct OfflineBabyProfileView: View {
                             // Never silently replace such a valid stored day with
                             // a shifted date or today merely by opening an editor.
                             TextField("出生日期（YYYY-MM-DD）", text: Binding(
-                                get: { editor.birthday }, set: model.editBirthday
+                                get: { editor.birthday }, set: { model.editBirthday($0) }
                             ))
                             .accessibilityIdentifier("offline.profile.birthday.text")
                             LeziText("此日期以原始年月日保留，请按 YYYY-MM-DD 填写。", role: .label)
@@ -68,7 +68,7 @@ struct OfflineBabyProfileView: View {
                             LeziText(error, role: .label).accessibilityIdentifier("offline.profile.birthday.error")
                         }
                         TextField("出生体重（kg，可选）", text: Binding(
-                            get: { editor.weightText }, set: model.editWeight
+                            get: { editor.weightText }, set: { model.editWeight($0) }
                         ))
                         #if os(iOS)
                         .keyboardType(.decimalPad)

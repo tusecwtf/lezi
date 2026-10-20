@@ -326,9 +326,13 @@ cannot silently normalize during a name-only edit. Pre-1582-10-15 or otherwise
 unrepresentable native calendar dates use exact ISO text, never fallback today.
 
 The full Linux suite passed 333 tests (81 storage, 129 portable presentation,
-98 domain, 25 core). Five additional Apple-only model tests make the expected
-Apple package total 377; this is not observed yet. All fifteen Simulator cases
-remain required. The prior fourteen test bodies and shared helpers are unchanged.
+98 domain, 25 core). On profile head `f0dee94c`, Swift 6.1 crashed while generating
+IR for the profile view's optional-String actor-method binding thunk. No Apple
+package tests or Simulator stages ran. The four profile binding setters now use
+explicit closures with unchanged values, optional nil handling and model calls.
+Five additional Apple-only model tests make the expected Apple package total
+377; this remains unverified until the repaired head runs. All fifteen Simulator
+cases remain required. The prior fourteen test bodies and shared helpers are unchanged.
 The complete serial workflow has a 90-minute budget because the prior fourteen
 UI flows alone took 59.4 minutes, excluding build/boot. No filter/skip/retry added.
 
