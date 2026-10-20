@@ -143,26 +143,33 @@ passed **247 package tests and all 11 UI scenarios**. This verifies that source,
 including the first sleep start/wake/relaunch path and prior gate repairs, not
 the additional sleep work below.
 
-**Completed-sleep draft `4b6bfd0`, Apple UI acceptance blocked:**
-[Apple run 39354961918](https://github.com/tusecwtf/lezi/actions/runs/39354961918)
+**Completed-sleep draft `fb3c984a`, Apple UI acceptance blocked:**
+[Apple run 39362723847](https://github.com/tusecwtf/lezi/actions/runs/39362723847)
 passed **255 package tests**, iOS SDK compilation and the unsigned app build.
-Its original eleven UI scenarios passed; the twelfth completed-sleep scenario
-failed before opening the native calendar. The test expected the runner's
-English date label, but the host's `zh-Hans` development localization exposes
-`2026年10月20日`, confirmed by its retained accessibility tree and screenshot.
-The complete Linux regression passed **221 tests, zero failures** (46 storage,
-89 portable presentation, 61 domain, 25 core).
+All **12 UI cases executed once**: the original eleven passed, while the
+completed-sleep case opened the real calendar and failed its numeric-button
+lookup. Its retained AX tree shows a day Button with a localized full-date
+label containing a numeric StaticText child, plus native month-navigation IDs.
+The previous host/runner locale mismatch is fixed without changing app language.
+[Android run 39362723838](https://github.com/tusecwtf/lezi/actions/runs/39362723838)
+passed **5,910 tests, zero failures/errors/skips**. The complete Linux regression
+passed **221 tests, zero failures** (46 storage, 89 portable presentation,
+61 domain, 25 core).
 
-The current test-only repair uses the observed Chinese host localization for
-native date-label expectations without changing product language. Its Apple
-rerun is pending. The native popup's day cells and month-navigation controls
-still require actual accessibility evidence, followed by interaction coverage
-for month-start cross-month and year-end navigation. A pass on today's date
-alone will not complete those boundary gates. No test-only date picker
-substitute or silent calendar-boundary omission establishes acceptance.
-The completed-sleep save/edit/delete/relaunch sequence has not yet been reached
-in Apple UI testing. The older 247+11 green result must not be inherited by this
-draft or its test repair.
+The current test-only repair uses those captured native IDs and day-child
+semantics. It reads the actual displayed month, moves the exact bounded number
+of months with a checked year/month after every tap, then selects the unique
+day Button containing the numeric child. The flow reads the initial compact date,
+selects January 1 of that captured year, moves back to December 31 of the
+previous year for its start, and forward to January 1 for its end. This exercises month-start and year-end
+navigation in both directions without changing the device clock or app language.
+AX trees and screenshots are retained for each navigation and selection.
+
+Apple execution of this repair is pending. Neither the boundary interactions
+nor the completed-sleep save/edit/delete/relaunch sequence is accepted yet.
+The earlier package and eleven-scenario passes must not be inherited as a
+complete acceptance result for this draft. No test-only picker, skipped
+boundary, filtered gate or blind retry establishes acceptance.
 
 The verified first sleep slice supports explicit-confirm SleepStart creation,
 a separate WakeObservation for the captured sleep/baby, and projected readback.

@@ -1130,14 +1130,31 @@ final class OfflineCompletedSleepAcceptanceTests: OfflineAcceptanceSupport {
         // Calendar arithmetic, rather than 24-hour subtraction, handles DST.
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
-        let today = Date()
-        let yesterday = calendar.date(byAdding: .day, value: -1, to: today)!
-        chooseSleepCalendarDay("offline.sleep.time", from: today, to: yesterday, in: app)
+        let initialPicker = app.datePickers["offline.sleep.time"]
+        waitFor(initialPicker, "exists == true AND hittable == true")
+        XCTAssertEqual(initialPicker.buttons.count, 3, "Unexpected native compact DatePicker hierarchy")
+        let initialLabel = initialPicker.buttons.element(boundBy: 1).label
+        let dateFormatter = sleepCalendarDateFormatter(calendar: calendar)
+        guard let capturedDay = dateFormatter.date(from: initialLabel),
+              dateFormatter.string(from: capturedDay) == initialLabel else {
+            attachSleepCalendarDiagnostics("initial-sleep-date", in: app)
+            XCTFail("The initial native picker must expose its exact Gregorian calendar date")
+            return
+        }
+        let firstDayOfYear = calendar.dateInterval(of: .year, for: capturedDay)!.start
+        let lastDayOfPreviousYear = calendar.date(byAdding: .day, value: -1, to: firstDayOfYear)!
+        // Always exercise a selected month-start going back across a year
+        // boundary, then an end candidate going forward across that boundary.
+        // Only the date changes: native pickers retain the form's original
+        // time of day. Base the year on that captured date, not Date(), so even
+        // a midnight/year rollover cannot turn the end into a future instant.
+        chooseSleepCalendarDay("offline.sleep.time", from: capturedDay, to: firstDayOfYear, in: app)
+        chooseSleepCalendarDay("offline.sleep.time", from: firstDayOfYear, to: lastDayOfPreviousYear, requiredMonthDelta: -1, in: app)
         tap(app.buttons["offline.sleep.end.choose"])
         tap(app.buttons["offline.sleep.end.accept"])
         waitFor(app.staticTexts["offline.sleep.error"], "label == %@", "醒来须晚于睡下")
         XCTAssertFalse(app.datePickers["offline.sleep.end"].exists)
-        chooseSleepCalendarDay("offline.sleep.end.candidate", from: yesterday, to: today, in: app)
+        chooseSleepCalendarDay("offline.sleep.end.candidate", from: lastDayOfPreviousYear, to: firstDayOfYear, requiredMonthDelta: 1, in: app)
         tap(app.buttons["offline.sleep.end.accept"])
         waitFor(app.datePickers["offline.sleep.end"], "exists == true")
         let startDisplay = app.datePickers["offline.sleep.time"].buttons.element(boundBy: 0).value as? String ?? ""
@@ -1217,22 +1234,28 @@ final class OfflineCompletedSleepAcceptanceTests: OfflineAcceptanceSupport {
 /// Shared UI operations only: no test methods to inherit or execute twice.
 @MainActor
 class OfflineAcceptanceSupport: XCTestCase {
-    fileprivate func chooseSleepCalendarDay(_ identifier: String, from initialDate: Date, to date: Date, in app: XCUIApplication) {
-        let picker = app.datePickers[identifier]
-        waitFor(picker, "exists == true AND hittable == true")
-        // The captured native compact picker has an aggregate button followed
-        // by its date and time buttons. Do not guess localized popup labels.
-        var selectionCalendar = Calendar(identifier: .gregorian)
-        selectionCalendar.timeZone = .current
+    fileprivate func sleepCalendarDateFormatter(calendar: Calendar) -> DateFormatter {
         let formatter = DateFormatter()
-        formatter.calendar = selectionCalendar
-        formatter.timeZone = .current
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
         // project.pbxproj declares zh-Hans; run 39354961918's retained AX and
         // screenshot show "2026年10月20日", despite runner Locale.current=en_US.
         // This changes only the expectation, never the app's native localization.
         formatter.locale = Locale(identifier: "zh_Hans")
         formatter.dateStyle = .long
         formatter.timeStyle = .none
+        formatter.isLenient = false
+        return formatter
+    }
+
+    fileprivate func chooseSleepCalendarDay(_ identifier: String, from initialDate: Date, to date: Date, requiredMonthDelta: Int? = nil, in app: XCUIApplication) {
+        let picker = app.datePickers[identifier]
+        waitFor(picker, "exists == true AND hittable == true")
+        // The captured native compact picker has an aggregate button followed
+        // by its date and time buttons. Do not guess localized popup labels.
+        var selectionCalendar = Calendar(identifier: .gregorian)
+        selectionCalendar.timeZone = .current
+        let formatter = sleepCalendarDateFormatter(calendar: selectionCalendar)
         print("Sleep calendar: runnerLocale=\(Locale.current.identifier), expectedHostLocale=\(formatter.locale.identifier), calendar=\(formatter.calendar.identifier), timezone=\(TimeZone.current.identifier)")
         attachSleepCalendarDiagnostics(identifier + "-compact", in: app)
         XCTAssertEqual(picker.buttons.count, 3, "Unexpected native compact DatePicker hierarchy")
@@ -1240,13 +1263,60 @@ class OfflineAcceptanceSupport: XCTestCase {
         waitFor(dateButton, "label == %@", formatter.string(from: initialDate))
         tap(dateButton)
         attachSleepCalendarDiagnostics(identifier, in: app)
-        // First-run native popup evidence is retained even if iOS exposes a
-        // different day-cell representation. Never try unrelated labels.
-        guard formatter.calendar.isDate(initialDate, equalTo: date, toGranularity: .month) else {
-            XCTFail("Native month navigation needs captured popup AX evidence; refusing to select a same-number day in the wrong month")
+
+        // Run 39362723847 exposed these native IDs. The dismissal region is a
+        // sibling of the popup DatePicker inside this overlay, not its child.
+        let overlay = app.otherElements
+            .containing(.button, identifier: "PopoverDismissRegion")
+            .containing(.button, identifier: "DatePicker.Show").firstMatch
+        waitFor(overlay, "exists == true")
+        let popups = overlay.datePickers.containing(.button, identifier: "DatePicker.Show")
+        guard popups.count == 1 else {
+            XCTFail("Expected one native calendar popup inside its dismissal overlay")
             return
         }
-        let calendars = app.collectionViews.allElementsBoundByIndex.filter { $0.isHittable }
+        let popup = popups.element(boundBy: 0)
+        let month = popup.buttons["DatePicker.Show"]
+        waitFor(month, "exists == true AND hittable == true")
+        let monthFormatter = DateFormatter()
+        monthFormatter.calendar = selectionCalendar
+        monthFormatter.timeZone = selectionCalendar.timeZone
+        monthFormatter.locale = formatter.locale
+        monthFormatter.dateFormat = "yyyy年M月"
+        monthFormatter.isLenient = false
+        // Read the displayed page rather than assuming it opens at the runner's
+        // current date or even the compact picker's selected date.
+        guard let monthValue = month.value as? String,
+              let initialMonth = monthFormatter.date(from: monthValue),
+              monthFormatter.string(from: initialMonth) == monthValue,
+              let targetMonth = selectionCalendar.dateInterval(of: .month, for: date)?.start,
+              let difference = selectionCalendar.dateComponents([.month], from: initialMonth, to: targetMonth).month,
+              abs(difference) <= 12 else {
+            XCTFail("Native month header must identify a Gregorian month within this flow's one-year navigation bound")
+            return
+        }
+        // Boundary legs must perform their actual one-month transition, not
+        // pass because a native popup unexpectedly opened on the target page.
+        if let requiredMonthDelta, difference != requiredMonthDelta {
+            XCTFail("Native boundary navigation requires month delta \(requiredMonthDelta), but the displayed page requires \(difference)")
+            return
+        }
+        var visibleMonth = initialMonth
+        let direction = difference < 0 ? -1 : 1
+        let navigation = popup.buttons[difference < 0 ? "DatePicker.PreviousMonth" : "DatePicker.NextMonth"]
+        // The exact page distance bounds this loop. Each tap advances one month
+        // and must expose its exact new year/month before another action.
+        for step in 0..<abs(difference) {
+            let nextMonth = selectionCalendar.date(byAdding: .month, value: direction, to: visibleMonth)!
+            let expectedMonth = monthFormatter.string(from: nextMonth)
+            print("Sleep calendar navigation \(identifier): \(monthFormatter.string(from: visibleMonth)) -> \(expectedMonth), step \(step + 1)/\(abs(difference))")
+            tap(navigation)
+            waitFor(month, "value == %@", expectedMonth)
+            attachSleepCalendarDiagnostics(identifier + "-month-" + expectedMonth, in: app)
+            visibleMonth = nextMonth
+        }
+        waitFor(month, "value == %@", monthFormatter.string(from: targetMonth))
+        let calendars = popup.collectionViews.allElementsBoundByIndex.filter { $0.isHittable }
         guard calendars.count == 1 else {
             XCTFail("Expected one visible native calendar collection; inspect attached popup hierarchy")
             return
@@ -1256,24 +1326,45 @@ class OfflineAcceptanceSupport: XCTestCase {
         numbers.locale = formatter.locale
         numbers.numberStyle = .decimal
         let day = numbers.string(from: NSNumber(value: formatter.calendar.component(.day, from: date)))!
-        let days = calendar.buttons.matching(NSPredicate(format: "label == %@", day))
+        // Actual AX: Button "10月19日 星期一" contains StaticText "19".
+        // Today's button has an extra "今天," prefix. Select the parent button
+        // by its numeric child only after proving the popup's exact year/month.
+        let days = calendar.buttons.containing(.staticText, identifier: day)
         guard days.count == 1 else {
-            XCTFail("Native calendar did not expose one numeric day button for \(day); inspect attached popup hierarchy")
+            XCTFail("Native calendar did not expose one day button containing numeric text \(day) in the verified month")
             return
         }
-        tap(days.element(boundBy: 0))
-        // Compact calendars may remain open after selecting a day. Dismiss by
-        // tapping a measured, non-interactive sheet label outside the popup.
-        if calendar.exists && calendar.isHittable {
+        let dayButton = days.element(boundBy: 0)
+        tap(dayButton)
+        let selectionSettled = NSPredicate { _, _ in
+            !popup.exists || (dayButton.exists && dayButton.isSelected)
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [
+            XCTNSPredicateExpectation(predicate: selectionSettled, object: popup)
+        ], timeout: 15), .completed, "Native calendar must close or expose the selected target day")
+        attachSleepCalendarDiagnostics(identifier + "-selected", in: app)
+        if popup.exists {
+            let dismiss = overlay.buttons["PopoverDismissRegion"]
+            waitFor(dismiss, "exists == true AND hittable == true")
+            // This native dismissal button spans the whole window; its center
+            // overlaps the calendar. Derive an outside point from the measured
+            // non-interactive baby label, never a fixed coordinate.
             let label = app.staticTexts["offline.sleep.baby"]
-            guard label.exists, !calendar.frame.intersects(label.frame) else {
-                attachSleepCalendarDiagnostics(identifier + "-selected", in: app)
+            guard label.exists, !popup.frame.intersects(label.frame),
+                  dismiss.frame.contains(label.frame), app.frame.contains(label.frame) else {
                 XCTFail("No verified outside-calendar label for dismissal")
                 return
             }
-            label.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            dismiss.coordinate(withNormalizedOffset: .zero)
+                .withOffset(CGVector(dx: label.frame.midX - dismiss.frame.minX,
+                                     dy: label.frame.midY - dismiss.frame.minY)).tap()
         }
+        waitFor(popup, "exists == false")
+        // While the popup is open, the compact aggregate becomes an Other.
+        // Only inspect the restored three-button hierarchy after dismissal.
+        XCTAssertEqual(picker.buttons.count, 3, "Native compact DatePicker must be restored after dismissal")
         waitFor(dateButton, "label == %@", formatter.string(from: date))
+        attachSleepCalendarDiagnostics(identifier + "-committed", in: app)
     }
 
     fileprivate func attachSleepCalendarDiagnostics(_ name: String, in app: XCUIApplication) {

@@ -119,37 +119,51 @@ exact equal-time/zero-duration closure is covered by model tests, not forced
 through the date picker here. No timer, family observer, or retrospective
 observation-management flow is simulated.
 
-The completed-sleep flow uses the real native date picker to select yesterday's
-start and today's end. Calendar arithmetic uses Gregorian dates in the
-Simulator's time zone; native labels use the host's `zh-Hans` development
-localization, independently of the XCTest runner's locale. An absent end and an equal-time candidate are explicitly rejected before
-saving; no interval is fabricated by a launch flag. It saves a backfill, edits
-its start note and then its completed-interval note, and checks the same sleep
-and wake UUIDs, end, duration, provisional status, and unchanged independent wake
-note. A relaunch checks persistence. Cancelled deletion preserves the row;
-confirmed soft deletion removes it, including after a second relaunch. The
-success message promises preserved wake observations; their retained storage
-and no-revival semantics are verified by portable/store tests, since this app
-has no observation-recovery UI.
+The completed-sleep flow reads the initial native compact date, then uses the
+real picker to select January 1 of that captured year, December 31 of the
+previous year for its start, and January 1 for its end. Both backward and forward
+month/year transitions run every time, including on January 1; no assumption
+about today's proximity to a boundary can skip them. Changing the date retains
+the form's original time of day. Using its actual captured year also prevents
+a midnight/year rollover between app and runner reads from making the end
+future-dated. Calendar
+arithmetic uses Gregorian dates in the Simulator's time zone; native labels use
+the host's `zh-Hans` development localization, independently of XCTest's locale.
+An absent end and an equal-time candidate are explicitly rejected before saving;
+no interval is fabricated by a launch flag. It saves a backfill, edits its start
+note and then its completed-interval note, and checks the same sleep and wake
+UUIDs, end, duration, provisional status, and unchanged independent wake note.
+A relaunch checks persistence. Cancelled deletion preserves the row; confirmed
+soft deletion removes it, including after a second relaunch. The success message
+promises preserved wake observations; their retained storage and no-revival
+semantics are verified by portable/store tests, since this app has no
+observation-recovery UI.
 
-[Apple run 39354961918](https://github.com/tusecwtf/lezi/actions/runs/39354961918)
-on `4b6bfd0` passed all original eleven scenarios but stopped this twelfth flow
-before opening the native calendar: the runner reported `en_US` while the host's
-retained AX tree and screenshot showed the date label `2026年10月20日`. The current
-repair changes only the test's date-label locale to match the `zh-Hans` host;
-Apple re-execution remains pending. All twelve cases and business assertions
-remain present.
+[Apple run 39362723847](https://github.com/tusecwtf/lezi/actions/runs/39362723847)
+on `fb3c984a` passed 255 package tests and executed all twelve UI cases once.
+The original eleven passed; the completed-sleep case successfully opened the
+calendar, fixing the previous host/runner locale mismatch, but failed to find a
+numeric-labeled Button. Its actual AX tree shows Button `10月19日 星期一` with a
+StaticText `19` child; today's Button additionally has a `今天,` prefix. It also
+exposes `DatePicker.Show` with value `2026年10月`, `DatePicker.PreviousMonth`,
+`DatePicker.NextMonth`, and a sibling `PopoverDismissRegion` in its native overlay.
 
-The test retains complete AX trees and screenshots before and after opening the
-native calendar. Its popup day cells and navigation controls have not yet been
-captured. The existing one-visible-calendar/one-numeric-day checks fail with
-evidence rather than trying alternate labels or skipping the date change.
-Cross-month navigation also fails explicitly pending actual popup AX evidence;
-it must not select a same-number date from the wrong month. Real month-start
-and year-end navigation must be implemented and exercised before acceptance,
-even if a same-month run passes. The save, both edits, independent wake checks,
-delete cancellation, confirmed soft deletion and relaunch steps below the
-calendar remain unexecuted on Apple at this checkpoint.
+The current repair scopes interaction to that overlay and its unique popup,
+parses the actual `Show` year/month, and calculates the exact month distance
+(within this flow's one-year bound). Every navigation tap must expose the exact
+next year/month before another action. Only after verifying the target month
+does it tap the unique day Button containing the numeric StaticText. Selection must either close the
+popup or expose the selected target day. If still open, it is dismissed through its native dismissal region at a measured
+point outside the full popup, then the restored compact picker must expose the
+exact selected date. AX trees and screenshots are retained before/after opening,
+for each month transition, after selection and after dismissal. This is UI
+interaction, not a replacement picker or test-only state injection.
+
+Apple execution of the repair remains pending. Day selection, both boundary
+directions, save, both edits, independent wake checks, delete cancellation,
+confirmed soft deletion and relaunch must all execute successfully before this
+flow is accepted. All twelve cases and existing business assertions remain
+present; the first eleven scenario bodies are unchanged.
 
 Expectations poll observable UI states; there are no fixed sleeps. Cancel uses
 the existing `取消` button label; other controls and history probes use stable IDs.
