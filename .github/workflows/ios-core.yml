@@ -1,0 +1,145 @@
+name: iOS core contracts
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - "ios/**"
+      - "config/conflict-v2-golden*"
+      - "config/next-feed-plan-marker.v1.json"
+      - ".github/workflows/ios-core.yml"
+  push:
+    branches: [master]
+    paths:
+      - "ios/**"
+      - "config/conflict-v2-golden*"
+      - "config/next-feed-plan-marker.v1.json"
+      - ".github/workflows/ios-core.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-core-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    runs-on: macos-15
+    # Full Simulator interaction coverage now includes fifteen independent record flows.
+    # Fourteen serial flows took 59.4 min; allow fifteen plus build/boot variance.
+    # The two-clone run stalled its second runner startup; avoid local fan-out.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - name: Record exact source and Apple toolchain
+        run: |
+          git rev-parse HEAD
+          xcodebuild -version
+          xcrun swift --version
+      - name: Run portable domain and wire behavior tests
+        run: swift test --package-path ios --force-resolved-versions
+      - name: Compile core against the iOS Simulator SDK
+        run: |
+          set -euo pipefail
+          sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+          mkdir -p "$RUNNER_TEMP/lezi-ios-core"
+          sources=()
+          while IFS= read -r file; do sources+=("$file"); done < <(find ios/Sources/LeziCore -name '*.swift' -type f | sort)
+          test "${#sources[@]}" -gt 0
+          xcrun swiftc -swift-version 6 -parse-as-library \
+            -sdk "$sdk" -target arm64-apple-ios17.0-simulator \
+            -module-name LeziCore -emit-module \
+            -emit-module-path "$RUNNER_TEMP/lezi-ios-core/LeziCore.swiftmodule" \
+            "${sources[@]}"
+          storage_sources=()
+          while IFS= read -r file; do storage_sources+=("$file"); done < <(find ios/Sources/LeziStorage -name '*.swift' -type f | sort)
+          test "${#storage_sources[@]}" -gt 0
+          xcrun swiftc -swift-version 6 -parse-as-library \
+            -sdk "$sdk" -target arm64-apple-ios17.0-simulator \
+            -I "$RUNNER_TEMP/lezi-ios-core" -I ios/Sources/CSQLite \
+            -module-name LeziStorage -emit-module \
+            -emit-module-path "$RUNNER_TEMP/lezi-ios-core/LeziStorage.swiftmodule" \
+            "${storage_sources[@]}"
+          ui_sources=()
+          while IFS= read -r file; do ui_sources+=("$file"); done < <(find ios/Sources/LeziUI -name '*.swift' -type f | sort)
+          test "${#ui_sources[@]}" -gt 0
+          xcrun swiftc -swift-version 6 -parse-as-library \
+            -sdk "$sdk" -target arm64-apple-ios17.0-simulator \
+            -I "$RUNNER_TEMP/lezi-ios-core" -I ios/Sources/CSQLite \
+            -module-name LeziUI -emit-module \
+            -emit-module-path "$RUNNER_TEMP/lezi-ios-core/LeziUI.swiftmodule" \
+            "${ui_sources[@]}"
+      - name: Build unsigned development app
+        run: |
+          python3 ios/App/prepare-package-lock.py
+          xcodebuild -resolvePackageDependencies \
+            -project ios/App/LeziDevelopment.xcodeproj -scheme LeziDevelopment \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/lezi-source-packages" \
+            -onlyUsePackageVersionsFromResolvedFile
+          xcodebuild build \
+            -project ios/App/LeziDevelopment.xcodeproj -scheme LeziDevelopment \
+            -configuration Debug -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/lezi-app-build" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/lezi-source-packages" \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+            ONLY_ACTIVE_ARCH=NO CODE_SIGNING_ALLOWED=NO
+      - name: Smoke launch on a clean iPhone Simulator
+        env:
+          APP_PATH: ${{ runner.temp }}/lezi-app-build/Build/Products/Debug-iphonesimulator/LeziDevelopment.app
+        run: |
+          set -euo pipefail
+          simulator="$(xcrun simctl list devices available --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for runtime,devices in d["devices"].items() if "iOS" in runtime for x in devices if x["name"].startswith("iPhone")))')"
+          echo "SIMULATOR_UDID=$simulator" >> "$GITHUB_ENV"
+          # Ephemeral CI device only; never a user's phone or family store.
+          xcrun simctl boot "$simulator"
+          xcrun simctl bootstatus "$simulator" -b
+          xcrun simctl install "$simulator" "$APP_PATH"
+          xcrun simctl launch "$simulator" com.lezi.babylog.ios.dev
+          sleep 5
+          mkdir -p "$RUNNER_TEMP/lezi-ios-evidence"
+          xcrun simctl io "$simulator" screenshot "$RUNNER_TEMP/lezi-ios-evidence/first-launch.png"
+      - name: Exercise real offline confirmation and relaunch
+        run: |
+          # The generic build above remains a universal Simulator compilation gate.
+          # A concrete-device test must use the same active architecture for the
+          # app, Swift package products, and test runner. Keep its intermediates
+          # separate so it cannot overwrite the universal build's package objects.
+          xcodebuild test \
+            -project ios/App/LeziDevelopment.xcodeproj -scheme LeziDevelopment \
+            -configuration Debug -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+            -derivedDataPath "$RUNNER_TEMP/lezi-ui-test-build" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/lezi-source-packages" \
+            -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+            -parallel-testing-enabled NO \
+            -resultBundlePath "$RUNNER_TEMP/lezi-ios-evidence/OfflinePeeAcceptance.xcresult" \
+            ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
+          # Explicit CLI override keeps the full scheme on one Simulator despite
+          # the scheme parallelizable flag. No test filters, skips, or retries.
+          # This post-test image is only smoke evidence; use per-case xcresult
+          # outcomes to verify all fifteen acceptance flows executed exactly once.
+          xcrun simctl launch --terminate-running-process "$SIMULATOR_UDID" com.lezi.babylog.ios.dev
+          sleep 2
+          xcrun simctl io "$SIMULATOR_UDID" screenshot "$RUNNER_TEMP/lezi-ios-evidence/base-simulator-smoke-after-tests.png"
+      - name: Shut down ephemeral Simulator
+        if: always() && env.SIMULATOR_UDID != ''
+        run: xcrun simctl shutdown "$SIMULATOR_UDID"
+      - name: Retain synthetic Simulator evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-development-evidence
+          path: ${{ runner.temp }}/lezi-ios-evidence/
+          retention-days: 3
+          if-no-files-found: error
+      - name: Record verification boundary
+        run: |
+          {
+            echo 'Portable tests, iOS SDK libraries, unsigned development build, first launch and bounded offline UI acceptance.'
+            echo 'The app supports bounded offline baby and record flows, not full LEZI feature or synchronization parity.'
+            echo 'UI acceptance covers fifteen synthetic record flows including validation, editing, deletion isolation and relaunch persistence; inspect each xcresult outcome.'
+            echo 'No mixed-client server proof, signing, real-family operation or physical-device acceptance is implied.'
+          } >> "$GITHUB_STEP_SUMMARY"
