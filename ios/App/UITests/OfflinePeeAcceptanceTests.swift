@@ -1697,6 +1697,421 @@ final class OfflineSearchAcceptanceTests: OfflineAcceptanceSupport {
     }
 }
 
+@MainActor
+final class OfflineBabyProfileAcceptanceTests: OfflineAcceptanceSupport {
+    func testProfileCancelValidationFourFieldEditAndOptionalClearingPreserveIdentity() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let otherBaby = "UI-Profile-015B"
+        let originalName = "UI-Profile-015A"
+        let editedName = "UI-Profile-015E"
+        let cancelledName = "UI-Profile-Draft"
+        let recordNote = "profile-original-record"
+        app.launch()
+
+        createProfileBaby(otherBaby, replacing: "", in: app)
+        openProfile(in: app)
+        guard let otherBirthday = profileBirthday(in: app) else { return }
+        tap(app.buttons["offline.profile.close"])
+        waitFor(app.textFields["offline.profile.nickname"], "exists == false")
+        createProfileBaby(originalName, replacing: otherBaby, in: app)
+        tap(app.buttons["offline.pee.new"])
+        enterNote(recordNote, in: app)
+        saveDiaper(in: app, babyName: originalName, kindLabel: "尿记录")
+        let originalRow = diaperRow(in: app, note: recordNote)
+        waitFor(originalRow, "exists == true")
+        let recordRowID = originalRow.identifier
+        XCTAssertNotNil(UUID(uuidString: String(recordRowID.dropFirst("offline.record.row.".count))))
+        let originalBabyCount = inspectProfileBabyMenu(
+            selected: originalName, other: otherBaby, absent: editedName, in: app
+        )
+
+        openProfile(in: app)
+        waitFor(app.textFields["offline.profile.nickname"], "value == %@", originalName)
+        assertEmptyProfileWeight(in: app)
+        assertProfileSex("未设置", in: app)
+        guard let originalBirthday = profileBirthday(in: app) else { return }
+        // A clean close does not ask to discard or write a new profile.
+        tap(app.buttons["offline.profile.close"])
+        waitFor(app.textFields["offline.profile.nickname"], "exists == false")
+        XCTAssertFalse(app.buttons["offline.profile.discard.confirm"].exists)
+        assertProfileRecord(recordRowID, note: recordNote, in: app)
+
+        openProfile(in: app)
+        replaceProfileField("offline.profile.nickname", old: originalName, new: cancelledName, in: app)
+        replaceProfileField("offline.profile.weight", old: "", new: "2.5", in: app)
+        selectProfileSex("male", in: app)
+        tap(app.buttons["offline.profile.close"])
+        tap(app.buttons["offline.profile.discard.keep"])
+        waitFor(app.textFields["offline.profile.nickname"], "value == %@", cancelledName)
+        waitFor(app.textFields["offline.profile.weight"], "value == %@", "2.5")
+        assertProfileSex("男宝", in: app)
+        assertProfileBirthday(originalBirthday, in: app)
+        tap(app.buttons["offline.profile.close"])
+        tap(app.buttons["offline.profile.discard.confirm"])
+        waitFor(app.textFields["offline.profile.nickname"], "exists == false")
+        revealHistoryControl(app.buttons["offline.records.reload"], in: app)
+        tap(app.buttons["offline.records.reload"])
+        waitFor(app.buttons["offline.profile.open"], "exists == true AND enabled == true")
+        assertSelectedBaby(app, name: originalName)
+        assertProfileRecord(recordRowID, note: recordNote, in: app)
+
+        openProfile(in: app)
+        waitFor(app.textFields["offline.profile.nickname"], "value == %@", originalName)
+        assertEmptyProfileWeight(in: app)
+        assertProfileSex("未设置", in: app)
+        assertProfileBirthday(originalBirthday, in: app)
+        // Invalid raw input must remain editable, not become a default name or
+        // a silently cleared optional weight. Both errors belong to this draft.
+        replaceProfileField("offline.profile.nickname", old: originalName, new: " ", in: app)
+        replaceProfileField("offline.profile.weight", old: "", new: "3,4", in: app)
+        tapProfileSave(in: app)
+        waitFor(app.staticTexts["offline.profile.nickname.error"], "label == %@", "请填写昵称")
+        waitFor(app.staticTexts["offline.profile.weight.error"], "exists == true")
+        waitFor(app.textFields["offline.profile.nickname"], "value == %@", " ")
+        waitFor(app.textFields["offline.profile.weight"], "value == %@", "3,4")
+        XCTAssertFalse(app.staticTexts["offline.profile.result"].exists)
+
+        replaceProfileField("offline.profile.nickname", old: " ", new: otherBaby, in: app)
+        replaceProfileField("offline.profile.weight", old: "3,4", new: "3.45", in: app)
+        tapProfileSave(in: app)
+        waitFor(app.staticTexts["offline.profile.error"], "label == %@", "宝宝昵称已存在，请换一个昵称。")
+        waitFor(app.textFields["offline.profile.nickname"], "value == %@", otherBaby)
+        waitFor(app.textFields["offline.profile.weight"], "value == %@", "3.45")
+        assertProfileBirthday(originalBirthday, in: app)
+        XCTAssertFalse(app.staticTexts["offline.profile.result"].exists)
+
+        replaceProfileField("offline.profile.nickname", old: otherBaby, new: editedName, in: app)
+        // Choose the last day of the previous displayed month. This changes an
+        // actual native date-only picker, including its month navigation, using
+        // UTC Gregorian arithmetic rather than the runner's locale or timezone.
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let monthStart = calendar.dateInterval(of: .month, for: originalBirthday)!.start
+        let editedBirthday = calendar.date(byAdding: .day, value: -1, to: monthStart)!
+        chooseProfileBirthday(from: originalBirthday, to: editedBirthday, in: app)
+        selectProfileSex("female", in: app)
+        saveProfile(name: editedName, in: app)
+        assertSelectedBaby(app, name: editedName)
+        assertProfileRecord(recordRowID, note: recordNote, in: app)
+        XCTAssertEqual(inspectProfileBabyMenu(
+            selected: editedName, other: otherBaby, absent: originalName, in: app
+        ), originalBabyCount, "Editing a profile must not create another baby")
+
+        revealHistoryControl(app.buttons["offline.records.reload"], in: app)
+        tap(app.buttons["offline.records.reload"])
+        waitFor(app.buttons["offline.profile.open"], "exists == true AND enabled == true")
+        assertProfileRecord(recordRowID, note: recordNote, in: app)
+        relaunch(app)
+        assertSelectedBaby(app, name: editedName)
+        assertProfileRecord(recordRowID, note: recordNote, in: app)
+        openProfile(in: app)
+        waitFor(app.textFields["offline.profile.nickname"], "value == %@", editedName)
+        waitFor(app.textFields["offline.profile.weight"], "value == %@", "3.45")
+        assertProfileSex("女宝", in: app)
+        assertProfileBirthday(editedBirthday, in: app)
+        attachProfileDiagnostics("four-fields-after-relaunch", in: app)
+
+        // Keep this baby's own name while clearing both optional fields.
+        // Self-name must not be treated as the duplicate rejected above.
+        replaceProfileField("offline.profile.weight", old: "3.45", new: "", in: app)
+        selectProfileSex("unknown", in: app)
+        saveProfile(name: editedName, in: app)
+        relaunch(app)
+        assertSelectedBaby(app, name: editedName)
+        assertProfileRecord(recordRowID, note: recordNote, in: app)
+        openProfile(in: app)
+        waitFor(app.textFields["offline.profile.nickname"], "value == %@", editedName)
+        assertEmptyProfileWeight(in: app)
+        assertProfileSex("未设置", in: app)
+        assertProfileBirthday(editedBirthday, in: app)
+        attachProfileDiagnostics("cleared-optionals-after-relaunch", in: app)
+        tap(app.buttons["offline.profile.close"])
+        waitFor(app.textFields["offline.profile.nickname"], "exists == false")
+        XCTAssertEqual(inspectProfileBabyMenu(
+            selected: editedName, other: otherBaby, absent: originalName, in: app
+        ), originalBabyCount)
+
+        selectProfileBaby(otherBaby, in: app)
+        assertEmptyHistory(app)
+        XCTAssertFalse(app.otherElements[recordRowID].exists, "A profile edit must not move another baby's record")
+        openProfile(in: app)
+        waitFor(app.textFields["offline.profile.nickname"], "value == %@", otherBaby)
+        assertEmptyProfileWeight(in: app)
+        assertProfileSex("未设置", in: app)
+        assertProfileBirthday(otherBirthday, in: app)
+        tap(app.buttons["offline.profile.close"])
+        waitFor(app.textFields["offline.profile.nickname"], "exists == false")
+        selectProfileBaby(editedName, in: app)
+        assertProfileRecord(recordRowID, note: recordNote, in: app)
+        tapHistoryEdit(app.otherElements[recordRowID], in: app)
+        waitFor(noteField(in: app), "value == %@", recordNote)
+        tap(app.buttons["offline.editor.close"])
+        waitFor(noteField(in: app), "exists == false")
+        assertProfileRecord(recordRowID, note: recordNote, in: app)
+    }
+
+    private func createProfileBaby(_ name: String, replacing previous: String, in app: XCUIApplication) {
+        tap(app.buttons["offline.baby.new"])
+        let nickname = app.textFields["offline.baby.nickname"]
+        tap(nickname)
+        nickname.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        nickname.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count) + name)
+        waitFor(nickname, "value == %@", name)
+        tap(app.buttons["offline.baby.create"])
+        waitFor(app.staticTexts["offline.result"], "label == %@", "已在本机创建宝宝：\(name)")
+        waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
+        tap(app.buttons["offline.baby.new"])
+        assertSelectedBaby(app, name: name)
+        assertEmptyHistory(app)
+    }
+
+    private func profileBabySelection(in app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any).matching(identifier: "offline.baby.selection").firstMatch
+    }
+
+    private func selectProfileBaby(_ name: String, in app: XCUIApplication) {
+        tap(profileBabySelection(in: app))
+        tap(app.buttons[name])
+        assertSelectedBaby(app, name: name)
+        waitFor(app.buttons["offline.profile.open"], "exists == true AND enabled == true")
+    }
+
+    private func inspectProfileBabyMenu(selected: String, other: String, absent: String, in app: XCUIApplication) -> Int {
+        tap(profileBabySelection(in: app))
+        let menu = app.collectionViews.containing(.button, identifier: selected).firstMatch
+        waitFor(menu, "exists == true")
+        XCTAssertEqual(menu.buttons.matching(identifier: selected).count, 1)
+        XCTAssertEqual(menu.buttons.matching(identifier: other).count, 1)
+        XCTAssertFalse(menu.buttons[absent].exists)
+        let count = menu.buttons.count
+        tap(menu.buttons[selected])
+        waitFor(menu, "exists == false")
+        assertSelectedBaby(app, name: selected)
+        return count
+    }
+
+    private func openProfile(in app: XCUIApplication) {
+        tap(app.buttons["offline.profile.open"])
+        waitFor(app.textFields["offline.profile.nickname"], "exists == true")
+        waitFor(app.buttons["offline.profile.close"], "exists == true AND enabled == true")
+    }
+
+    private func replaceProfileField(_ identifier: String, old: String, new: String, in app: XCUIApplication) {
+        let field = app.textFields[identifier]
+        revealProfileControl(field, in: app)
+        if old.isEmpty { assertEmptyProfileWeight(in: app) }
+        else { waitFor(field, "value == %@", old) }
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: old.count) + new)
+        if new.isEmpty { assertEmptyProfileWeight(in: app) }
+        else { waitFor(field, "value == %@", new) }
+    }
+
+    private func assertEmptyProfileWeight(in app: XCUIApplication) {
+        let field = app.textFields["offline.profile.weight"]
+        waitFor(field, "exists == true")
+        let empty = NSPredicate { _, _ in
+            guard let value = field.value as? String else { return false }
+            return value.isEmpty || value == field.placeholderValue
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [
+            XCTNSPredicateExpectation(predicate: empty, object: field)
+        ], timeout: 15), .completed, "An unset birth weight must expose only an empty value or its native placeholder")
+    }
+
+    private func selectProfileSex(_ value: String, in app: XCUIApplication) {
+        revealProfileControl(app.buttons["offline.profile.sex"], in: app)
+        tap(app.buttons["offline.profile.sex"])
+        tap(app.buttons["offline.profile.sex.\(value)"])
+    }
+
+    private func assertProfileSex(_ label: String, in app: XCUIApplication) {
+        waitFor(app.buttons["offline.profile.sex"], "exists == true AND (label CONTAINS %@ OR value CONTAINS %@)", label, label)
+    }
+
+    private func tapProfileSave(in app: XCUIApplication) {
+        // The real sheet pins its confirmation footer outside the field scroll.
+        tap(app.buttons["offline.profile.save"])
+    }
+
+    private func saveProfile(name: String, in app: XCUIApplication) {
+        tapProfileSave(in: app)
+        waitFor(app.textFields["offline.profile.nickname"], "exists == false")
+        // This host message is published after the real SQLite commit, not
+        // after dispatching the asynchronous save. Await host readback too.
+        waitFor(app.staticTexts["offline.profile.result"], "label == %@", "已保存本机宝宝档案：\(name)")
+        waitFor(app.buttons["offline.profile.open"], "exists == true AND enabled == true")
+    }
+
+    private func assertProfileRecord(_ rowID: String, note: String, in app: XCUIApplication) {
+        let row = app.otherElements[rowID]
+        waitFor(row, "exists == true")
+        waitFor(row.staticTexts["offline.record.note"], "label == %@", note)
+        waitFor(row.staticTexts["offline.record.amount"], "label == %@", "尿量：中")
+        XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 1)
+        XCTAssertEqual(app.staticTexts.matching(identifier: "offline.record.note").count, 1)
+    }
+
+    private func revealProfileControl(_ element: XCUIElement, in app: XCUIApplication) {
+        waitFor(element, "exists == true")
+        let scroll = app.scrollViews.containing(.textField, identifier: "offline.profile.nickname").firstMatch
+        waitFor(scroll, "exists == true")
+        for attempt in 0...5 {
+            let viewport = scroll.frame.intersection(app.frame)
+            let top = viewport.minY + 4
+            let bottom = min(viewport.maxY, app.keyboards.firstMatch.exists ? app.keyboards.firstMatch.frame.minY : viewport.maxY) - 8
+            let field = element.frame
+            if element.isHittable && field.minY >= top && field.maxY <= bottom { return }
+            if attempt == 5 { break }
+            let up = field.maxY > bottom
+            // Use a visible explanatory/error label, never a TextField, Picker,
+            // DatePicker or button as the origin of an interactive scroll.
+            let anchors = scroll.staticTexts.allElementsBoundByIndex.filter {
+                let isExplanation = $0.label == "仅修改此宝宝的本机档案，不改变护理记录或当前宝宝。"
+                    || $0.label == "可填千克，保存时换算为克；留空为未设置。"
+                    || $0.identifier.hasSuffix(".error")
+                return isExplanation && $0.isHittable && $0.frame.minY >= top && $0.frame.maxY <= bottom
+                    && (up ? $0.frame.midY - top : bottom - $0.frame.midY) > 16
+            }.sorted { up ? $0.frame.midY > $1.frame.midY : $0.frame.midY < $1.frame.midY }
+            guard bottom - top > 60, let anchor = anchors.first else {
+                attachProfileDiagnostics("unreachable-" + element.identifier, in: app)
+                XCTFail("No visible non-interactive profile label can reveal \(element.identifier)")
+                return
+            }
+            let needed = up ? field.maxY - bottom : top - field.minY
+            let startY = anchor.frame.midY
+            let distance = min(max(needed + 16, 40), up ? startY - top - 8 : bottom - startY - 8)
+            let origin = scroll.coordinate(withNormalizedOffset: .zero)
+            origin.withOffset(CGVector(dx: anchor.frame.midX - scroll.frame.minX, dy: startY - scroll.frame.minY))
+                .press(forDuration: 0.1, thenDragTo: origin.withOffset(CGVector(
+                    dx: anchor.frame.midX - scroll.frame.minX,
+                    dy: startY + (up ? -distance : distance) - scroll.frame.minY
+                )), withVelocity: .slow, thenHoldForDuration: 0.2)
+        }
+        attachProfileDiagnostics("not-revealed-" + element.identifier, in: app)
+        XCTFail("Could not reveal profile control \(element.identifier)")
+    }
+
+    private func profileDateFormatter() -> DateFormatter {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        return sleepCalendarDateFormatter(calendar: calendar)
+    }
+
+    private func profileBirthday(in app: XCUIApplication) -> Date? {
+        let picker = app.datePickers["offline.profile.birthday"]
+        revealProfileControl(picker, in: app)
+        let formatter = profileDateFormatter()
+        let dates = picker.buttons.allElementsBoundByIndex.compactMap { button -> Date? in
+            guard let date = formatter.date(from: button.label),
+                  formatter.string(from: date) == button.label else { return nil }
+            return date
+        }
+        guard let date = dates.first, Set(dates).count == 1 else {
+            attachProfileDiagnostics("date-only-compact", in: app)
+            XCTFail("The native date-only picker must expose one exact Gregorian calendar date")
+            return nil
+        }
+        return date
+    }
+
+    private func assertProfileBirthday(_ date: Date, in app: XCUIApplication) {
+        let picker = app.datePickers["offline.profile.birthday"]
+        let label = profileDateFormatter().string(from: date)
+        waitFor(picker.buttons.matching(NSPredicate(format: "label == %@", label)).firstMatch, "exists == true")
+    }
+
+    private func chooseProfileBirthday(from original: Date, to target: Date, in app: XCUIApplication) {
+        let picker = app.datePickers["offline.profile.birthday"]
+        revealProfileControl(picker, in: app)
+        let formatter = profileDateFormatter()
+        // Date-only does not have the sleep editor's aggregate/date/time
+        // hierarchy. Find its verified full-date label, never a button index.
+        tap(picker.buttons.matching(NSPredicate(format: "label == %@", formatter.string(from: original))).firstMatch)
+        let overlay = app.otherElements
+            .containing(.button, identifier: "PopoverDismissRegion")
+            .containing(.button, identifier: "DatePicker.Show").firstMatch
+        waitFor(overlay, "exists == true")
+        let popups = overlay.datePickers.containing(.button, identifier: "DatePicker.Show")
+        guard popups.count == 1 else {
+            attachProfileDiagnostics("date-only-popup", in: app)
+            XCTFail("Expected exactly one native date-only calendar popup")
+            return
+        }
+        let popup = popups.element(boundBy: 0)
+        let month = popup.buttons["DatePicker.Show"]
+        waitFor(month, "exists == true AND hittable == true")
+        let monthFormatter = DateFormatter()
+        monthFormatter.calendar = formatter.calendar
+        monthFormatter.timeZone = formatter.timeZone
+        monthFormatter.locale = formatter.locale
+        monthFormatter.dateFormat = "yyyy年M月"
+        monthFormatter.isLenient = false
+        guard let value = month.value as? String,
+              let initialMonth = monthFormatter.date(from: value),
+              monthFormatter.string(from: initialMonth) == value,
+              let targetMonth = formatter.calendar.dateInterval(of: .month, for: target)?.start,
+              let difference = formatter.calendar.dateComponents([.month], from: initialMonth, to: targetMonth).month,
+              difference == -1 else {
+            attachProfileDiagnostics("date-only-month", in: app)
+            XCTFail("The profile flow must navigate exactly one verified Gregorian month backwards")
+            return
+        }
+        tap(popup.buttons["DatePicker.PreviousMonth"])
+        waitFor(month, "value == %@", monthFormatter.string(from: targetMonth))
+        let calendars = popup.collectionViews.allElementsBoundByIndex.filter { $0.isHittable }
+        guard calendars.count == 1 else {
+            attachProfileDiagnostics("date-only-days", in: app)
+            XCTFail("Expected exactly one visible native date-only calendar collection")
+            return
+        }
+        let day = String(formatter.calendar.component(.day, from: target))
+        let days = calendars[0].buttons.containing(.staticText, identifier: day)
+        guard days.count == 1 else {
+            attachProfileDiagnostics("date-only-target", in: app)
+            XCTFail("The verified target month must contain one day button for \(day)")
+            return
+        }
+        let dayButton = days.element(boundBy: 0)
+        tap(dayButton)
+        let settled = NSPredicate { _, _ in !popup.exists || (dayButton.exists && dayButton.isSelected) }
+        XCTAssertEqual(XCTWaiter.wait(for: [
+            XCTNSPredicateExpectation(predicate: settled, object: popup)
+        ], timeout: 15), .completed)
+        if popup.exists {
+            let dismiss = overlay.buttons["PopoverDismissRegion"]
+            let heading = app.staticTexts["编辑宝宝档案"]
+            waitFor(dismiss, "exists == true AND hittable == true")
+            guard heading.exists, !popup.frame.intersects(heading.frame),
+                  dismiss.frame.contains(heading.frame), app.frame.contains(heading.frame) else {
+                attachProfileDiagnostics("date-only-dismissal", in: app)
+                XCTFail("No verified non-interactive profile heading outside the native calendar")
+                return
+            }
+            dismiss.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(
+                dx: heading.frame.midX - dismiss.frame.minX, dy: heading.frame.midY - dismiss.frame.minY
+            )).tap()
+        }
+        waitFor(popup, "exists == false")
+        assertProfileBirthday(target, in: app)
+        attachProfileDiagnostics("date-only-selected", in: app)
+    }
+
+    private func attachProfileDiagnostics(_ name: String, in app: XCUIApplication) {
+        XCTContext.runActivity(named: "Offline baby profile: \(name)") { activity in
+            let tree = XCTAttachment(string: app.debugDescription)
+            tree.name = "profile-\(name)-accessibility"
+            tree.lifetime = .keepAlways
+            activity.add(tree)
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = "profile-\(name)-screen"
+            screenshot.lifetime = .keepAlways
+            activity.add(screenshot)
+        }
+    }
+}
+
 /// Shared UI operations only: no test methods to inherit or execute twice.
 @MainActor
 class OfflineAcceptanceSupport: XCTestCase {

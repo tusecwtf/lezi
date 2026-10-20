@@ -12,6 +12,7 @@ public struct OfflinePeeView: View {
     @StateObject private var sleep: OfflineSleepModel
     @StateObject private var wakes: OfflineWakeObservationModel
     @StateObject private var catalog: OfflineCustomCatalogModel
+    @StateObject private var profile: OfflineBabyProfileModel
     @State private var showingSearch = false
     private let store: OfflineStore
     @State private var nickname = ""
@@ -27,6 +28,7 @@ public struct OfflinePeeView: View {
         _sleep = StateObject(wrappedValue: OfflineSleepModel(store: store))
         _wakes = StateObject(wrappedValue: OfflineWakeObservationModel(store: store))
         _catalog = StateObject(wrappedValue: OfflineCustomCatalogModel(store: store))
+        _profile = StateObject(wrappedValue: OfflineBabyProfileModel(store: store))
     }
 
     public var body: some View {
@@ -35,6 +37,7 @@ public struct OfflinePeeView: View {
             LeziText("离线开发组件 · 宝宝与本机护理记录", role: .title)
             LeziText("仅保存在此设备。支持无照片排泄、日常、症状、用药、就医、疫苗、成长测量、手动母乳、奶量、体温与辅食/点心/饮料记录，以及睡下和醒来观察；护理计划尚未开放。", role: .label)
             if let message = model.message { LeziText(message).accessibilityIdentifier("offline.result") }
+            if let message = profile.message { LeziText(message).accessibilityIdentifier("offline.profile.result") }
             babySelection
             if let message = sleep.message { LeziText(message).accessibilityIdentifier("offline.sleep.result") }
             if wakes.details == nil, let message = wakes.message {
@@ -70,9 +73,11 @@ public struct OfflinePeeView: View {
             OfflineSearchView(store: store, onOpenRecord: openSearchRecord)
         }
         }
-        .disabled(sleep.busy || wakes.busy)
+        .disabled(sleep.busy || wakes.busy || profile.busy)
         .sheet(isPresented: Binding(get: { sheetRoute != nil }, set: { if !$0 { dismissSheet() } })) {
-            if sheetRoute == .wakeObservations {
+            if sheetRoute == .babyProfile {
+                OfflineBabyProfileView(model: profile)
+            } else if sheetRoute == .wakeObservations {
                 OfflineWakeObservationView(model: wakes)
             } else if sheetRoute == .sleep {
                 OfflineSleepEditor(model: sleep)
@@ -114,6 +119,7 @@ public struct OfflinePeeView: View {
         .task { model.refresh() }
         .onChange(of: sleep.completion) { _ in model.refresh() }
         .onChange(of: wakes.completion) { _ in model.refresh() }
+        .onChange(of: profile.completion) { _ in model.refresh() }
     }
     /// Search has already revalidated this exact revision in the store. Keep the
     /// host's original selection/actor boundary too; never retarget an editor to
@@ -135,6 +141,7 @@ public struct OfflinePeeView: View {
         }
     }
     private var sheetRoute: OfflineSheetRoute? {
+        if profile.editor != nil { return .babyProfile }
         if wakes.details != nil { return .wakeObservations }
         if sleep.editor != nil { return .sleep }
         if model.editor != nil { return .ordinary }
@@ -142,6 +149,7 @@ public struct OfflinePeeView: View {
     }
     private func dismissSheet() {
         switch sheetRoute {
+        case .babyProfile: profile.close()
         case .wakeObservations: wakes.close()
         case .sleep: sleep.close()
         case .ordinary: model.closeEditor()
@@ -189,21 +197,33 @@ public struct OfflinePeeView: View {
     }
     private var babySelection: some View {
         VStack(alignment: .leading) {
-            Picker("当前宝宝", selection: Binding<UUID?>(
-                get: { model.selected?.babyClientUUID },
-                set: { if let id = $0 { model.select(id) } }
-            )) {
-                Text("请选择宝宝").tag(nil as UUID?)
-                ForEach(model.babies, id: \.clientUUID) { baby in
-                    Text(baby.nickname).tag(Optional(baby.clientUUID))
-                }
-            }.disabled(model.busy || model.editor?.isBusy == true)
+            HStack {
+                Picker("当前宝宝", selection: Binding<UUID?>(
+                    get: { model.selected?.babyClientUUID },
+                    set: { if let id = $0 { model.select(id) } }
+                )) {
+                    Text("请选择宝宝").tag(nil as UUID?)
+                    ForEach(model.babies, id: \.clientUUID) { baby in
+                        Text(baby.nickname).tag(Optional(baby.clientUUID))
+                    }
+                }.disabled(model.busy || model.editor?.isBusy == true)
                 .accessibilityIdentifier("offline.baby.selection")
+                Button("编辑档案") { openProfile() }
+                    .disabled(model.selected == nil || model.busy || sheetRoute != nil)
+                    .frame(minWidth: theme.primaryTouchMinimum, minHeight: theme.primaryTouchMinimum)
+                    .accessibilityIdentifier("offline.profile.open")
+            }
             if model.busy { ProgressView("正在处理本机数据") }
             if let editor = model.editor, editor.draft.babyClientUUID != model.selected?.babyClientUUID {
                 LeziText("此草稿仍属于\(editor.session.context.babyName)，切换宝宝不会改变保存对象。", role: .label)
             }
         }
+    }
+    private func openProfile() {
+        guard sheetRoute == nil, !model.busy, !sleep.busy, !wakes.busy,
+              let context = model.selected,
+              let baby = model.babies.first(where: { $0.clientUUID == context.babyClientUUID }) else { return }
+        profile.open(baby: baby, context: context)
     }
     private var babyForm: some View {
         VStack(alignment: .leading, spacing: 12) {

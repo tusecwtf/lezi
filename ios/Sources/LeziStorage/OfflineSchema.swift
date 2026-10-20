@@ -3,9 +3,9 @@ import Foundation
 /// Native SQLite versions only. These numbers are unrelated to payload schema 2,
 /// Android Room versions, and the family server's schema/wire versions.
 enum OfflineSchema {
-    static let version = 4
+    static let version = 5
     static let applicationID = "1279613513"
-    enum MigrationFailurePoint { case afterCopy, beforeCommit, afterSleepSchema, afterCustomSchema }
+    enum MigrationFailurePoint { case afterCopy, beforeCommit, afterSleepSchema, afterCustomSchema, afterBabyProfileSchema }
 
     static func prepare(_ db: SQLiteConnection, failMigrationAt: MigrationFailurePoint? = nil) throws {
         try db.transaction {
@@ -37,18 +37,17 @@ enum OfflineSchema {
                       try db.query("PRAGMA foreign_key_check").isEmpty else { throw OfflineStoreError.incompatibleDatabase }
                 try db.execute("DROP TABLE pee_records")
                 try db.execute("PRAGMA user_version=2")
-                if failMigrationAt == .beforeCommit { throw OfflineStoreError.injectedFailure }
-            case "2", "3", "4":
+            case "2", "3", "4", "5":
                 guard application == applicationID else { throw OfflineStoreError.incompatibleDatabase }
             default:
                 throw OfflineStoreError.incompatibleDatabase
             }
-            if version != "3" && version != "4" {
+            if version != "3" && version != "4" && version != "5" {
                 try addSleepSchema(db)
                 if failMigrationAt == .afterSleepSchema { throw OfflineStoreError.injectedFailure }
                 try db.execute("PRAGMA user_version=3")
             }
-            if version != "4" {
+            if version != "4" && version != "5" {
                 guard try db.query("SELECT uuid FROM records WHERE type='custom' LIMIT 1").isEmpty else {
                     throw OfflineStoreError.unsupportedCustomHistory
                 }
@@ -61,6 +60,15 @@ enum OfflineSchema {
                 if failMigrationAt == .afterCustomSchema { throw OfflineStoreError.injectedFailure }
                 try db.execute("PRAGMA user_version=4")
             }
+            if version != "5" {
+                // Additive native-only fields. Old roots keep their exact IDs,
+                // revisions, dirty state and tombstones; no records are rewritten.
+                try db.execute("ALTER TABLE babies ADD COLUMN sex TEXT")
+                try db.execute("ALTER TABLE babies ADD COLUMN birth_weight_grams INTEGER")
+                if failMigrationAt == .afterBabyProfileSchema { throw OfflineStoreError.injectedFailure }
+                try db.execute("PRAGMA user_version=5")
+            }
+            if failMigrationAt == .beforeCommit { throw OfflineStoreError.injectedFailure }
         }
     }
 

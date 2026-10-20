@@ -1,7 +1,7 @@
 import Foundation
 import LeziCore
 
-/// Native schema 4 (preserves and migrates native schemas 1, 2 and 3). Not Android Room schema 29; not a family-sync repository.
+/// Native schema 5 (preserves and migrates native schemas 1 through 4). Not Android Room schema 29; not a family-sync repository.
 public struct OfflineContext: Equatable, Sendable {
     public let generation: UUID
     /// UI selection state only; never authorization to retarget an open editor.
@@ -18,6 +18,23 @@ public struct OfflineBaby: Equatable, Sendable {
     public let birthday: String
     public let themeColor: Int64
     public let sortOrder: Int64
+    public let sex: String?
+    public let birthWeightGrams: Int?
+    public let updatedAt: Int64
+    public let syncDirty: Bool
+
+    public init(clientUUID: UUID, nickname: String, birthday: String, themeColor: Int64, sortOrder: Int64,
+                sex: String? = nil, birthWeightGrams: Int? = nil, updatedAt: Int64 = 0, syncDirty: Bool = true) {
+        self.clientUUID = clientUUID
+        self.nickname = nickname
+        self.birthday = birthday
+        self.themeColor = themeColor
+        self.sortOrder = sortOrder
+        self.sex = sex
+        self.birthWeightGrams = birthWeightGrams
+        self.updatedAt = updatedAt
+        self.syncDirty = syncDirty
+    }
 }
 public struct OfflinePeeRecord: Equatable, Sendable {
     public let clientUUID: UUID
@@ -81,16 +98,14 @@ public actor OfflineStore {
             try requireOffline()
             guard try db.query("SELECT uuid FROM babies WHERE uuid=?", [.text(clientUUID.uuidString)]).isEmpty else { throw OfflineStoreError.identityConflict }
             guard try db.query("SELECT uuid FROM babies WHERE nickname=? AND deleted_at IS NULL", [.text(nickname)]).isEmpty else { throw OfflineStoreError.duplicateNickname }
-            try db.execute("INSERT INTO babies VALUES (?, ?, ?, ?, 1, NULL)", [.text(clientUUID.uuidString), .text(nickname), .text(birthday), .int(clock())])
+            let now = clock()
+            try db.execute("INSERT INTO babies (uuid,nickname,birthday,updated_at,sync_dirty,deleted_at) VALUES (?, ?, ?, ?, 1, NULL)", [.text(clientUUID.uuidString), .text(nickname), .text(birthday), .int(now)])
             try db.execute("INSERT INTO baby_preferences VALUES (?, 4278221742, 0)", [.text(clientUUID.uuidString)])
-            return OfflineBaby(clientUUID: clientUUID, nickname: nickname, birthday: birthday, themeColor: 4278221742, sortOrder: 0)
+            return OfflineBaby(clientUUID: clientUUID, nickname: nickname, birthday: birthday, themeColor: 4278221742, sortOrder: 0, updatedAt: now)
         }
     }
     public func babies() throws -> [OfflineBaby] {
-        try db.query("SELECT b.uuid,b.nickname,b.birthday,p.theme_color,p.sort_order FROM babies b JOIN baby_preferences p ON b.uuid=p.baby_uuid WHERE b.deleted_at IS NULL ORDER BY p.sort_order,b.uuid").map { row in
-            guard let id = UUID(uuidString: row[0] ?? ""), let name = row[1], let birthday = row[2], let theme = Int64(row[3] ?? ""), let order = Int64(row[4] ?? "") else { throw OfflineStoreError.incompatibleDatabase }
-            return OfflineBaby(clientUUID: id, nickname: name, birthday: birthday, themeColor: theme, sortOrder: order)
-        }
+        try db.query("SELECT " + Self.babyProfileColumns + " FROM babies b JOIN baby_preferences p ON b.uuid=p.baby_uuid WHERE b.deleted_at IS NULL ORDER BY p.sort_order,b.uuid").map(Self.decodeBabyProfile)
     }
     public func setPreferences(baby: UUID, themeColor: Int64, sortOrder: Int64) throws {
         guard (0...0xFFFFFFFF).contains(themeColor) else { throw OfflineStoreError.invalidDraft }

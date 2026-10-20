@@ -1,8 +1,8 @@
 # Offline Simulator acceptance
 
-The fourteen `Offline*AcceptanceTests` classes in `OfflinePeeAcceptanceTests.swift` exercise the actual `LeziDevelopment` application
+The fifteen `Offline*AcceptanceTests` classes in `OfflinePeeAcceptanceTests.swift` exercise the actual `LeziDevelopment` application
 and its ordinary file-backed SQLite store. Run on a fresh, ephemeral Simulator
-sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, `UI-Daily-003`, `UI-Health-004`, `UI-Growth-005`, `UI-Milk-006`, `UI-Temperature-007`, `UI-Food-008`, `UI-Nursing-009`, `UI-Custom-010`, `UI-Sleep-011`, `UI-Sleep-012`, `UI-Wake-013`, `UI-Search-014A`, and `UI-Search-014B` names are
+sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, `UI-Daily-003`, `UI-Health-004`, `UI-Growth-005`, `UI-Milk-006`, `UI-Temperature-007`, `UI-Food-008`, `UI-Nursing-009`, `UI-Custom-010`, `UI-Sleep-011`, `UI-Sleep-012`, `UI-Wake-013`, `UI-Search-014A`, `UI-Search-014B`, and the `UI-Profile-015A/B/E` profile-flow names are
 unique in that fresh sandbox. Each test owns its named baby scopes. Reusing an already-tested sandbox intentionally
 fails rather than deleting or modifying existing records to make the test pass.
 No special app launch arguments, fake stores, reset paths, or network are used.
@@ -328,3 +328,36 @@ serial scheme keeps its 75-minute budget with no skip/filter/retry.
 
 Full product parity, backend interoperability, signing and physical-device
 acceptance remain incomplete. Keep the PR draft and unmerged.
+
+## Offline baby profile continuation (Apple validation pending)
+
+The preceding `46a7c751` checkpoint passed Android [39401110930](https://github.com/tusecwtf/lezi/actions/runs/39401110930)
+(5,910 tests, zero failures/errors/skips) and Apple [39401110538](https://github.com/tusecwtf/lezi/actions/runs/39401110538)
+(343 package tests and all fourteen UI flows once). Search editing, automatic
+refresh, deletion, two-baby isolation and relaunch actually passed. That result
+supersedes the earlier pending search notes, but does not validate this new slice.
+
+This slice adds no-media nickname, sex, birthday and birth-weight editing with
+captured baby UUID/context/revision. The additive native schema 4→5 migration
+retains the full 1/2/3/4 upgrade chain, history, preferences, selection and dirty
+metadata. Existing rows receive NULL sex and NULL birth weight, not fabricated
+facts. Backend schema 13 and all Android/server source remain unchanged.
+
+Edited nickname input follows Android's twenty-code-point clamp. Authored weight
+text follows Android's plain-decimal 500–9000 g/truncation rules. As a deliberate
+non-destructive native difference, an untouched stored 4015 g is not reparsed
+through its display 4.015 into 4014 g when another field changes. Newly authored
+4.015 still follows the source truncation. Invalid historical date/weight/sex
+cannot silently normalize during a name-only edit. Pre-1582-10-15 or otherwise
+unrepresentable native calendar dates use exact ISO text, never fallback today.
+
+The full Linux suite passed 333 tests (81 storage, 129 portable presentation,
+98 domain, 25 core). Five additional Apple-only model tests make the expected
+Apple package total 377; this is not observed yet. All fifteen Simulator cases
+remain required. The prior fourteen test bodies and shared helpers are unchanged.
+The complete serial workflow has a 90-minute budget because the prior fourteen
+UI flows alone took 59.4 minutes, excluding build/boot. No filter/skip/retry added.
+
+No avatar, baby delete/merge, theme/order, family authority, media, backend,
+signing or deployment capability is added. Full product/device interoperability
+remains incomplete. Keep the PR draft and unmerged.

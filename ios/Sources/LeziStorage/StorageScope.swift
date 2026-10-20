@@ -2,8 +2,8 @@ import LeziCore
 
 /// Acceptance boundary for this additive native storage checkpoint.
 ///
-/// Implemented: independent native SQLite schema 4 with atomic native schema-1/2/3 migration; file-backed offline identity
-/// and store generation; baby nickname/birthday facts plus separate local color
+/// Implemented: independent native SQLite schema 5 with atomic native schema-1/2/3/4 migration; file-backed offline identity
+/// and store generation; baby nickname/sex/birthday/birth-weight facts plus separate local color
 /// and ordering preferences; explicit-confirm no-media ordinary built-in record create/edit/soft-delete;
 /// live-baby/context/CAS gates; atomic fact + syncDirty writes; replay protection.
 ///
@@ -57,6 +57,6 @@ import LeziCore
 /// visible. Family authority needs a separate integrated ACL-aware coordinator;
 /// absence of a network connection must never select this offline-only writer.
 public enum OfflineStorageScope {
-    public static let schemaVersion = 4
+    public static let schemaVersion = 5
     public static let supportedRecordTypes = RecordType.allCases.filter { $0 != .sleep && $0 != .custom }
 }
