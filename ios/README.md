@@ -129,32 +129,48 @@ corpus scenarios remain unimplemented and are not silently counted as passing.
   `Sources/LeziStorage/StorageScope.swift` and
   [the offline expansion specification](../docs/spec/ios-offline-records.md).
 
-Evidence boundaries (2026-10-19):
+Evidence boundaries (updated 2026-10-20):
 
 Historical complete dual-green `10016b6a` covered 22 UI types, schema 3,
 199 Apple package tests and seven UI tests, plus 5,908 Android tests. That result
 covers only its source, not any later draft.
 
-**Latest completed CI checkpoint `de82eb03`:** all **238 Apple package tests**
-passed. The complete ten-scenario UI suite ran each scenario once: **seven passed,
-three failed** in custom/Food/milk interaction; nursing passed. This is not full
-Apple acceptance. [Android run 39339821904](https://github.com/tusecwtf/lezi/actions/runs/39339821904)
-ran **4,196 tests with one failure** at `pendingMembershipDeletionClear`.
-Source analysis identified a virtual-time timeout racing real-I/O startup lock
-work; a minimal test-only fix is awaiting CI proof, not a verified runtime fix.
-The custom/Food/milk UI-helper corrections likewise await validation.
+**Latest completed CI checkpoint `f82c8372` (2026-10-20):**
+[Apple run 39344241795](https://github.com/tusecwtf/lezi/actions/runs/39344241795)
+ended in failure: **247 package tests passed**; all **11 UI scenarios ran once,
+nine passed and two failed** (Food and Sleep). Custom and Milk now passed their
+real scenarios. Food failed when locating the new-record entry after saving;
+Sleep's close button was visible but absent under its intended identifier. The
+captured accessibility tree confirms that the close Button instead carried the
+ancestor identifier `offline.sleep.dragRegion`; the proposed containment fix
+still needs validation.
 
-**Current draft:** native schema 4, 26 ordinary forms plus custom, and the first
-bounded sleep UI slice. The complete Linux regression passed **215 tests, zero
-failures** (46 storage, 83 portable presentation, 61 domain, 25 core). Three new
-Apple-only sleep model tests and the **eleventh UI scenario** have not yet run.
-The existing `de82eb03` results do not cover this draft or prove the proposed test
-fixes. Historical `aa2011c` had 212 passing Apple package tests but only three of
-eight UI scenarios completed before timeout; it is not current acceptance evidence.
+[Android run 39344241791](https://github.com/tusecwtf/lezi/actions/runs/39344241791)
+succeeded with **5,908 total = 5,902 passed + six skipped**. The six skips were
+three `WidgetBounded` cases across variants, gated by an assumption during UTC
+00–02. Earlier no-skip results remain correct for their own runs; they must not
+be substituted for this run's breakdown.
+
+**Current draft repairs, not yet verified:** make Widget tests use a single
+captured instant and a legal zone placing local time at noon, retain every
+assertion, and add a 24-hour table (expected total 5,910, not yet measured). Food's
+helper will reveal the entry within the real history container and confirm sheet
+dismissal; Sleep's header will contain accessibility children to preserve their
+identifiers. No Android product behavior or tests are removed. Both CI gates on
+the next head are pending, including all 11 serial UI scenarios under the
+60-minute budget; proposed fixes are not passing results.
+
+The production-source Linux baseline remains **215 tests, zero failures**
+(46 storage, 83 portable presentation, 61 domain, 25 core); no portable test was
+added in this repair batch. Scope remains schema 4, 26 ordinary forms plus custom
+and first-slice sleep start/wake/readback. Prior `de82eb03` and `aa2011c` failures
+are historical; neither earlier green results nor the latest Android success
+establish complete Apple or product acceptance.
 
 The first sleep UI slice implements explicit-confirm SleepStart creation, a
 separate WakeObservation for the captured sleep/baby, and projected sleep/wake
-readback. Its start → wake → relaunch UI script is written but has not run on Apple.
+readback. Its start → wake → relaunch UI script ran on Apple but failed at the close-button
+identifier boundary; the full scenario is not accepted.
 Legacy `end_timestamp`/opaque sleep records remain preserved and read-only.
 Completed-sleep backfill, sleep editing and observation management UI remain
 unimplemented, even where dedicated storage commands already exist. Nursing timer,

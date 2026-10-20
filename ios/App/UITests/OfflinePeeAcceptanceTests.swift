@@ -802,7 +802,7 @@ final class OfflineFoodAcceptanceTests: OfflineAcceptanceSupport {
         replaceFoodField("offline.food.content", oldValue: "ui-food-content", newValue: "ui-food-edited", in: app)
         waitFor(healthField("offline.food.amount", in: app), "value == %@", "0.5碗")
         waitFor(noteField(in: app), "value == %@", foodNote)
-        saveDiaper(in: app, babyName: babyName, kindLabel: "辅食")
+        saveDiaper(in: app, babyName: babyName, kindLabel: "辅食", revealHistory: true)
         assertFoodRow(app.otherElements[foodID], kind: "辅食", content: "ui-food-edited", amount: "0.5碗", note: foodNote)
         XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 3)
         tapHistoryEdit(app.otherElements[drinkID], in: app)
@@ -810,6 +810,8 @@ final class OfflineFoodAcceptanceTests: OfflineAcceptanceSupport {
         tap(app.buttons["offline.delete.request"])
         tap(app.buttons["offline.delete.confirm"])
         waitFor(app.staticTexts["offline.result"], "label == %@", "已删除本机饮料")
+        waitFor(app.buttons["confirmation.save"], "exists == false")
+        revealHistoryControl(app.buttons["offline.pee.new"], in: app)
         waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
         waitFor(app.otherElements[drinkID], "exists == false")
         XCTAssertEqual(app.buttons.matching(identifier: "offline.record.edit").count, 2)
@@ -1197,17 +1199,30 @@ class OfflineAcceptanceSupport: XCTestCase {
 
     fileprivate func tapHistoryEdit(_ row: XCUIElement, in app: XCUIApplication) {
         let edit = row.buttons["offline.record.edit"]
-        waitFor(edit, "exists == true")
+        revealHistoryControl(edit, paddingRow: row, in: app)
+        tap(edit)
+    }
+
+    fileprivate func revealHistoryControl(_ element: XCUIElement, paddingRow: XCUIElement? = nil, in app: XCUIApplication) {
+        waitFor(element, "exists == true AND enabled == true")
         let scroll = app.scrollViews.containing(.button, identifier: "offline.records.reload").firstMatch
         waitFor(scroll, "exists == true")
         let viewport = scroll.frame.intersection(app.frame)
-        let target = edit.frame
+        let target = element.frame
         if target.minY < viewport.minY || target.maxY > viewport.maxY {
-            // Captured food history: edit y945–966, viewport y231–824.
-            // Reveal in the history's measured left padding, outside row controls.
+            // Both a lower row edit and the top-level new button can be
+            // outside the retained scroll position. Derive the safe track from
+            // actual row padding: the new button itself is flush with the edge.
+            let row = paddingRow ?? scroll.otherElements.matching(NSPredicate(
+                format: "identifier BEGINSWITH %@", "offline.record.row."
+            )).firstMatch
+            guard row.exists else {
+                XCTFail("Offscreen history control has no row padding anchor: \(element.identifier)")
+                return
+            }
             let padding = row.frame.minX - viewport.minX
             guard padding >= 8, viewport.height > 80 else {
-                XCTFail("History has no measured padding track for \(row.identifier)")
+                XCTFail("History has no measured padding track for \(element.identifier)")
                 return
             }
             let up = target.maxY > viewport.maxY
@@ -1216,7 +1231,7 @@ class OfflineAcceptanceSupport: XCTestCase {
             let x = viewport.minX + padding / 2
             let startY = up ? viewport.maxY - 16 : viewport.minY + 16
             let endY = startY + (up ? -distance : distance)
-            print("History reveal \(row.identifier): target=\(target), viewport=\(viewport), drag=(\(x), \(startY)) -> (\(x), \(endY))")
+            print("History reveal \(element.identifier): target=\(target), viewport=\(viewport), drag=(\(x), \(startY)) -> (\(x), \(endY))")
             let origin = scroll.coordinate(withNormalizedOffset: .zero)
             origin.withOffset(CGVector(dx: x - scroll.frame.minX, dy: startY - scroll.frame.minY))
                 .press(forDuration: 0.1,
@@ -1225,12 +1240,11 @@ class OfflineAcceptanceSupport: XCTestCase {
         }
         let visible = NSPredicate { _, _ in
             let currentViewport = scroll.frame.intersection(app.frame)
-            return edit.isHittable && edit.frame.minY >= currentViewport.minY
-                && edit.frame.maxY <= currentViewport.maxY
+            return element.isHittable && element.frame.minY >= currentViewport.minY
+                && element.frame.maxY <= currentViewport.maxY
         }
-        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: visible, object: edit)], timeout: 15), .completed,
-                       "History edit must be fully inside its scroll viewport")
-        tap(edit)
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: visible, object: element)], timeout: 15), .completed,
+                       "History control must be fully inside its scroll viewport")
     }
 
     fileprivate func replaceFoodField(_ identifier: String, oldValue: String, newValue: String, in app: XCUIApplication) {
@@ -1538,9 +1552,13 @@ class OfflineAcceptanceSupport: XCTestCase {
         tap(app.buttons["\(identifier).\(value)"])
     }
 
-    fileprivate func saveDiaper(in app: XCUIApplication, babyName: String, kindLabel: String) {
+    fileprivate func saveDiaper(in app: XCUIApplication, babyName: String, kindLabel: String, revealHistory: Bool = false) {
         tap(app.buttons["confirmation.save"])
         waitFor(app.staticTexts["offline.result"], "label == %@", "已保存到本机：\(babyName)的\(kindLabel)")
+        if revealHistory {
+            waitFor(app.buttons["confirmation.save"], "exists == false")
+            revealHistoryControl(app.buttons["offline.pee.new"], in: app)
+        }
         waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
     }
 

@@ -12,7 +12,9 @@ struct OfflineSleepEditor: View {
                     LeziText(state.action == .start ? "睡下" : "醒来", role: .title)
                     Spacer()
                     Button("关闭") { model.close() }.accessibilityIdentifier("offline.sleep.close")
-                }.padding(theme.pageInset).accessibilityIdentifier("offline.sleep.dragRegion")
+                }.padding(theme.pageInset)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("offline.sleep.dragRegion")
                 ScrollView {
                     VStack(alignment: .leading, spacing: theme.density.sectionGap) {
                         LeziText("保存对象：\(state.babyName)").accessibilityIdentifier("offline.sleep.baby")

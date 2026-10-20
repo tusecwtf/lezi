@@ -191,8 +191,15 @@ container and keyboard/footer viewport. Milk amount replacement uses a slow drag
 with an endpoint hold to avoid the inertial overshoot captured during validation;
 other editor callers retain their previous gesture. Food history edits reveal the
 UUID-scoped row in the history ScrollView with one measured padding-track drag.
+The same scoped reveal restores the top-level new-record control after food
+editing/deletion, since dismissing a sheet retains the history scroll position.
+It derives the track from row padding, rather than assuming the new-record button
+has padding; full visibility and enabled checks remain required. Only this food
+flow opts into the save helper’s history reveal.
 A catalog control flush with the ScrollView top counts as fully visible, so an
-empty catalog does not require a nonexistent scroll anchor. These corrections
-were syntax-checked on Linux; their Simulator behavior requires the next Apple run.
+empty catalog does not require a nonexistent scroll anchor. Apple run f82c8372
+passed Custom and Milk and reached the food edit/save, then exposed the retained
+history position. The top-control reveal is syntax-checked on Linux and awaits
+Apple execution; that run did not pass the complete Food or Sleep flows.
 The velocity/endpoint-hold API is documented by Apple for Xcode 16.3 onward;
 the diagnostic run used Xcode 16.4.
