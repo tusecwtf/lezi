@@ -1,9 +1,9 @@
 # Offline Simulator acceptance
 
-The thirteen `Offline*AcceptanceTests` classes in `OfflinePeeAcceptanceTests.swift` exercise the actual `LeziDevelopment` application
+The fourteen `Offline*AcceptanceTests` classes in `OfflinePeeAcceptanceTests.swift` exercise the actual `LeziDevelopment` application
 and its ordinary file-backed SQLite store. Run on a fresh, ephemeral Simulator
-sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, `UI-Daily-003`, `UI-Health-004`, `UI-Growth-005`, `UI-Milk-006`, `UI-Temperature-007`, `UI-Food-008`, `UI-Nursing-009`, `UI-Custom-010`, `UI-Sleep-011`, `UI-Sleep-012`, and `UI-Wake-013` names are
-unique in that fresh sandbox, one per test. Reusing an already-tested sandbox intentionally
+sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, `UI-Daily-003`, `UI-Health-004`, `UI-Growth-005`, `UI-Milk-006`, `UI-Temperature-007`, `UI-Food-008`, `UI-Nursing-009`, `UI-Custom-010`, `UI-Sleep-011`, `UI-Sleep-012`, `UI-Wake-013`, `UI-Search-014A`, and `UI-Search-014B` names are
+unique in that fresh sandbox. Each test owns its named baby scopes. Reusing an already-tested sandbox intentionally
 fails rather than deleting or modifying existing records to make the test pass.
 No special app launch arguments, fake stores, reset paths, or network are used.
 
@@ -287,3 +287,32 @@ The serial workflow budget is 75 minutes because the preceding twelve-flow suite
 took 46.8 minutes excluding build/boot; no filters, skips or retries were introduced.
 Full product parity, mixed-client synchronization, signing and physical-device
 acceptance remain incomplete. The PR stays draft and must not merge.
+
+## Scoped offline search continuation (Apple validation pending)
+
+The preceding `c038dccc` checkpoint passed Android [39380697461](https://github.com/tusecwtf/lezi/actions/runs/39380697461)
+(5,910 tests, no failures/errors/skips) and Apple [39380697410](https://github.com/tusecwtf/lezi/actions/runs/39380697410)
+(289 package tests and all thirteen UI flows once). The wake correction,
+withdrawal and relaunch tail is accepted for that bounded Simulator slice;
+that evidence supersedes its earlier pending status, not this new search gate.
+
+The new full-screen search route traverses complete stored history rather than
+only loaded rows. It matches Android labels/aliases and visible business text,
+including projected sleep and saved custom titles, never raw JSON keys. Literal
+query identity, selection/scope epochs and content revisions fence pagination
+and reopen. Same-scope failure may retain read-only rows; changed scope clears
+results immediately. Fresh supported hits reuse original-revision editors;
+unsupported or stale hits expose genuinely read-only details. Only successful
+commits invalidate queries. No novel date/category filters, timeline rail,
+family authority, schema, server or media changes are included.
+
+The complete Linux suite passed 301 tests (69 storage, 115 portable presentation,
+92 domain, 25 core). Expected Apple 340 package tests and fourteen real-store UI
+flows remain unverified for this new head. Existing thirteen UI bodies/helpers
+are unchanged. The new case covers a raw-key suffix non-match, English alias,
+literal percent/underscore, UUID-preserving open/cancel/edit, committed refresh,
+delete cancellation/confirmation, two-baby isolation and relaunch. The complete
+serial scheme keeps its 75-minute budget with no skip/filter/retry.
+
+Full product parity, backend interoperability, signing and physical-device
+acceptance remain incomplete. Keep the PR draft and unmerged.

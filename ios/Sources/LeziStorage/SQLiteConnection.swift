@@ -76,6 +76,18 @@ final class SQLiteConnection: @unchecked Sendable {
     private func check(_ code: Int32) throws {
         guard code == SQLITE_OK else { throw OfflineStoreError.sqlite(code, String(cString: sqlite3_errmsg(handle))) }
     }
+    /// Includes trigger writes and rolled-back statements. Compare only around a
+    /// transaction whose COMMIT succeeded; never interpret it as durable identity.
+    var totalChanges: Int64 { sqlite3_total_changes64(handle) }
+    var dataVersion: Int64 {
+        get throws {
+            guard let value = try query("PRAGMA data_version").first?.first,
+                  let text = value, let version = Int64(text) else {
+                throw OfflineStoreError.incompatibleDatabase
+            }
+            return version
+        }
+    }
     func transaction<T>(begin: String = "BEGIN IMMEDIATE", _ body: () throws -> T) throws -> T {
         try execute(begin)
         do {

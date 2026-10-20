@@ -49,6 +49,11 @@ public struct OfflineRecordPage: Equatable, Sendable {
 public actor OfflineStore {
     let db: SQLiteConnection
     let clock: @Sendable () -> Int64
+    // Connection-local search fences are deliberately not persisted or family authority.
+    let searchStoreIdentity = UUID()
+    var searchChangeRevision = UUID()
+    var searchObservedDataVersion: Int64?
+    var searchInvalidationContinuations: [UUID: AsyncStream<Void>.Continuation] = [:]
     // Internal deterministic rollback seams; not a public persistence option.
     enum FailurePoint: Sendable { case afterFact, beforeCommit, afterSleep, afterWake }
     private var nextFailure: FailurePoint?
@@ -67,12 +72,12 @@ public actor OfflineStore {
     /// No fabricated family/session is created. Block persists across restart and
     /// cannot be undone through this offline-only API.
     public func blockOfflineWrites() throws {
-        try db.transaction { try db.execute("UPDATE local_identity SET mode='blocked' WHERE id=1") }
+        try writeTransaction { try db.execute("UPDATE local_identity SET mode='blocked' WHERE id=1") }
     }
     public func createBaby(clientUUID: UUID = UUID(), nickname: String, birthday: String) throws -> OfflineBaby {
         let nickname = try Self.normalizedNickname(nickname)
         guard Self.validDay(birthday) else { throw OfflineStoreError.invalidDraft }
-        return try db.transaction {
+        return try writeTransaction {
             try requireOffline()
             guard try db.query("SELECT uuid FROM babies WHERE uuid=?", [.text(clientUUID.uuidString)]).isEmpty else { throw OfflineStoreError.identityConflict }
             guard try db.query("SELECT uuid FROM babies WHERE nickname=? AND deleted_at IS NULL", [.text(nickname)]).isEmpty else { throw OfflineStoreError.duplicateNickname }
@@ -89,13 +94,13 @@ public actor OfflineStore {
     }
     public func setPreferences(baby: UUID, themeColor: Int64, sortOrder: Int64) throws {
         guard (0...0xFFFFFFFF).contains(themeColor) else { throw OfflineStoreError.invalidDraft }
-        try db.transaction {
+        try writeTransaction {
             try requireOffline(); try requireLiveBaby(baby)
             try db.execute("UPDATE baby_preferences SET theme_color=?,sort_order=? WHERE baby_uuid=?", [.int(themeColor), .int(sortOrder), .text(baby.uuidString)])
         }
     }
     public func selectBaby(_ baby: UUID) throws -> OfflineContext {
-        try db.transaction {
+        try writeTransaction {
             try requireOffline(); try requireLiveBaby(baby)
             let row = try metadata()
             guard let revision = Int64(row[3] ?? ""), revision < Int64.max else { throw OfflineStoreError.revisionOverflow }
@@ -120,7 +125,7 @@ public actor OfflineStore {
               draft.validationErrors(nowMillis: now).isEmpty else { throw OfflineStoreError.invalidDraft }
         let document = try RecordPayloadDocument(payload: draft.payload)
         let payloadJSON = try RecordPayloadCodec.encode(document)
-        return try db.transaction {
+        return try writeTransaction {
             try requireOfflineContext(captured)
             guard draft.babyClientUUID == captured.babyClientUUID else { throw OfflineStoreError.staleContext }
             try requireLiveBaby(captured.babyClientUUID)
@@ -162,7 +167,7 @@ public actor OfflineStore {
     @discardableResult
     public func deleteRecord(_ id: UUID, context captured: OfflineContext, expectedUpdatedAt: Int64? = nil) throws -> Bool {
         let now = clock()
-        return try db.transaction {
+        return try writeTransaction {
             try requireOfflineContext(captured)
             guard let row = try db.query("SELECT baby_uuid,updated_at,deleted_at FROM records WHERE uuid=?", [.text(id.uuidString)]).first else { return false }
             guard row[0] == captured.babyClientUUID.uuidString else { throw OfflineStoreError.identityConflict }

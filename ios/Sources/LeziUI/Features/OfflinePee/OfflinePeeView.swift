@@ -12,6 +12,8 @@ public struct OfflinePeeView: View {
     @StateObject private var sleep: OfflineSleepModel
     @StateObject private var wakes: OfflineWakeObservationModel
     @StateObject private var catalog: OfflineCustomCatalogModel
+    @State private var showingSearch = false
+    private let store: OfflineStore
     @State private var nickname = ""
     @State private var birthday = Date()
     @State private var creatingBaby = false
@@ -20,6 +22,7 @@ public struct OfflinePeeView: View {
     @FocusState private var focusedField: String?
 
     public init(store: OfflineStore) {
+        self.store = store
         _model = StateObject(wrappedValue: OfflinePeeModel(store: store))
         _sleep = StateObject(wrappedValue: OfflineSleepModel(store: store))
         _wakes = StateObject(wrappedValue: OfflineWakeObservationModel(store: store))
@@ -27,6 +30,7 @@ public struct OfflinePeeView: View {
     }
 
     public var body: some View {
+        NavigationStack {
         VStack(alignment: .leading, spacing: theme.density.sectionGap) {
             LeziText("离线开发组件 · 宝宝与本机护理记录", role: .title)
             LeziText("仅保存在此设备。支持无照片排泄、日常、症状、用药、就医、疫苗、成长测量、手动母乳、奶量、体温与辅食/点心/饮料记录，以及睡下和醒来观察；护理计划尚未开放。", role: .label)
@@ -41,10 +45,16 @@ public struct OfflinePeeView: View {
                         Button(creatingBaby ? "收起新建宝宝" : "新建宝宝") { creatingBaby.toggle() }
                             .accessibilityIdentifier("offline.baby.new")
                         if creatingBaby { babyForm }
-                        Button("新建记录") { model.openEditor(milkStep: storedMilkStep) }
-                            .accessibilityIdentifier("offline.pee.new")
-                            .disabled(model.selected == nil || model.busy)
-                            .frame(minHeight: theme.primaryTouchMinimum)
+                        HStack {
+                            Button("新建记录") { model.openEditor(milkStep: storedMilkStep) }
+                                .accessibilityIdentifier("offline.pee.new")
+                                .disabled(model.selected == nil || model.busy)
+                                .frame(minHeight: theme.primaryTouchMinimum)
+                            Button("搜索") { showingSearch = true }
+                                .accessibilityIdentifier("offline.search.open")
+                                .disabled(model.selected == nil || model.busy || sheetRoute != nil)
+                                .frame(minWidth: theme.primaryTouchMinimum, minHeight: theme.primaryTouchMinimum)
+                        }
                         Button("本机自定义项目") { catalog.open() }
                             .disabled(model.busy).accessibilityIdentifier("offline.catalog.open")
                         sleepActions
@@ -53,6 +63,11 @@ public struct OfflinePeeView: View {
             }
         }
         .padding(theme.pageInset)
+        .toolbar(.hidden, for: .navigationBar)
+        .navigationDestination(isPresented: $showingSearch) {
+            OfflineSearchView(store: store, onOpenRecord: openSearchRecord)
+        }
+        }
         .disabled(sleep.busy || wakes.busy)
         .sheet(isPresented: Binding(get: { sheetRoute != nil }, set: { if !$0 { dismissSheet() } })) {
             if sheetRoute == .wakeObservations {
@@ -97,6 +112,25 @@ public struct OfflinePeeView: View {
         .task { model.refresh() }
         .onChange(of: sleep.completion) { _ in model.refresh() }
         .onChange(of: wakes.completion) { _ in model.refresh() }
+    }
+    /// Search has already revalidated this exact revision in the store. Keep the
+    /// host's original selection/actor boundary too; never retarget an editor to
+    /// whichever baby happens to be selected when a late callback arrives.
+    private func openSearchRecord(_ hit: OfflineSearchHit, revision: OfflineSearchRevision) {
+        guard sheetRoute == nil, !model.busy, !sleep.busy, !wakes.busy,
+              model.selected == revision.context,
+              model.localActorUUID == revision.localActorUUID,
+              hit.record.babyClientUUID == revision.context.babyClientUUID,
+              let baby = model.babies.first(where: { $0.clientUUID == hit.record.babyClientUUID }) else { return }
+        if let projection = hit.sleep {
+            let completed = OfflineSleepState.editableProjectedWake(
+                projection, localActorUUID: revision.localActorUUID
+            ).map { $0.timestampMillis > projection.record.timestampMillis } ?? false
+            sleep.openEdit(sleep: projection, context: revision.context, babyName: baby.nickname,
+                           completed: completed, localActorUUID: revision.localActorUUID)
+        } else {
+            model.openEditor(record: hit.record, milkStep: storedMilkStep)
+        }
     }
     private var sheetRoute: OfflineSheetRoute? {
         if wakes.details != nil { return .wakeObservations }

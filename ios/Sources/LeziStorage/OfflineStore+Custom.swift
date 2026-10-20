@@ -10,7 +10,7 @@ extension OfflineStore {
     }
     public func createCustomDefinition(clientUUID: UUID = UUID(), name: String, iconSlot: Int, generation: UUID) throws -> OfflineCustomDefinition {
         let name = try Self.customName(name, icon: iconSlot)
-        return try db.transaction {
+        return try writeTransaction {
             try requireCustomGeneration(generation)
             if let existing = try customDefinition(clientUUID) {
                 guard existing.deletedAt == nil else { throw OfflineStoreError.deletedRecord }
@@ -32,7 +32,7 @@ extension OfflineStore {
     }
     public func updateCustomDefinition(_ id: UUID, name: String, iconSlot: Int, generation: UUID, expectedUpdatedAt: Int64) throws -> OfflineCustomDefinition {
         let name = try Self.customName(name, icon: iconSlot)
-        return try db.transaction {
+        return try writeTransaction {
             try requireCustomGeneration(generation)
             let old = try requireCustom(id)
             guard old.deletedAt == nil else { throw OfflineStoreError.deletedRecord }
@@ -48,7 +48,7 @@ extension OfflineStore {
         }
     }
     public func deleteCustomDefinition(_ id: UUID, generation: UUID, expectedUpdatedAt: Int64) throws -> Bool {
-        try db.transaction {
+        try writeTransaction {
             try requireCustomGeneration(generation)
             let old = try requireCustom(id)
             if old.deletedAt != nil { return false }
@@ -61,7 +61,7 @@ extension OfflineStore {
     }
     /// Complete live-catalog ordering, at most ten UUIDs. Never modifies facts/dirty.
     public func reorderCustomDefinitions(_ ids: [UUID], generation: UUID) throws {
-        try db.transaction {
+        try writeTransaction {
             try requireCustomGeneration(generation)
             let live = try customDefinitions()
             guard ids.count == live.count, Set(ids).count == ids.count,
@@ -81,7 +81,7 @@ extension OfflineStore {
               let identity = draft.item.familyCustomUUID, let definitionID = UUID(uuidString: identity),
               draft.photoClientUUIDs.isEmpty, draft.validationErrors(nowMillis: now).isEmpty else { throw OfflineStoreError.invalidDraft }
         let json = try RecordPayloadCodec.encode(RecordPayloadDocument(payload: draft.payload))
-        return try db.transaction {
+        return try writeTransaction {
             try requireOfflineContext(context)
             guard draft.babyClientUUID == context.babyClientUUID else { throw OfflineStoreError.staleContext }
             try requireLiveBaby(context.babyClientUUID)

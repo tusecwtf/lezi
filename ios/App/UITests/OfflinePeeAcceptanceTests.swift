@@ -1524,6 +1524,178 @@ final class OfflineWakeObservationAcceptanceTests: OfflineAcceptanceSupport {
     }
 }
 
+@MainActor
+final class OfflineSearchAcceptanceTests: OfflineAcceptanceSupport {
+    func testScopedSearchReopensOriginalRecordAndRefreshesOnlyAfterCommit() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let firstBaby = "UI-Search-014A"
+        let secondBaby = "UI-Search-014B"
+        let originalNote = "search-a_%"
+        let editedNote = originalNote + "-edited"
+        let secondNote = "search-b-only"
+        app.launch()
+
+        createSearchBaby(firstBaby, replacing: "", in: app)
+        tap(app.buttons["offline.pee.new"])
+        enterNote(originalNote, in: app)
+        saveDiaper(in: app, babyName: firstBaby, kindLabel: "尿记录")
+        let originalRow = diaperRow(in: app, note: originalNote)
+        waitFor(originalRow, "exists == true")
+        let recordID = String(originalRow.identifier.dropFirst("offline.record.row.".count))
+        XCTAssertNotNil(UUID(uuidString: recordID))
+        let searchRowID = "offline.search.row.\(recordID)"
+
+        tap(app.buttons["offline.search.open"])
+        waitFor(app.buttons["offline.search.close"], "exists == true AND hittable == true")
+        waitFor(app.staticTexts["输入关键字"], "exists == true")
+        // The full key "pee_amount" deliberately matches Android's "pee"
+        // alias. Its raw-only suffix must not match visible business text.
+        enterSearchQuery("_amount", in: app)
+        waitFor(app.staticTexts["无结果"], "exists == true")
+        XCTAssertFalse(app.buttons[searchRowID].exists, "Raw JSON keys must not match visible business text")
+
+        clearSearch(in: app)
+        enterSearchQuery("pee", in: app)
+        let hit = app.buttons[searchRowID]
+        waitFor(hit, "exists == true AND hittable == true")
+        XCTAssertTrue(hit.label.contains("尿尿"))
+        XCTAssertTrue(hit.label.contains(originalNote))
+        attachSearchDiagnostics("alias-result", in: app)
+
+        clearSearch(in: app)
+        enterSearchQuery(originalNote, in: app)
+        waitFor(hit, "exists == true AND hittable == true")
+        XCTAssertEqual(searchRows(in: app).count, 1)
+        tap(hit)
+        waitFor(noteField(in: app), "value == %@", originalNote)
+        // A fresh result opens the same real editor. Merely opening and closing
+        // it must neither write nor create an additional record.
+        tap(app.buttons["offline.editor.close"])
+        waitFor(noteField(in: app), "exists == false")
+        waitFor(hit, "exists == true AND hittable == true")
+        XCTAssertEqual(searchRows(in: app).count, 1)
+
+        tap(hit)
+        let note = noteField(in: app)
+        waitFor(note, "exists == true AND hittable == true AND value == %@", originalNote)
+        note.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        note.typeText("-edited")
+        waitFor(note, "value == %@", editedNote)
+        tap(app.buttons["confirmation.save"])
+        waitFor(note, "exists == false")
+        // No reload button or re-entry: the committed record invalidates the
+        // active query, preserving its original UUID and showing the new text.
+        waitFor(hit, "exists == true AND label CONTAINS %@", editedNote)
+        XCTAssertEqual(searchRows(in: app).count, 1)
+        waitFor(searchField(in: app), "value == %@", originalNote)
+        attachSearchDiagnostics("after-committed-edit", in: app)
+
+        tap(hit)
+        tap(app.buttons["offline.delete.request"])
+        tap(app.buttons["offline.delete.cancel"])
+        waitFor(noteField(in: app), "value == %@", editedNote)
+        tap(app.buttons["offline.editor.close"])
+        waitFor(hit, "exists == true AND label CONTAINS %@", editedNote)
+        tap(hit)
+        tap(app.buttons["offline.delete.request"])
+        tap(app.buttons["offline.delete.confirm"])
+        waitFor(noteField(in: app), "exists == false")
+        waitFor(app.staticTexts["无结果"], "exists == true")
+        XCTAssertFalse(hit.exists)
+        attachSearchDiagnostics("after-committed-delete", in: app)
+        clearSearch(in: app)
+        waitFor(app.staticTexts["输入关键字"], "exists == true")
+        tap(app.buttons["offline.search.close"])
+        waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
+        assertEmptyHistory(app)
+
+        createSearchBaby(secondBaby, replacing: firstBaby, in: app)
+        tap(app.buttons["offline.pee.new"])
+        enterNote(secondNote, in: app)
+        saveDiaper(in: app, babyName: secondBaby, kindLabel: "尿记录")
+        let secondRow = diaperRow(in: app, note: secondNote)
+        waitFor(secondRow, "exists == true")
+        let secondID = String(secondRow.identifier.dropFirst("offline.record.row.".count))
+        let secondSearchRowID = "offline.search.row.\(secondID)"
+        XCTAssertNotEqual(recordID, secondID)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: secondBaby)
+        tap(app.buttons["offline.search.open"])
+        enterSearchQuery("search", in: app)
+        let secondHit = app.buttons[secondSearchRowID]
+        waitFor(secondHit, "exists == true AND label CONTAINS %@", secondNote)
+        XCTAssertEqual(searchRows(in: app).count, 1)
+        XCTAssertFalse(app.buttons[searchRowID].exists)
+        tap(app.buttons["offline.search.close"])
+        let selection = app.descendants(matching: .any)
+            .matching(identifier: "offline.baby.selection").firstMatch
+        tap(selection)
+        tap(app.buttons[firstBaby])
+        assertSelectedBaby(app, name: firstBaby)
+        waitFor(app.buttons["offline.search.open"], "exists == true AND enabled == true AND hittable == true")
+        tap(app.buttons["offline.search.open"])
+        enterSearchQuery("search", in: app)
+        waitFor(app.staticTexts["无结果"], "exists == true")
+        XCTAssertFalse(app.buttons[secondSearchRowID].exists, "The other baby's live record must not leak into this query")
+        XCTAssertFalse(app.buttons[searchRowID].exists, "A deleted result must remain deleted after relaunch")
+        attachSearchDiagnostics("original-baby-after-relaunch", in: app)
+        tap(app.buttons["offline.search.close"])
+        assertSelectedBaby(app, name: firstBaby)
+        assertEmptyHistory(app)
+    }
+
+    private func createSearchBaby(_ name: String, replacing previous: String, in app: XCUIApplication) {
+        tap(app.buttons["offline.baby.new"])
+        let nickname = app.textFields["offline.baby.nickname"]
+        waitFor(nickname, "exists == true AND hittable == true")
+        nickname.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        nickname.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count) + name)
+        waitFor(nickname, "value == %@", name)
+        tap(app.buttons["offline.baby.create"])
+        waitFor(app.staticTexts["offline.result"], "label == %@", "已在本机创建宝宝：\(name)")
+        waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
+        tap(app.buttons["offline.baby.new"])
+        assertSelectedBaby(app, name: name)
+        assertEmptyHistory(app)
+    }
+
+    private func searchField(in app: XCUIApplication) -> XCUIElement {
+        app.textFields["offline.search.field"]
+    }
+
+    private func enterSearchQuery(_ query: String, in app: XCUIApplication) {
+        let field = searchField(in: app)
+        tap(field)
+        field.typeText(query)
+        waitFor(field, "value == %@", query)
+    }
+
+    private func clearSearch(in app: XCUIApplication) {
+        tap(app.buttons["offline.search.clear"])
+        waitFor(app.staticTexts["输入关键字"], "exists == true")
+        XCTAssertEqual(searchRows(in: app).count, 0)
+    }
+
+    private func searchRows(in app: XCUIApplication) -> XCUIElementQuery {
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "offline.search.row."))
+    }
+
+    private func attachSearchDiagnostics(_ name: String, in app: XCUIApplication) {
+        XCTContext.runActivity(named: "Offline search: \(name)") { activity in
+            let tree = XCTAttachment(string: app.debugDescription)
+            tree.name = "search-\(name)-accessibility"
+            tree.lifetime = .keepAlways
+            activity.add(tree)
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = "search-\(name)-screen"
+            screenshot.lifetime = .keepAlways
+            activity.add(screenshot)
+        }
+    }
+}
+
 /// Shared UI operations only: no test methods to inherit or execute twice.
 @MainActor
 class OfflineAcceptanceSupport: XCTestCase {

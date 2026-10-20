@@ -6,7 +6,7 @@ extension OfflineStore {
     public func createSleepStart(_ draft: RecordConfirmationDraft, context: OfflineContext) throws -> OfflineSleep {
         let now = clock()
         let json = try Self.sleepJSON(draft, now: now, completed: false)
-        return try db.transaction {
+        return try writeTransaction {
             try requireSleepContext(context, baby: draft.babyClientUUID)
             if let existing = try recordDetails(draft.clientUUID) {
                 try requireSleepIdentity(existing, baby: context.babyClientUUID)
@@ -25,7 +25,7 @@ extension OfflineStore {
         let now = clock()
         let json = try Self.sleepJSON(draft, now: now, completed: true)
         let wakeID = SleepWakeIdentity.closedSleepObservationUUID(sleepClientUUID: draft.clientUUID)
-        return try db.transaction {
+        return try writeTransaction {
             try requireSleepContext(context, baby: draft.babyClientUUID)
             if let existing = try recordDetails(draft.clientUUID) {
                 try requireSleepIdentity(existing, baby: context.babyClientUUID)
@@ -51,7 +51,7 @@ extension OfflineStore {
     public func recordWake(_ draft: OfflineWakeDraft, context: OfflineContext) throws -> OfflineWakeObservation {
         let now = clock()
         guard RecordTime.pointError(timestamp: draft.timestampMillis, now: now) == nil else { throw OfflineStoreError.invalidDraft }
-        return try db.transaction {
+        return try writeTransaction {
             try requireSleepContext(context, baby: draft.babyClientUUID)
             let sleep = try requireSleep(draft.sleepClientUUID, baby: context.babyClientUUID)
             if let existing = try wakeDetails(draft.clientUUID) {
@@ -69,7 +69,7 @@ extension OfflineStore {
     /// Edits only the start fact. A closed projection cannot accidentally reopen.
     public func editSleepStart(_ draft: RecordConfirmationDraft, context: OfflineContext, expectedUpdatedAt: Int64) throws -> OfflineSleep {
         let now = clock(); let json = try Self.sleepJSON(draft, now: now, completed: false)
-        return try db.transaction {
+        return try writeTransaction {
             try requireSleepContext(context, baby: draft.babyClientUUID)
             let old = try requireSleep(draft.clientUUID, baby: context.babyClientUUID)
             guard old.updatedAt == expectedUpdatedAt else { throw OfflineStoreError.staleEdit }
@@ -87,7 +87,7 @@ extension OfflineStore {
     public func editCompletedSleep(_ draft: RecordConfirmationDraft, wakeClientUUID: UUID,
                                    context: OfflineContext, expectedUpdatedAt: Int64, expectedWakeUpdatedAt: Int64) throws -> OfflineSleep {
         let now = clock(); let json = try Self.sleepJSON(draft, now: now, completed: true)
-        return try db.transaction {
+        return try writeTransaction {
             try requireSleepContext(context, baby: draft.babyClientUUID)
             let old = try requireSleep(draft.clientUUID, baby: context.babyClientUUID)
             guard old.updatedAt == expectedUpdatedAt else { throw OfflineStoreError.staleEdit }
@@ -108,7 +108,7 @@ extension OfflineStore {
                            expectedSleepUpdatedAt: Int64) throws -> OfflineWakeObservation {
         let now = clock()
         guard RecordTime.pointError(timestamp: draft.timestampMillis, now: now) == nil else { throw OfflineStoreError.invalidDraft }
-        return try db.transaction {
+        return try writeTransaction {
             try requireSleepContext(context, baby: draft.babyClientUUID)
             let sleep = try requireSleep(draft.sleepClientUUID, baby: context.babyClientUUID)
             guard sleep.updatedAt == expectedSleepUpdatedAt else { throw OfflineStoreError.staleEdit }
@@ -127,7 +127,7 @@ extension OfflineStore {
     public func withdrawWake(_ id: UUID, sleepClientUUID: UUID, context: OfflineContext, expectedUpdatedAt: Int64,
                              expectedSleepUpdatedAt: Int64) throws -> OfflineWakeObservation {
         let now = clock()
-        return try db.transaction {
+        return try writeTransaction {
             try requireSleepContext(context, baby: context.babyClientUUID)
             let sleep = try requireSleep(sleepClientUUID, baby: context.babyClientUUID)
             guard sleep.updatedAt == expectedSleepUpdatedAt else { throw OfflineStoreError.staleEdit }
@@ -145,7 +145,7 @@ extension OfflineStore {
 
     public func selectEffectiveWake(_ wakeClientUUID: UUID?, sleepClientUUID: UUID, context: OfflineContext, expectedUpdatedAt: Int64) throws -> OfflineSleep {
         let now = clock()
-        return try db.transaction {
+        return try writeTransaction {
             try requireSleepContext(context, baby: context.babyClientUUID)
             let sleep = try requireSleep(sleepClientUUID, baby: context.babyClientUUID)
             guard sleep.updatedAt == expectedUpdatedAt else { throw OfflineStoreError.staleEdit }
@@ -182,16 +182,28 @@ extension OfflineStore {
     /// The page remains bounded; all evidence for each included sleep participates.
     public func sleepPage(baby: UUID, before: OfflineRecordCursor? = nil, limit: Int = 100) throws -> OfflineSleepPage {
         try db.transaction(begin: "BEGIN") {
-            let page = try readPageSnapshot(baby: baby, before: before, limit: limit, peeOnly: false)
-            let roots = page.records.filter { $0.type == .sleep }
-            let wakes = try wakeRows(sleepIDs: roots.map(\.clientUUID))
-            let grouped = Dictionary(grouping: wakes, by: \.sleepClientUUID)
-            let latest = try latestOpenSleep(baby: baby)
-            let pairs = roots.map { root in
-                (root.clientUUID, Self.project(root, wakes: grouped[root.clientUUID] ?? [], latestOpen: latest))
-            }
-            return OfflineSleepPage(page: page, sleeps: Dictionary(uniqueKeysWithValues: pairs), latestOpenSleepClientUUID: latest?.clientUUID)
+            try sleepPageSnapshot(baby: baby, before: before, limit: limit)
         }
+    }
+    // Caller owns one read snapshot, including the latest open peer outside this page.
+    func sleepPageSnapshot(baby: UUID, before: OfflineRecordCursor?, limit: Int,
+                           includeLatestOpenWhenEmpty: Bool = true) throws -> OfflineSleepPage {
+        let page = try readPageSnapshot(baby: baby, before: before, limit: limit, peeOnly: false)
+        let roots = page.records.filter { $0.type == .sleep }
+        let wakes = try wakeRows(sleepIDs: roots.map(\.clientUUID))
+        let grouped = Dictionary(grouping: wakes, by: \.sleepClientUUID)
+        // Timeline callers also display the global wake target. Search only
+        // needs that lookup in chunks containing sleep roots to project.
+        let latest: OfflineRecord?
+        if !roots.isEmpty || includeLatestOpenWhenEmpty {
+            latest = try latestOpenSleep(baby: baby)
+        } else {
+            latest = nil
+        }
+        let pairs = roots.map { root in
+            (root.clientUUID, Self.project(root, wakes: grouped[root.clientUUID] ?? [], latestOpen: latest))
+        }
+        return OfflineSleepPage(page: page, sleeps: Dictionary(uniqueKeysWithValues: pairs), latestOpenSleepClientUUID: latest?.clientUUID)
     }
     public func sleepDetails(_ id: UUID) throws -> OfflineSleep? {
         try db.transaction(begin: "BEGIN") {
@@ -248,7 +260,7 @@ extension OfflineStore {
             .text(draft.sleepClientUUID.uuidString), .int(draft.timestampMillis), draft.note.map(SQLiteConnection.Value.text) ?? .null,
             .text(observer.uuidString), .int(now)])
     }
-    private func projectSleep(_ record: OfflineRecord) throws -> OfflineSleep {
+    func projectSleep(_ record: OfflineRecord) throws -> OfflineSleep {
         Self.project(record, wakes: try wakeRows(sleepIDs: [record.clientUUID]), latestOpen: try latestOpenSleep(baby: record.babyClientUUID))
     }
     private static func project(_ record: OfflineRecord, wakes: [OfflineWakeObservation], latestOpen: OfflineRecord?) -> OfflineSleep {
