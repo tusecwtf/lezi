@@ -143,17 +143,26 @@ passed **247 package tests and all 11 UI scenarios**. This verifies that source,
 including the first sleep start/wake/relaunch path and prior gate repairs, not
 the additional sleep work below.
 
-**Current draft, Apple CI pending:** adds bounded completed-sleep backfill,
-start/completed editing and soft-delete. The complete Linux regression passed
-**221 tests, zero failures** (46 storage, 89 portable presentation, 61 domain,
-25 core). Two new Apple-only model tests and the **twelfth UI scenario** using
-the real native calendar have not yet run. The previous eleven test bodies are
-unchanged. The older 247+11 green result must not be inherited by this draft.
+**Completed-sleep draft `4b6bfd0`, Apple UI acceptance blocked:**
+[Apple run 39354961918](https://github.com/tusecwtf/lezi/actions/runs/39354961918)
+passed **255 package tests**, iOS SDK compilation and the unsigned app build.
+Its original eleven UI scenarios passed; the twelfth completed-sleep scenario
+failed before opening the native calendar. The test expected the runner's
+English date label, but the host's `zh-Hans` development localization exposes
+`2026年10月20日`, confirmed by its retained accessibility tree and screenshot.
+The complete Linux regression passed **221 tests, zero failures** (46 storage,
+89 portable presentation, 61 domain, 25 core).
 
-The native-calendar scenario still needs real accessibility-tree evidence and
-interaction coverage for month-start cross-month and year-end navigation. A pass
-on today's date alone will not complete those boundary gates. No test-only date
-picker substitute or silent calendar-boundary omission establishes acceptance.
+The current test-only repair uses the observed Chinese host localization for
+native date-label expectations without changing product language. Its Apple
+rerun is pending. The native popup's day cells and month-navigation controls
+still require actual accessibility evidence, followed by interaction coverage
+for month-start cross-month and year-end navigation. A pass on today's date
+alone will not complete those boundary gates. No test-only date picker
+substitute or silent calendar-boundary omission establishes acceptance.
+The completed-sleep save/edit/delete/relaunch sequence has not yet been reached
+in Apple UI testing. The older 247+11 green result must not be inherited by this
+draft or its test repair.
 
 The verified first sleep slice supports explicit-confirm SleepStart creation,
 a separate WakeObservation for the captured sleep/baby, and projected readback.

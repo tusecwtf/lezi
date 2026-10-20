@@ -1124,9 +1124,12 @@ final class OfflineCompletedSleepAcceptanceTests: OfflineAcceptanceSupport {
         waitFor(app.staticTexts["offline.sleep.error"], "label == %@", "请填写醒来时间")
         XCTAssertFalse(app.datePickers["offline.sleep.end"].exists)
 
-        // Both processes use the Simulator's calendar, locale and timezone.
+        // The host's development localization is zh-Hans, while XCTest's
+        // runner can report en_US. Use the Gregorian calendar observed in the
+        // host's native picker and the Simulator timezone, not the runner locale.
         // Calendar arithmetic, rather than 24-hour subtraction, handles DST.
-        let calendar = Calendar.current
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
         let today = Date()
         let yesterday = calendar.date(byAdding: .day, value: -1, to: today)!
         chooseSleepCalendarDay("offline.sleep.time", from: today, to: yesterday, in: app)
@@ -1219,13 +1222,18 @@ class OfflineAcceptanceSupport: XCTestCase {
         waitFor(picker, "exists == true AND hittable == true")
         // The captured native compact picker has an aggregate button followed
         // by its date and time buttons. Do not guess localized popup labels.
+        var selectionCalendar = Calendar(identifier: .gregorian)
+        selectionCalendar.timeZone = .current
         let formatter = DateFormatter()
-        formatter.calendar = Calendar.current
+        formatter.calendar = selectionCalendar
         formatter.timeZone = .current
-        formatter.locale = .current
+        // project.pbxproj declares zh-Hans; run 39354961918's retained AX and
+        // screenshot show "2026年10月20日", despite runner Locale.current=en_US.
+        // This changes only the expectation, never the app's native localization.
+        formatter.locale = Locale(identifier: "zh_Hans")
         formatter.dateStyle = .long
         formatter.timeStyle = .none
-        print("Sleep calendar: locale=\(Locale.current.identifier), calendar=\(Calendar.current.identifier), timezone=\(TimeZone.current.identifier)")
+        print("Sleep calendar: runnerLocale=\(Locale.current.identifier), expectedHostLocale=\(formatter.locale.identifier), calendar=\(formatter.calendar.identifier), timezone=\(TimeZone.current.identifier)")
         attachSleepCalendarDiagnostics(identifier + "-compact", in: app)
         XCTAssertEqual(picker.buttons.count, 3, "Unexpected native compact DatePicker hierarchy")
         let dateButton = picker.buttons.element(boundBy: 1)
@@ -1234,7 +1242,7 @@ class OfflineAcceptanceSupport: XCTestCase {
         attachSleepCalendarDiagnostics(identifier, in: app)
         // First-run native popup evidence is retained even if iOS exposes a
         // different day-cell representation. Never try unrelated labels.
-        guard Calendar.current.isDate(initialDate, equalTo: date, toGranularity: .month) else {
+        guard formatter.calendar.isDate(initialDate, equalTo: date, toGranularity: .month) else {
             XCTFail("Native month navigation needs captured popup AX evidence; refusing to select a same-number day in the wrong month")
             return
         }
@@ -1245,9 +1253,9 @@ class OfflineAcceptanceSupport: XCTestCase {
         }
         let calendar = calendars[0]
         let numbers = NumberFormatter()
-        numbers.locale = .current
+        numbers.locale = formatter.locale
         numbers.numberStyle = .decimal
-        let day = numbers.string(from: NSNumber(value: Calendar.current.component(.day, from: date)))!
+        let day = numbers.string(from: NSNumber(value: formatter.calendar.component(.day, from: date)))!
         let days = calendar.buttons.matching(NSPredicate(format: "label == %@", day))
         guard days.count == 1 else {
             XCTFail("Native calendar did not expose one numeric day button for \(day); inspect attached popup hierarchy")

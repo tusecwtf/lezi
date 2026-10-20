@@ -120,8 +120,9 @@ through the date picker here. No timer, family observer, or retrospective
 observation-management flow is simulated.
 
 The completed-sleep flow uses the real native date picker to select yesterday's
-start and today's end, using the Simulator's current calendar, locale and time
-zone. An absent end and an equal-time candidate are explicitly rejected before
+start and today's end. Calendar arithmetic uses Gregorian dates in the
+Simulator's time zone; native labels use the host's `zh-Hans` development
+localization, independently of the XCTest runner's locale. An absent end and an equal-time candidate are explicitly rejected before
 saving; no interval is fabricated by a launch flag. It saves a backfill, edits
 its start note and then its completed-interval note, and checks the same sleep
 and wake UUIDs, end, duration, provisional status, and unchanged independent wake
@@ -131,12 +132,24 @@ success message promises preserved wake observations; their retained storage
 and no-revival semantics are verified by portable/store tests, since this app
 has no observation-recovery UI.
 
-Native calendar popup interaction is new and awaits its first Apple execution.
-The test retains complete AX trees and screenshots before and after opening it.
-It requires one visible calendar and one numeric day button, failing with evidence
-rather than guessing alternate labels or skipping the date change. Cross-month
-navigation also fails explicitly pending actual popup AX evidence; it must not
-select a same-number date from the wrong month. Existing eleven flows are unchanged.
+[Apple run 39354961918](https://github.com/tusecwtf/lezi/actions/runs/39354961918)
+on `4b6bfd0` passed all original eleven scenarios but stopped this twelfth flow
+before opening the native calendar: the runner reported `en_US` while the host's
+retained AX tree and screenshot showed the date label `2026年10月20日`. The current
+repair changes only the test's date-label locale to match the `zh-Hans` host;
+Apple re-execution remains pending. All twelve cases and business assertions
+remain present.
+
+The test retains complete AX trees and screenshots before and after opening the
+native calendar. Its popup day cells and navigation controls have not yet been
+captured. The existing one-visible-calendar/one-numeric-day checks fail with
+evidence rather than trying alternate labels or skipping the date change.
+Cross-month navigation also fails explicitly pending actual popup AX evidence;
+it must not select a same-number date from the wrong month. Real month-start
+and year-end navigation must be implemented and exercised before acceptance,
+even if a same-month run passes. The save, both edits, independent wake checks,
+delete cancellation, confirmed soft deletion and relaunch steps below the
+calendar remain unexecuted on Apple at this checkpoint.
 
 Expectations poll observable UI states; there are no fixed sleeps. Cancel uses
 the existing `取消` button label; other controls and history probes use stable IDs.
