@@ -1,8 +1,8 @@
 # iOS offline records: bounded editor expansion plan
 
-> Status as of 2026-10-20: **current draft has schema 4, 26 ordinary forms plus
-> custom and first-slice sleep start/wake UI; 215 Linux tests pass. Latest Apple
-> CI has 247 passing unit tests and 9/11 passing UI scenarios; repair CI is pending**.
+> Status as of 2026-10-20: **`eb64828c` passed Android 5,910/zero skipped and
+> Apple 247+11 UI. Current draft adds bounded sleep backfill/edit/soft-delete:
+> 221 Linux tests pass; two new Apple model tests and twelfth UI await validation**.
 > This document refines the [iOS parity inventory](ios-parity.md), not the Android
 > product contract. Native offline mode is not permission to bypass membership/ACL
 > while an enrolled device cannot reach its server.
@@ -41,51 +41,48 @@ evidence. Schema **1/2→3** migration preserves data atomically. Storage suppor
 launch was verified; **that checkpoint did not expose sleep UI**. Database schema
 and payload document schema versions are separate concepts.
 
-**Latest completed CI checkpoint `f82c8372` (2026-10-20):**
-[Apple run 39344241795](https://github.com/tusecwtf/lezi/actions/runs/39344241795)
-ended in failure: **247 package tests passed**; all **11 UI scenarios ran once,
-nine passed and two failed** (Food and Sleep). Custom and Milk now passed their
-real scenarios. Food failed when locating the new-record entry after saving;
-Sleep's close button was visible but absent under its intended identifier. The
-captured accessibility tree confirms that the close Button instead carried the
-ancestor identifier `offline.sleep.dragRegion`; the proposed containment fix
-still needs validation.
+**Latest verified dual-green checkpoint `eb64828c` (2026-10-20):**
+[Android run 39349208928](https://github.com/tusecwtf/lezi/actions/runs/39349208928)
+passed **5,910 tests with zero skipped**;
+[Apple run 39349208906](https://github.com/tusecwtf/lezi/actions/runs/39349208906)
+passed **247 package tests and all 11 UI scenarios**. This verifies that source,
+including the first sleep start/wake/relaunch path and prior gate repairs, not
+the additional sleep work below.
 
-[Android run 39344241791](https://github.com/tusecwtf/lezi/actions/runs/39344241791)
-succeeded with **5,908 total = 5,902 passed + six skipped**. The six skips were
-three `WidgetBounded` cases across variants, gated by an assumption during UTC
-00–02. Earlier no-skip results remain correct for their own runs; they must not
-be substituted for this run's breakdown.
+**Current draft, Apple CI pending:** adds bounded completed-sleep backfill,
+start/completed editing and soft-delete. The complete Linux regression passed
+**221 tests, zero failures** (46 storage, 89 portable presentation, 61 domain,
+25 core). Two new Apple-only model tests and the **twelfth UI scenario** using
+the real native calendar have not yet run. The previous eleven test bodies are
+unchanged. The older 247+11 green result must not be inherited by this draft.
 
-**Current draft repairs, not yet verified:** make Widget tests use a single
-captured instant and a legal zone placing local time at noon, retain every
-assertion, and add a 24-hour table (expected total 5,910, not yet measured). Food's
-helper will reveal the entry within the real history container and confirm sheet
-dismissal; Sleep's header will contain accessibility children to preserve their
-identifiers. No Android product behavior or tests are removed. Both CI gates on
-the next head are pending, including all 11 serial UI scenarios under the
-60-minute budget; proposed fixes are not passing results.
-
-The production-source Linux baseline remains **215 tests, zero failures**
-(46 storage, 83 portable presentation, 61 domain, 25 core); no portable test was
-added in this repair batch. Scope remains schema 4, 26 ordinary forms plus custom
-and first-slice sleep start/wake/readback. Prior `de82eb03` and `aa2011c` failures
-are historical; neither earlier green results nor the latest Android success
-establish complete Apple or product acceptance.
+The native-calendar scenario still needs real accessibility-tree evidence and
+interaction coverage for month-start cross-month and year-end navigation. A pass
+on today's date alone will not complete those boundary gates. No test-only date
+picker substitute or silent calendar-boundary omission establishes acceptance.
 
 Custom definitions retain stable UUID identity and historical title/icon snapshots;
 manual nursing records point facts with supported historical record mode preserved.
 Native schema 4 migrates schema 1/2/3 atomically; it is not server schema 13 or
 payload schema 2.
 
-The first sleep UI slice implements explicit-confirm SleepStart creation, a
-separate WakeObservation for the captured sleep/baby, and projected sleep/wake
-readback. Its start → wake → relaunch UI script ran on Apple but failed at the close-button
-identifier boundary; the full scenario is not accepted.
-Legacy `end_timestamp`/opaque sleep records remain preserved and read-only.
-Completed-sleep backfill, sleep editing and observation management UI remain
-unimplemented, even where dedicated storage commands already exist. Nursing timer,
-care plans, media, family sync and complete-product acceptance remain open.
+The verified first sleep slice supports explicit-confirm SleepStart creation,
+a separate WakeObservation for the captured sleep/baby, and projected readback.
+The current draft extends that bounded workflow as follows:
+
+- Completed backfill starts with **no end time selected**. Opening the end picker
+  offers a candidate initially equal to the start; the user must explicitly
+  choose/confirm it. Equal start/end and future times are rejected.
+- Start editing preserves duration and sleep flags where applicable. Completed
+  editing uses both roots' revision checks (dual CAS) and retains the original
+  WakeObservation identity instead of creating a replacement observation.
+- Sleep and wake notes remain independent. Sleep soft-delete retains wake facts.
+- Legacy `end_timestamp` and opaque sleep remain preserved and read-only.
+
+This is **not complete sleep parity**. No observation-management/recovery entry
+is added, and no server behavior changes. Nursing timers, care plans, media,
+family sync and complete-product acceptance remain open. New UI behavior above
+is source implementation plus Linux evidence, not Apple acceptance.
 
 Food keeps untouched optional legacy amounts exactly (nil, empty, Chinese,
 full-width and whitespace), normalizes only new/changed amounts, and requires a
@@ -153,10 +150,10 @@ restriction prevents unreadable round trips; it does not assert every Android
 in-memory combination behaves identically. Legacy numeric-domain values remain
 readable. See [the payload contract](contracts/data-model.md).
 
-Manual nursing passed its last UI scenario; custom and the whole suite still need
-Apple acceptance. First-slice sleep start/wake UI is in the current draft, while
-nursing timer handoff, care plans, media, completed-sleep backfill, sleep editing
-and observation management UI remain open. Full
+Manual nursing, custom and first-slice sleep passed their bounded UI scenarios
+at `eb64828c`. Current sleep backfill/edit/soft-delete additions await Apple
+validation. Nursing timer handoff,
+care plans, media and observation management/recovery remain open. Full
 navigation, family enrollment and synchronization remain unimplemented here.
 The 12 groups below are a catalog/implementation plan, not an assertion that
 all their UI or complete product parity has been delivered.
@@ -274,13 +271,13 @@ explicitly; no fallback may immediately save or silently use an empty payload.
 
 ## 5. Smallest implementation slices and acceptance
 
-Current draft scope remains 26 ordinary forms plus custom and first-slice sleep
-start/wake/readback. Linux passed 215 tests. At `f82c8372`, Apple passed 247 package
-tests and nine of eleven UI scenarios; Food and Sleep failed. Android succeeded
-with 5,902 passes and six skips out of 5,908. The next-head test/accessibility
-repairs await both CI gates; the projected 5,910 Android total is not verified.
-Completed-sleep backfill, editing and observation management remain future UI
-slices. No earlier green result accepts the current draft.
+Verified `eb64828c` passed Android 5,910 tests with zero skipped and Apple
+247 package tests plus eleven UI scenarios. Current draft adds bounded sleep
+backfill/edit/soft-delete and has 221 passing Linux tests; two new Apple model
+tests and a twelfth native-calendar UI scenario await validation. Month-start
+cross-month and year-end calendar navigation require actual accessibility-tree
+and interaction proof, even if the scenario passes on today's date. Observation
+management/recovery and full sleep parity remain open.
 Do not replace the working pee flow with a generic form before its regression
 proof remains green.
 

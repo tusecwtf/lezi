@@ -108,10 +108,25 @@ public struct OfflinePeeView: View {
             Button("记录睡下") { openSleep(waking: false) }
                 .accessibilityIdentifier("offline.sleep.start")
                 .disabled(model.latestOpenSleepClientUUID != nil)
+            Button("补记睡眠") { openCompletedSleep() }
+                .accessibilityIdentifier("offline.sleep.completed.new")
+                .disabled(model.latestOpenSleepClientUUID != nil)
             Button("记录醒来") { openSleep(waking: true) }
                 .accessibilityIdentifier("offline.sleep.wake")
                 .disabled(model.latestOpenSleepClientUUID == nil)
         }.disabled(model.busy || model.selected == nil || sheetRoute != nil || sleep.busy)
+    }
+    private func openCompletedSleep() {
+        guard sheetRoute == nil, !model.busy, let context = model.selected,
+              let baby = model.babies.first(where: { $0.clientUUID == context.babyClientUUID }) else { return }
+        sleep.openCompleted(context: context, babyName: baby.nickname, now: Int64(Date().timeIntervalSince1970 * 1000))
+    }
+    private func editSleep(_ projection: OfflineSleep, completed: Bool) {
+        guard sheetRoute == nil, !model.busy, let context = model.selected,
+              let actor = model.localActorUUID,
+              let baby = model.babies.first(where: { $0.clientUUID == context.babyClientUUID }) else { return }
+        sleep.openEdit(sleep: projection, context: context, babyName: baby.nickname,
+                       completed: completed, localActorUUID: actor)
     }
     private func openSleep(waking: Bool) {
         guard sheetRoute == nil, !model.busy, let context = model.selected,
@@ -170,7 +185,12 @@ public struct OfflinePeeView: View {
                     if let note = record.note, !note.isEmpty {
                         LeziText(note).accessibilityIdentifier("offline.record.note")
                     }
-                    if OfflinePeeState.canEdit(record) {
+                    if let projection = model.sleeps[record.clientUUID], OfflineSleepState.supports(projection),
+                       let actor = model.localActorUUID {
+                        OfflineSleepRecordActions(sleep: projection, localActorUUID: actor) { completed in
+                            editSleep(projection, completed: completed)
+                        }.disabled(model.busy)
+                    } else if OfflinePeeState.canEdit(record) {
                         Button("编辑\(OfflineRecordKind(rawValue: record.rawType)?.label ?? "记录")") { model.openEditor(record: record, milkStep: storedMilkStep) }
                             .disabled(model.busy)
                             .accessibilityIdentifier("offline.record.edit")

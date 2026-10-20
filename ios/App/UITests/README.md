@@ -1,8 +1,8 @@
 # Offline Simulator acceptance
 
-The eleven `Offline*AcceptanceTests` classes in `OfflinePeeAcceptanceTests.swift` exercise the actual `LeziDevelopment` application
+The twelve `Offline*AcceptanceTests` classes in `OfflinePeeAcceptanceTests.swift` exercise the actual `LeziDevelopment` application
 and its ordinary file-backed SQLite store. Run on a fresh, ephemeral Simulator
-sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, `UI-Daily-003`, `UI-Health-004`, `UI-Growth-005`, `UI-Milk-006`, `UI-Temperature-007`, `UI-Food-008`, `UI-Nursing-009`, `UI-Custom-010`, and `UI-Sleep-011` names are
+sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, `UI-Daily-003`, `UI-Health-004`, `UI-Growth-005`, `UI-Milk-006`, `UI-Temperature-007`, `UI-Food-008`, `UI-Nursing-009`, `UI-Custom-010`, `UI-Sleep-011`, and `UI-Sleep-012` names are
 unique in that fresh sandbox, one per test. Reusing an already-tested sandbox intentionally
 fails rather than deleting or modifying existing records to make the test pass.
 No special app launch arguments, fake stores, reset paths, or network are used.
@@ -119,6 +119,25 @@ exact equal-time/zero-duration closure is covered by model tests, not forced
 through the date picker here. No timer, family observer, or retrospective
 observation-management flow is simulated.
 
+The completed-sleep flow uses the real native date picker to select yesterday's
+start and today's end, using the Simulator's current calendar, locale and time
+zone. An absent end and an equal-time candidate are explicitly rejected before
+saving; no interval is fabricated by a launch flag. It saves a backfill, edits
+its start note and then its completed-interval note, and checks the same sleep
+and wake UUIDs, end, duration, provisional status, and unchanged independent wake
+note. A relaunch checks persistence. Cancelled deletion preserves the row;
+confirmed soft deletion removes it, including after a second relaunch. The
+success message promises preserved wake observations; their retained storage
+and no-revival semantics are verified by portable/store tests, since this app
+has no observation-recovery UI.
+
+Native calendar popup interaction is new and awaits its first Apple execution.
+The test retains complete AX trees and screenshots before and after opening it.
+It requires one visible calendar and one numeric day button, failing with evidence
+rather than guessing alternate labels or skipping the date change. Cross-month
+navigation also fails explicitly pending actual popup AX evidence; it must not
+select a same-number date from the wrong month. Existing eleven flows are unchanged.
+
 Expectations poll observable UI states; there are no fixed sleeps. Cancel uses
 the existing `取消` button label; other controls and history probes use stable IDs.
 
@@ -156,7 +175,7 @@ successful macOS test execution and its `.xcresult` are required evidence.
 
 ## Serial execution and evidence
 
-Each of the eleven flows is a separate `XCTestCase` subclass with one test method.
+Each of the twelve flows is a separate `XCTestCase` subclass with one test method.
 `OfflineAcceptanceSupport` has no test methods and shares helpers without copying
 them. All original test actions, assertions, and synthetic data names are retained.
 CI explicitly passes `-parallel-testing-enabled NO`, overriding the shared
@@ -175,13 +194,13 @@ single-Simulator execution mode rather than adding launch retries.
 The job budget is 60 minutes. The previous seven-flow serial run took 1450 seconds
 (24.2 minutes) for UI execution. Planning allowance for three additional flows,
 build/Simulator startup and hosted-runner variance motivates the larger bound;
-it is not a measured duration or performance claim for the ten-flow suite.
+it is not a measured duration or performance claim for the complete suite.
 
 `first-launch.png` and `base-simulator-smoke-after-tests.png` are smoke images.
 The latter shows only the state left on the selected Simulator after the suite,
 not a separate final-state image for each flow. Neither establishes that any
 test passed. The retained `OfflinePeeAcceptance.xcresult` is authoritative for
-all eleven test outcomes and runner assignments. Apple CI must verify that each
+all twelve test outcomes and runner assignments. Apple CI must verify that each
 method is discovered once, executes once, and passes with no skips. Inspect
 per-test diagnostics in Xcode; Linux syntax/configuration checks cannot establish
 Apple runtime acceptance.

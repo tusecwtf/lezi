@@ -10,6 +10,7 @@ final class OfflinePeeModel: ObservableObject {
     @Published private(set) var babies: [OfflineBaby] = []
     @Published private(set) var selected: OfflineContext?
     @Published private(set) var records: [OfflineRecord] = []
+    @Published private(set) var localActorUUID: UUID?
     @Published private(set) var sleeps: [UUID: OfflineSleep] = [:]
     @Published private(set) var latestOpenSleepClientUUID: UUID?
     @Published private(set) var nextCursor: OfflineRecordCursor?
@@ -31,6 +32,7 @@ final class OfflinePeeModel: ObservableObject {
 
     struct Snapshot: Sendable {
         let babies: [OfflineBaby]
+        let localActorUUID: UUID
         let context: OfflineContext?
         let page: OfflineSleepPage?
         let milkRecent: [RecordType: [Int]]
@@ -46,9 +48,11 @@ final class OfflinePeeModel: ObservableObject {
         let milkRecent: [RecordType: [Int]]
         if let context { milkRecent = try await store.recentMilkAmounts(baby: context.babyClientUUID) }
         else { milkRecent = [:] }
-        return Snapshot(babies: babies, context: context, page: page, milkRecent: milkRecent)
+        let identity = try await store.identity()
+        return Snapshot(babies: babies, localActorUUID: identity.localActorUUID, context: context, page: page, milkRecent: milkRecent)
     }
     private func apply(_ snapshot: Snapshot) {
+        localActorUUID = snapshot.localActorUUID
         milkRecent = snapshot.milkRecent
         babies = snapshot.babies; selected = snapshot.context
         records = snapshot.page?.page.records ?? []; nextCursor = snapshot.page?.page.nextCursor
