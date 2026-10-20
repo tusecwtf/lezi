@@ -2004,11 +2004,14 @@ final class OfflineBabyProfileAcceptanceTests: OfflineAcceptanceSupport {
         revealProfileControl(picker, in: app)
         let formatter = profileDateFormatter()
         let dates = picker.buttons.allElementsBoundByIndex.compactMap { button -> Date? in
-            guard let date = formatter.date(from: button.label),
-                  formatter.string(from: date) == button.label else { return nil }
+            // Run 39414027426's native AX exposes the full date as value;
+            // its label is "日期选择器", unlike the sleep date/time buttons.
+            guard let value = button.value as? String,
+                  let date = formatter.date(from: value),
+                  formatter.string(from: date) == value else { return nil }
             return date
         }
-        guard let date = dates.first, Set(dates).count == 1 else {
+        guard dates.count == 1, let date = dates.first else {
             attachProfileDiagnostics("date-only-compact", in: app)
             XCTFail("The native date-only picker must expose one exact Gregorian calendar date")
             return nil
@@ -2019,7 +2022,7 @@ final class OfflineBabyProfileAcceptanceTests: OfflineAcceptanceSupport {
     private func assertProfileBirthday(_ date: Date, in app: XCUIApplication) {
         let picker = app.datePickers["offline.profile.birthday"]
         let label = profileDateFormatter().string(from: date)
-        waitFor(picker.buttons.matching(NSPredicate(format: "label == %@", label)).firstMatch, "exists == true")
+        waitFor(picker.buttons.matching(NSPredicate(format: "value == %@", label)).firstMatch, "exists == true")
     }
 
     private func chooseProfileBirthday(from original: Date, to target: Date, in app: XCUIApplication) {
@@ -2027,8 +2030,8 @@ final class OfflineBabyProfileAcceptanceTests: OfflineAcceptanceSupport {
         revealProfileControl(picker, in: app)
         let formatter = profileDateFormatter()
         // Date-only does not have the sleep editor's aggregate/date/time
-        // hierarchy. Find its verified full-date label, never a button index.
-        tap(picker.buttons.matching(NSPredicate(format: "label == %@", formatter.string(from: original))).firstMatch)
+        // hierarchy. Find its verified full-date value, never a button index.
+        tap(picker.buttons.matching(NSPredicate(format: "value == %@", formatter.string(from: original))).firstMatch)
         let overlay = app.otherElements
             .containing(.button, identifier: "PopoverDismissRegion")
             .containing(.button, identifier: "DatePicker.Show").firstMatch

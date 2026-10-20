@@ -276,9 +276,19 @@ The full Linux suite passed 333 tests (81 storage, 129 portable presentation,
 IR for the profile view's optional-String actor-method binding thunk. No Apple
 package tests or Simulator stages ran. The four profile binding setters now use
 explicit closures with unchanged values, optional nil handling and model calls.
-Five additional Apple-only model tests make the expected Apple package total
-377; this remains unverified until the repaired head runs. All fifteen Simulator
-cases remain required. The prior fourteen test bodies and shared helpers are unchanged.
+On `dfbfd657`, Apple [39414027426](https://github.com/tusecwtf/lezi/actions/runs/39414027426)
+passed all 377 package tests, Simulator SDK compilation, the unsigned app build
+and clean smoke launch. The unfiltered Simulator suite executed all fifteen
+cases once: the preceding fourteen passed, but the new profile case failed at
+its initial birthday read, before edits. Retained native accessibility evidence
+shows the date-only button's exact Gregorian date in its **value**, with label
+“日期选择器”; the test incorrectly parsed the label. The pending test-only repair
+uses the exact date value for initial read, readback and opening the calendar,
+with a single-date uniqueness check. No profile tail acceptance is claimed yet.
+Android [39414027442](https://github.com/tusecwtf/lezi/actions/runs/39414027442)
+passed 5,910 tests across 816 XML reports, with zero failures/errors/skips.
+All fifteen Simulator cases remain required on the repaired head. The prior
+fourteen test bodies and shared helpers are unchanged.
 The complete serial workflow has a 90-minute budget because the prior fourteen
 UI flows alone took 59.4 minutes, excluding build/boot. No filter/skip/retry added.
 
