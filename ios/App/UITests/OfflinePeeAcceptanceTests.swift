@@ -1568,6 +1568,7 @@ final class OfflineSearchAcceptanceTests: OfflineAcceptanceSupport {
         waitFor(hit, "exists == true AND hittable == true")
         XCTAssertEqual(searchRows(in: app).count, 1)
         tap(hit)
+        attachSearchDiagnostics("first-hit-open", in: app)
         waitFor(noteField(in: app), "value == %@", originalNote)
         // A fresh result opens the same real editor. Merely opening and closing
         // it must neither write nor create an additional record.

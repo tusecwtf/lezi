@@ -194,6 +194,80 @@ final class OfflineSearchModelTests: XCTestCase {
     private func model(_ fixture: SearchFixture) async -> OfflineSearchModel {
         OfflineSearchModel(repository: await fixture.source(), delay: { _ in await Task.yield() })
     }
+    func testIdenticalQueryEchoPreservesFreshResultAndExplicitRetryStillRefreshes() async throws {
+        let revision = searchRevision(), gate = SearchDebounceGate()
+        let hit = searchHit(revision)
+        let fixture = SearchFixture(revision: revision, hits: [hit])
+        let model = OfflineSearchModel(repository: await fixture.source(), delay: { await gate.wait($0) })
+        defer { model.stop() }
+        model.setQuery("search-a_%")
+        try await settle { await gate.durations.count == 1 }
+        await gate.releaseAll()
+        try await settle { model.state.hits == [hit] && !model.state.isSearching }
+        let requestID = model.state.requestID
+        // TextField may echo its unchanged value when focus is removed on a hit tap.
+        model.setQuery("search-a_%")
+        XCTAssertEqual(model.state.requestID, requestID)
+        XCTAssertFalse(model.state.isSearching); XCTAssertFalse(model.state.isReadOnly)
+        let opened = await model.requestOpenRecord(hit)
+        XCTAssertEqual(opened?.hit, hit); XCTAssertNil(model.readOnlyDetail)
+        let queries = await fixture.queries, delays = await gate.durations
+        XCTAssertEqual(queries, ["search-a_%"]); XCTAssertEqual(delays, [200_000_000])
+        model.retry()
+        XCTAssertNotEqual(model.state.requestID, requestID)
+        try await settle { await gate.durations.count == 2 }
+        await gate.releaseAll()
+        try await settle { !model.state.isSearching && !model.state.isReadOnly }
+        let retriedQueries = await fixture.queries
+        XCTAssertEqual(retriedQueries, ["search-a_%", "search-a_%"])
+    }
+    func testIdenticalQueryEchoDoesNotCancelPendingGuardedOpen() async throws {
+        let revision = searchRevision(), hit = searchHit(searchRevision())
+        let original = searchHit(revision)
+        let fixture = SearchFixture(revision: revision, hits: [original]), model = await model(fixture)
+        defer { model.stop() }
+        model.setQuery("尿")
+        try await settle { model.state.hits == [original] && !model.state.isSearching }
+        let requestID = model.state.requestID
+        await fixture.holdNextScope()
+        let opening = Task { await model.requestOpenRecord(original) }
+        try await settle { await fixture.isScopeHeld }
+        model.setQuery("尿")
+        XCTAssertEqual(model.state.requestID, requestID)
+        await fixture.releaseScope()
+        let opened = await opening.value
+        XCTAssertEqual(opened?.hit, original); XCTAssertNil(model.readOnlyDetail)
+        let unknown = await model.requestOpenRecord(hit)
+        XCTAssertNil(unknown)
+    }
+    func testQueryEchoUsesExactUTF16AndStillCorrectsOverLimitInput() async throws {
+        let revision = searchRevision(), hit = searchHit(revision)
+        let fixture = SearchFixture(revision: revision, hits: [hit]), model = await model(fixture)
+        defer { model.stop() }
+        model.setQuery("é")
+        try await settle { model.state.hits == [hit] && !model.state.isSearching }
+        let composedRequest = model.state.requestID
+        model.setQuery("e\u{301}")
+        XCTAssertNotEqual(model.state.requestID, composedRequest)
+        XCTAssertTrue(model.state.hits.isEmpty)
+        XCTAssertTrue(model.state.query.utf16.elementsEqual("e\u{301}".utf16))
+        try await settle { !model.state.isSearching }
+        let long = String(repeating: "😀", count: 101)
+        model.setQuery(long)
+        try await settle { !model.state.isSearching }
+        XCTAssertEqual(model.state.query.unicodeScalars.count, 100)
+        let limitedRequest = model.state.requestID
+        // A raw over-limit value differs from the stored correction and must
+        // still publish the scalar-limited value back to the input binding.
+        model.setQuery(long)
+        XCTAssertNotEqual(model.state.requestID, limitedRequest)
+        XCTAssertEqual(model.state.query.unicodeScalars.count, 100)
+        try await settle { !model.state.isSearching }
+        let correctedRequest = model.state.requestID
+        model.setQuery(model.state.query)
+        XCTAssertEqual(model.state.requestID, correctedRequest)
+        XCTAssertFalse(model.state.isSearching)
+    }
     func testTwoHundredMillisecondDebounceAndLateNonCooperativeQueryCannotPaint() async throws {
         let revision = searchRevision(), gate = SearchDebounceGate()
         let first = searchHit(revision, note: "第一条"), second = searchHit(revision, note: "第二条")

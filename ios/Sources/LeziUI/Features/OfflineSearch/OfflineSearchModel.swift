@@ -50,6 +50,11 @@ final class OfflineSearchModel {
         openAttemptID = nil; isDebouncing = false; state.suspend()
     }
     func setQuery(_ value: String) {
+        // Focus changes can echo the current TextField value. They are not a
+        // query change or explicit retry and must not invalidate a guarded open.
+        // Compare raw UTF-16 so canonical differences and over-limit corrections
+        // still take the normal query-change path.
+        guard !value.utf16.elementsEqual(state.query.utf16) else { return }
         operation?.cancel(); openAttemptID = nil; readOnlyDetail = nil; concealedDetail = nil
         guard let request = state.setQuery(value) else { isDebouncing = false; return }
         launch(request, debounced: true)

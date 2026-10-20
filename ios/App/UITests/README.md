@@ -306,13 +306,22 @@ unsupported or stale hits expose genuinely read-only details. Only successful
 commits invalidate queries. No novel date/category filters, timeline rail,
 family authority, schema, server or media changes are included.
 
-The complete Linux suite passed 301 tests (69 storage, 115 portable presentation,
-92 domain, 25 core). On search head `a6fdc3c4`, Apple CI stopped during macOS
-package compilation because the new navigation-bar toolbar modifier is iOS-only;
-no Apple package tests or Simulator acceptance ran. Both call sites now compile
-that unchanged modifier only on iOS. Expected Apple 340 package tests and fourteen
-real-store UI flows remain unverified until the repaired head completes CI.
-Existing thirteen UI bodies/helpers are unchanged. The new case covers a raw-key suffix non-match, English alias,
+On search head `4ddf6328`, Apple package compilation, all 340 package tests,
+iOS SDK compilation and the unsigned build passed. All fourteen UI cases ran;
+the original thirteen passed, but search's first guarded reopen showed a stale
+read-only detail instead of the editor. The pre-tap accessibility label was
+editable. An unchanged TextField value echoed on focus loss is consistent with
+this transition, though the callback itself was not captured. Exact raw UTF-16
+query echoes now leave pending reads, guarded opens and retained details intact;
+explicit retry, actual query changes and all scope/revision checks are unchanged.
+Three new model regressions cover fresh/pending opens, retry, canonical differences
+and over-limit input correction. A diagnostic attachment follows the first hit tap.
+The complete repaired Linux suite passes 304 tests (69 storage, 118 portable
+presentation, 92 domain, 25 core). All three new regressions failed before the
+fix and pass afterward. The repaired head still requires the expected 343 Apple
+package tests and complete fourteen-flow Simulator rerun; no UI assertions,
+filters or skips were weakened. Existing
+thirteen UI bodies/helpers are unchanged. The new case covers a raw-key suffix non-match, English alias,
 literal percent/underscore, UUID-preserving open/cancel/edit, committed refresh,
 delete cancellation/confirmation, two-baby isolation and relaunch. The complete
 serial scheme keeps its 75-minute budget with no skip/filter/retry.
