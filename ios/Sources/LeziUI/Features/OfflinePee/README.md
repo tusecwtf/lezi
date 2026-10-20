@@ -312,3 +312,22 @@ SQLite restart/rename/delete/history editing/cross-definition refusal. Five
 Apple-only model tests cover catalog CRUD/reorder/restart, rollback/duplicate
 save/discard, read-failure retention, session-bound close versus cancel-edit, and record original-baby/rename/delete-history/rollback behavior.
 These and the tenth UI acceptance remain pending Apple SDK/runtime validation.
+
+
+## Wake-observation correction and withdrawal
+
+A dedicated observation route lists legal visible evidence and supports local
+actor correction and direct withdrawal. Every write captures both parent sleep
+and wake revisions; it never changes parent identity or creates a replacement
+wake. Correction uses the original local date with HH:mm, including Java SMART
+24:00 and gap/overlap behavior, and an independent uncapped note. Unrepresentable
+native dates fail closed rather than silently acquiring a fabricated date;
+explicit withdrawal remains available. These are local actor/dirty rules, not
+family membership or Owner permission.
+
+Withdrawn evidence remains stored but disappears from actionable observations.
+There is no restore/history entry, effective-observation selector or media UI.
+The model preserves dirty drafts on cancellation/error, guards duplicate and
+stale callbacks, and distinguishes COMMIT success from subsequent read failure.
+The portable suite passes 251 tests; four new Apple-only model tests and the
+thirteenth real Simulator flow still require current-head Apple validation.

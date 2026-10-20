@@ -169,3 +169,30 @@ See [the parity specification](../../docs/spec/ios-parity.md) and
 [the package README](../README.md) for open work. The
 [sync-adapter design](../../docs/spec/ios-sync-adapter.md) remains a proposal;
 server release compatibility policy has not been decided or implemented.
+
+## Wake-observation continuation (Apple validation pending)
+
+The preceding `a0874310` checkpoint passed Android [39368766299](https://github.com/tusecwtf/lezi/actions/runs/39368766299)
+(5,910 tests, zero failures/errors/skips) and Apple [39368766367](https://github.com/tusecwtf/lezi/actions/runs/39368766367)
+(255 package tests and all twelve UI flows once). Its completed-sleep flow
+actually traversed January 2026 → December 2025 → January 2026 and completed
+save/edit/delete/relaunch. That verified result supersedes the earlier pending
+calendar status above, but does not validate this subsequent observation slice.
+
+This next bounded slice exposes legal visible wake observations, original-date
+HH:mm correction with an independent wake note, and direct withdrawal. Parent
+sleep and wake revisions are both mandatory transactional compare-and-swap
+inputs. Withdrawal retains evidence and may reopen the sleep; it is not deletion
+or restoration. No restore/history entry, effective-observation selector, media,
+family permissions or network adapter is introduced. Durable-local-actor editing
+is an offline adaptation, not proof of family membership or owner authority.
+
+The thirteenth actual-store Simulator flow preserves the existing twelve cases.
+The complete Linux package suite passed 251 tests (57 storage, 96 portable
+presentation, 73 domain, 25 core). Four additional Apple-only model tests
+bring the expected Apple total to 289; this is not an observed result.
+Apple compilation and execution for this new slice remain pending. The serial
+workflow budget is 75 minutes because the preceding twelve-flow suite took
+46.8 minutes excluding build/boot; no filters, skips or retries were introduced.
+Full product parity, mixed-client synchronization, signing and physical-device
+acceptance remain incomplete. The PR stays draft and must not merge.

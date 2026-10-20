@@ -102,16 +102,16 @@ final class OfflineSleepTests: XCTestCase, @unchecked Sendable {
         let selected = try await store.selectEffectiveWake(later.clientUUID, sleepClientUUID: d.clientUUID, context: c, expectedUpdatedAt: saved.record.updatedAt)
         XCTAssertEqual(selected.interval.endSource, .effective); XCTAssertEqual(selected.interval.endTimestamp, 250)
         XCTAssertEqual(selected.record.updatedAt, 1001)
-        let withdrawn = try await store.withdrawWake(later.clientUUID, sleepClientUUID: d.clientUUID, context: c, expectedUpdatedAt: later.updatedAt)
+        let withdrawn = try await store.withdrawWake(later.clientUUID, sleepClientUUID: d.clientUUID, context: c, expectedUpdatedAt: later.updatedAt, expectedSleepUpdatedAt: selected.record.updatedAt)
         XCTAssertTrue(withdrawn.withdrawn); XCTAssertNil(withdrawn.deletedAt)
         let fallback = try await store.sleepDetails(d.clientUUID)
         XCTAssertNil(fallback?.record.effectiveWakeObservationClientUUID)
         XCTAssertEqual(fallback?.interval.endTimestamp, 200); XCTAssertEqual(fallback?.record.updatedAt, 1002)
-        _ = try await store.withdrawWake(w.clientUUID, sleepClientUUID: d.clientUUID, context: c, expectedUpdatedAt: w.updatedAt)
+        _ = try await store.withdrawWake(w.clientUUID, sleepClientUUID: d.clientUUID, context: c, expectedUpdatedAt: w.updatedAt, expectedSleepUpdatedAt: try XCTUnwrap(fallback).record.updatedAt)
         let opened = try await store.sleepDetails(d.clientUUID); XCTAssertEqual(opened?.interval.isOpen, true)
-        let restored = try await store.updateWake(wake(c, sleep: d.clientUUID, id: later.clientUUID, time: 300), context: c, expectedUpdatedAt: withdrawn.updatedAt)
+        let restored = try await store.updateWake(wake(c, sleep: d.clientUUID, id: later.clientUUID, time: 300), context: c, expectedUpdatedAt: withdrawn.updatedAt, expectedSleepUpdatedAt: try XCTUnwrap(opened).record.updatedAt)
         XCTAssertFalse(restored.withdrawn); XCTAssertEqual(restored.updatedAt, 1002)
-        do { _ = try await store.updateWake(wake(c, sleep: d.clientUUID, id: later.clientUUID), context: c, expectedUpdatedAt: withdrawn.updatedAt); XCTFail() }
+        do { _ = try await store.updateWake(wake(c, sleep: d.clientUUID, id: later.clientUUID), context: c, expectedUpdatedAt: withdrawn.updatedAt, expectedSleepUpdatedAt: try XCTUnwrap(opened).record.updatedAt); XCTFail() }
         catch { XCTAssertEqual(error as? OfflineStoreError, .staleEdit) }
     }
     func testCompletedEditAndWithdrawalCommitFailurePreserveBothRoots() async throws {
@@ -136,11 +136,11 @@ final class OfflineSleepTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(edited.interval.startTimestamp, 110); XCTAssertEqual(edited.interval.endTimestamp, 250)
         let selected = try await store.selectEffectiveWake(w.clientUUID, sleepClientUUID: d.clientUUID, context: c, expectedUpdatedAt: edited.record.updatedAt)
         try db.execute("CREATE TRIGGER fail_wake_update AFTER UPDATE ON wake_observations BEGIN INSERT INTO commit_guard VALUES (1); END")
-        do { _ = try await store.withdrawWake(w.clientUUID, sleepClientUUID: d.clientUUID, context: c, expectedUpdatedAt: 1001); XCTFail() }
+        do { _ = try await store.withdrawWake(w.clientUUID, sleepClientUUID: d.clientUUID, context: c, expectedUpdatedAt: 1001, expectedSleepUpdatedAt: selected.record.updatedAt); XCTFail() }
         catch { XCTAssertNotNil(error as? OfflineStoreError) }
         let preserved = try await store.sleepDetails(d.clientUUID); XCTAssertEqual(preserved, selected)
         try db.execute("DROP TRIGGER fail_wake_update")
-        _ = try await store.withdrawWake(w.clientUUID, sleepClientUUID: d.clientUUID, context: c, expectedUpdatedAt: 1001)
+        _ = try await store.withdrawWake(w.clientUUID, sleepClientUUID: d.clientUUID, context: c, expectedUpdatedAt: 1001, expectedSleepUpdatedAt: selected.record.updatedAt)
         let reopened = try OfflineStore(path: file)
         let final = try await reopened.sleepDetails(d.clientUUID)
         XCTAssertEqual(final?.interval.isOpen, true); XCTAssertNil(final?.record.effectiveWakeObservationClientUUID)
@@ -151,7 +151,7 @@ final class OfflineSleepTests: XCTestCase, @unchecked Sendable {
         let saved = try await store.recordCompletedSleep(d, context: c); let w = saved.observations[0]
         let db = try SQLiteConnection(path: file)
         try db.execute("UPDATE wake_observations SET local_observer_uuid=?", [.text(UUID().uuidString)])
-        do { _ = try await store.withdrawWake(w.clientUUID, sleepClientUUID: d.clientUUID, context: c, expectedUpdatedAt: w.updatedAt); XCTFail() }
+        do { _ = try await store.withdrawWake(w.clientUUID, sleepClientUUID: d.clientUUID, context: c, expectedUpdatedAt: w.updatedAt, expectedSleepUpdatedAt: saved.record.updatedAt); XCTFail() }
         catch { XCTAssertEqual(error as? OfflineStoreError, .wakePermission) }
         let identity = try await store.identity()
         try db.execute("UPDATE wake_observations SET local_observer_uuid=?,updated_at=?", [.text(identity.localActorUUID.uuidString), .int(Int64.max)])
@@ -203,7 +203,7 @@ final class OfflineSleepTests: XCTestCase, @unchecked Sendable {
         catch { XCTAssertEqual(error as? OfflineStoreError, .identityConflict) }
         let db = try SQLiteConnection(path: file)
         try db.execute("UPDATE wake_observations SET sync_dirty=0 WHERE uuid=?", [.text(low.uuidString)])
-        do { _ = try await store.updateWake(wake(c, sleep: d.clientUUID, id: low), context: c, expectedUpdatedAt: lower.updatedAt); XCTFail() }
+        do { _ = try await store.updateWake(wake(c, sleep: d.clientUUID, id: low), context: c, expectedUpdatedAt: lower.updatedAt, expectedSleepUpdatedAt: cleared.record.updatedAt); XCTFail() }
         catch { XCTAssertEqual(error as? OfflineStoreError, .wakePermission) }
     }
 

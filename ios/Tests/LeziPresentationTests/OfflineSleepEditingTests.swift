@@ -71,7 +71,8 @@ final class OfflineSleepEditingStateTests: XCTestCase {
             state.edit(note: "旧草稿")
             if changeWake {
                 _ = try await store.updateWake(.init(clientUUID: wake.clientUUID, sleepClientUUID: sleep.record.clientUUID,
-                    babyClientUUID: context.babyClientUUID, timestampMillis: 250, note: "新版观察"), context: context, expectedUpdatedAt: wake.updatedAt)
+                    babyClientUUID: context.babyClientUUID, timestampMillis: 250, note: "新版观察"), context: context,
+                    expectedUpdatedAt: wake.updatedAt, expectedSleepUpdatedAt: sleep.record.updatedAt)
             } else {
                 _ = try await store.selectEffectiveWake(wake.clientUUID, sleepClientUUID: sleep.record.clientUUID,
                     context: context, expectedUpdatedAt: sleep.record.updatedAt)
@@ -202,7 +203,8 @@ final class OfflineSleepEditingModelTests: XCTestCase {
         model.edit(note: "旧草稿")
         let wake = sleep.observations[0]
         _ = try await store.updateWake(.init(clientUUID: wake.clientUUID, sleepClientUUID: sleep.record.clientUUID,
-            babyClientUUID: baby.clientUUID, timestampMillis: 250, note: "新观察"), context: context, expectedUpdatedAt: wake.updatedAt)
+            babyClientUUID: baby.clientUUID, timestampMillis: 250, note: "新观察"), context: context,
+            expectedUpdatedAt: wake.updatedAt, expectedSleepUpdatedAt: sleep.record.updatedAt)
         model.confirm(now: 1000); try await settle { model.editor?.error != nil }
         XCTAssertEqual(model.editor?.note, "旧草稿"); XCTAssertNil(model.completion)
         model.close(); model.cancelDiscard(); XCTAssertNotNil(model.editor)

@@ -1,8 +1,8 @@
 # Offline Simulator acceptance
 
-The twelve `Offline*AcceptanceTests` classes in `OfflinePeeAcceptanceTests.swift` exercise the actual `LeziDevelopment` application
+The thirteen `Offline*AcceptanceTests` classes in `OfflinePeeAcceptanceTests.swift` exercise the actual `LeziDevelopment` application
 and its ordinary file-backed SQLite store. Run on a fresh, ephemeral Simulator
-sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, `UI-Daily-003`, `UI-Health-004`, `UI-Growth-005`, `UI-Milk-006`, `UI-Temperature-007`, `UI-Food-008`, `UI-Nursing-009`, `UI-Custom-010`, `UI-Sleep-011`, and `UI-Sleep-012` names are
+sandbox with synthetic data only. The deterministic `UI-Offline-001`, `UI-Diaper-002`, `UI-Daily-003`, `UI-Health-004`, `UI-Growth-005`, `UI-Milk-006`, `UI-Temperature-007`, `UI-Food-008`, `UI-Nursing-009`, `UI-Custom-010`, `UI-Sleep-011`, `UI-Sleep-012`, and `UI-Wake-013` names are
 unique in that fresh sandbox, one per test. Reusing an already-tested sandbox intentionally
 fails rather than deleting or modifying existing records to make the test pass.
 No special app launch arguments, fake stores, reset paths, or network are used.
@@ -249,3 +249,30 @@ history position. The top-control reveal is syntax-checked on Linux and awaits
 Apple execution; that run did not pass the complete Food or Sleep flows.
 The velocity/endpoint-hold API is documented by Apple for Xcode 16.3 onward;
 the diagnostic run used Xcode 16.4.
+
+## Wake-observation continuation (Apple validation pending)
+
+The preceding `a0874310` checkpoint passed Android [39368766299](https://github.com/tusecwtf/lezi/actions/runs/39368766299)
+(5,910 tests, zero failures/errors/skips) and Apple [39368766367](https://github.com/tusecwtf/lezi/actions/runs/39368766367)
+(255 package tests and all twelve UI flows once). Its completed-sleep flow
+actually traversed January 2026 → December 2025 → January 2026 and completed
+save/edit/delete/relaunch. That verified result supersedes the earlier pending
+calendar status above, but does not validate this subsequent observation slice.
+
+This next bounded slice exposes legal visible wake observations, original-date
+HH:mm correction with an independent wake note, and direct withdrawal. Parent
+sleep and wake revisions are both mandatory transactional compare-and-swap
+inputs. Withdrawal retains evidence and may reopen the sleep; it is not deletion
+or restoration. No restore/history entry, effective-observation selector, media,
+family permissions or network adapter is introduced. Durable-local-actor editing
+is an offline adaptation, not proof of family membership or owner authority.
+
+The thirteenth actual-store Simulator flow preserves the existing twelve cases.
+The complete Linux package suite passed 251 tests (57 storage, 96 portable
+presentation, 73 domain, 25 core). Four additional Apple-only model tests
+bring the expected Apple total to 289; this is not an observed result.
+Apple compilation and execution for this new slice remain pending. The serial
+workflow budget is 75 minutes because the preceding twelve-flow suite took
+46.8 minutes excluding build/boot; no filters, skips or retries were introduced.
+Full product parity, mixed-client synchronization, signing and physical-device
+acceptance remain incomplete. The PR stays draft and must not merge.

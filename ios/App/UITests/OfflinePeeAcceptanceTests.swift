@@ -1231,6 +1231,298 @@ final class OfflineCompletedSleepAcceptanceTests: OfflineAcceptanceSupport {
     }
 }
 
+@MainActor
+final class OfflineWakeObservationAcceptanceTests: OfflineAcceptanceSupport {
+    func testWakeCorrectionAndWithdrawalPreserveOriginalSleepAcrossRelaunch() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let babyName = "UI-Wake-013"
+        let sleepNote = "ui-observed-sleep"
+        let originalWakeNote = "ui-original-wake"
+        let cancelledWakeNote = "ui-cancelled-wake"
+        // Android's observation correction has no ordinary-record 200-unit cap.
+        // Narrow letters keep this real, greater-than-200-unit input readable.
+        let correctedWakeNote = "ui-corrected-wake-" + String(repeating: "i", count: 190)
+        XCTAssertGreaterThan(correctedWakeNote.utf16.count, 200)
+        app.launch()
+        tap(app.buttons["offline.baby.new"])
+        let nickname = app.textFields["offline.baby.nickname"]
+        tap(nickname)
+        nickname.typeText(babyName)
+        tap(app.buttons["offline.baby.create"])
+        waitFor(app.staticTexts["offline.result"], "label == %@", "已在本机创建宝宝：\(babyName)")
+        waitFor(app.buttons["offline.pee.new"], "exists == true AND enabled == true AND hittable == true")
+        tap(app.buttons["offline.baby.new"])
+        assertSelectedBaby(app, name: babyName)
+        assertEmptyHistory(app)
+
+        // Create both facts through their real forms, not fixtures or storage
+        // injection. Put the wake on a past day distinct from the start and today,
+        // so an HH:mm correction cannot accidentally pass by using either date.
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        tap(app.buttons["offline.sleep.start"])
+        guard let initialStartDay = capturedSleepPickerDay(calendar: calendar, in: app) else { return }
+        let startDay = calendar.date(byAdding: .day, value: -2, to: initialStartDay)!
+        let wakeDay = calendar.date(byAdding: .day, value: 1, to: startDay)!
+        chooseSleepCalendarDay("offline.sleep.time", from: initialStartDay, to: startDay, in: app)
+        let startDisplay = app.datePickers["offline.sleep.time"].buttons.element(boundBy: 0).value as? String ?? ""
+        XCTAssertFalse(startDisplay.isEmpty)
+        enterSleepNote(sleepNote, in: app)
+        confirmSleep(in: app, message: "已保存本机睡下记录")
+        let sleepRow = diaperRow(in: app, note: sleepNote)
+        waitFor(sleepRow, "exists == true")
+        let sleepRowID = sleepRow.identifier
+        waitFor(sleepRow.staticTexts["offline.record.sleep.status"], "label == %@", "睡眠开放")
+        revealHistoryControl(app.buttons["offline.sleep.wake"], paddingRow: sleepRow, in: app)
+        tap(app.buttons["offline.sleep.wake"])
+        guard let initialWakeDay = capturedSleepPickerDay(calendar: calendar, in: app) else { return }
+        chooseSleepCalendarDay("offline.sleep.time", from: initialWakeDay, to: wakeDay, in: app)
+        enterSleepNote(originalWakeNote, in: app)
+        confirmSleep(in: app, message: "已保存本机醒来观察")
+        waitFor(sleepRow.staticTexts["offline.record.sleep.status"], "label == %@", "暂定")
+        waitFor(sleepRow.staticTexts["offline.record.sleep.wake"], "exists == true")
+        let wakeID = sleepRow.staticTexts["offline.record.sleep.wake"].value as? String ?? ""
+        XCTAssertNotNil(UUID(uuidString: wakeID))
+        XCTAssertNotEqual(wakeID, String(sleepRowID.dropFirst("offline.record.row.".count)))
+        waitFor(sleepRow.staticTexts["offline.record.sleep.wake.note"], "label == %@", originalWakeNote)
+        waitFor(sleepRow.staticTexts["offline.record.sleep.end"], "exists == true")
+        waitFor(sleepRow.staticTexts["offline.record.sleep.duration"], "label MATCHES %@", "时长 [0-9]+ 分钟")
+        let originalEnd = sleepRow.staticTexts["offline.record.sleep.end"].label
+        let originalDuration = sleepRow.staticTexts["offline.record.sleep.duration"].label
+        waitFor(app.buttons["offline.sleep.start"], "enabled == true")
+        waitFor(app.buttons["offline.sleep.wake"], "enabled == false")
+
+        openWakeObservations(sleepRowID: sleepRowID, in: app)
+        let wakeRow = app.otherElements["offline.wake.row.\(wakeID)"]
+        waitFor(wakeRow, "exists == true")
+        XCTAssertEqual(legalWakeRows(in: app).count, 1)
+        waitFor(wakeRow.staticTexts["offline.wake.note"], "label == %@", originalWakeNote)
+        waitFor(wakeRow.staticTexts["offline.wake.time"], "label MATCHES %@", "[0-2][0-9]:[0-5][0-9]")
+        let originalTime = wakeRow.staticTexts["offline.wake.time"].label
+        let wakeDateParts = calendar.dateComponents([.year, .month, .day], from: wakeDay)
+        let expectedWakeDate = String(format: "%04d-%02d-%02d",
+                                      wakeDateParts.year!, wakeDateParts.month!, wakeDateParts.day!)
+        waitFor(wakeRow.staticTexts["offline.wake.date"], "value == %@", expectedWakeDate)
+        let originalDate = wakeRow.staticTexts["offline.wake.date"].label
+        XCTAssertFalse(originalDate.isEmpty)
+        let correctedTime = originalTime == "00:00" ? "12:00" : "00:00"
+
+        tap(wakeRow.buttons["offline.wake.edit"])
+        replaceWakeEditorField("offline.wake.editor.time", oldValue: originalTime, newValue: "25:61", in: app)
+        waitFor(app.buttons["offline.wake.editor.confirm"], "exists == true AND enabled == false")
+        waitFor(app.staticTexts["offline.wake.editor.error"], "label == %@", "时间请填写为 HH:mm")
+        waitFor(healthField("offline.wake.editor.time", in: app), "value == %@", "25:61")
+        replaceWakeEditorField("offline.wake.editor.note", oldValue: originalWakeNote, newValue: cancelledWakeNote, in: app)
+        tap(app.buttons["offline.wake.editor.close"])
+        tap(app.buttons["offline.wake.discard.keep"])
+        waitFor(healthField("offline.wake.editor.time", in: app), "value == %@", "25:61")
+        waitFor(healthField("offline.wake.editor.note", in: app), "value == %@", cancelledWakeNote)
+        tap(app.buttons["offline.wake.editor.close"])
+        tap(app.buttons["offline.wake.discard.confirm"])
+        waitFor(healthField("offline.wake.editor.time", in: app), "exists == false")
+        waitFor(wakeRow.staticTexts["offline.wake.time"], "label == %@", originalTime)
+        waitFor(wakeRow.staticTexts["offline.wake.date"], "label == %@", originalDate)
+        waitFor(wakeRow.staticTexts["offline.wake.date"], "value == %@", expectedWakeDate)
+        waitFor(wakeRow.staticTexts["offline.wake.note"], "label == %@", originalWakeNote)
+        closeWakeObservations(in: app)
+        assertCompletedSleep(app.otherElements[sleepRowID], note: sleepNote, wakeNote: originalWakeNote,
+                             wakeID: wakeID, end: originalEnd, duration: originalDuration)
+        // Read SQLite afresh before the valid edit, so cancellation cannot pass
+        // merely because both visible projections retained an old snapshot.
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        assertCompletedSleep(app.otherElements[sleepRowID], note: sleepNote, wakeNote: originalWakeNote,
+                             wakeID: wakeID, end: originalEnd, duration: originalDuration)
+        XCTAssertFalse(app.staticTexts[cancelledWakeNote].exists)
+
+        openWakeObservations(sleepRowID: sleepRowID, in: app)
+        tap(wakeRow.buttons["offline.wake.edit"])
+        waitFor(healthField("offline.wake.editor.note", in: app), "value == %@", originalWakeNote)
+        replaceWakeEditorField("offline.wake.editor.time", oldValue: originalTime, newValue: correctedTime, in: app)
+        replaceWakeEditorField("offline.wake.editor.note", oldValue: originalWakeNote, newValue: correctedWakeNote, in: app)
+        tap(app.buttons["offline.wake.editor.confirm"])
+        waitFor(app.staticTexts["offline.wake.result"], "label == %@", "醒来观察已修正")
+        waitFor(healthField("offline.wake.editor.time", in: app), "exists == false")
+        waitFor(wakeRow.staticTexts["offline.wake.time"], "label == %@", correctedTime)
+        waitFor(wakeRow.staticTexts["offline.wake.date"], "label == %@", originalDate)
+        waitFor(wakeRow.staticTexts["offline.wake.date"], "value == %@", expectedWakeDate)
+        waitFor(wakeRow.staticTexts["offline.wake.note"], "label == %@", correctedWakeNote)
+        waitFor(wakeRow.buttons["offline.wake.edit"], "enabled == true")
+        XCTAssertEqual(legalWakeRows(in: app).count, 1)
+        attachWakeDiagnostics("corrected-original-date", in: app)
+        closeWakeObservations(in: app)
+        // The success message means COMMIT, not host refresh completion. Await
+        // the changed projected note/time before recording values or terminating.
+        waitFor(sleepRow.staticTexts["offline.record.sleep.wake.note"], "label == %@", correctedWakeNote)
+        waitFor(sleepRow.staticTexts["offline.record.sleep.end"], "label != %@", originalEnd)
+        waitFor(sleepRow.staticTexts["offline.record.sleep.duration"], "exists == true AND label != %@", originalDuration)
+        let correctedEnd = sleepRow.staticTexts["offline.record.sleep.end"].label
+        let correctedDuration = sleepRow.staticTexts["offline.record.sleep.duration"].label
+        assertCompletedSleep(sleepRow, note: sleepNote, wakeNote: correctedWakeNote,
+                             wakeID: wakeID, end: correctedEnd, duration: correctedDuration)
+        XCTAssertEqual(app.staticTexts.matching(identifier: "offline.record.sleep.status").count, 1)
+        assertOriginalSleepStart(sleepRowID: sleepRowID, display: startDisplay, note: sleepNote, in: app)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        assertCompletedSleep(app.otherElements[sleepRowID], note: sleepNote, wakeNote: correctedWakeNote,
+                             wakeID: wakeID, end: correctedEnd, duration: correctedDuration)
+        XCTAssertFalse(app.staticTexts[cancelledWakeNote].exists)
+        openWakeObservations(sleepRowID: sleepRowID, in: app)
+        waitFor(wakeRow.staticTexts["offline.wake.time"], "label == %@", correctedTime)
+        waitFor(wakeRow.staticTexts["offline.wake.date"], "label == %@", originalDate)
+        waitFor(wakeRow.staticTexts["offline.wake.date"], "value == %@", expectedWakeDate)
+        waitFor(wakeRow.staticTexts["offline.wake.note"], "label == %@", correctedWakeNote)
+        XCTAssertEqual(legalWakeRows(in: app).count, 1)
+        // Withdrawal is the direct Android action, not sleep deletion or a
+        // newly invented confirmation/restore workflow.
+        tap(wakeRow.buttons["offline.wake.withdraw"])
+        waitFor(app.staticTexts["offline.wake.result"], "label == %@", "醒来观察已撤回")
+        waitFor(wakeRow, "exists == false")
+        waitFor(app.staticTexts["offline.wake.empty"], "label == %@", "尚无醒来观察。")
+        XCTAssertEqual(legalWakeRows(in: app).count, 0)
+        assertNoWakeRestore(in: app)
+        attachWakeDiagnostics("withdrawn-legal-list-empty", in: app)
+        closeWakeObservations(in: app)
+        assertReopenedSleep(sleepRowID: sleepRowID, note: sleepNote, in: app)
+        assertOriginalSleepStart(sleepRowID: sleepRowID, display: startDisplay, note: sleepNote, in: app)
+        // Observe the actual post-withdrawal projection before the final
+        // termination; an asynchronously dispatched reload is not proof.
+        assertReopenedSleep(sleepRowID: sleepRowID, note: sleepNote, in: app)
+
+        relaunch(app)
+        assertSelectedBaby(app, name: babyName)
+        assertReopenedSleep(sleepRowID: sleepRowID, note: sleepNote, in: app)
+        openWakeObservations(sleepRowID: sleepRowID, in: app)
+        waitFor(app.staticTexts["offline.wake.empty"], "label == %@", "尚无醒来观察。")
+        XCTAssertFalse(wakeRow.exists)
+        XCTAssertEqual(legalWakeRows(in: app).count, 0)
+        assertNoWakeRestore(in: app)
+        closeWakeObservations(in: app)
+        assertReopenedSleep(sleepRowID: sleepRowID, note: sleepNote, in: app)
+    }
+
+    private func capturedSleepPickerDay(calendar: Calendar, in app: XCUIApplication) -> Date? {
+        let picker = app.datePickers["offline.sleep.time"]
+        waitFor(picker, "exists == true AND hittable == true")
+        XCTAssertEqual(picker.buttons.count, 3, "Unexpected native compact DatePicker hierarchy")
+        let label = picker.buttons.element(boundBy: 1).label
+        let formatter = sleepCalendarDateFormatter(calendar: calendar)
+        guard let day = formatter.date(from: label), formatter.string(from: day) == label else {
+            attachSleepCalendarDiagnostics("wake-flow-initial-date", in: app)
+            XCTFail("The real native picker must expose its exact Gregorian calendar date")
+            return nil
+        }
+        return day
+    }
+
+    private func legalWakeRows(in app: XCUIApplication) -> XCUIElementQuery {
+        app.otherElements.matching(NSPredicate(format: "identifier BEGINSWITH %@", "offline.wake.row."))
+    }
+
+    private func openWakeObservations(sleepRowID: String, in app: XCUIApplication) {
+        let row = app.otherElements[sleepRowID]
+        let open = row.buttons["offline.sleep.observations.open"]
+        revealHistoryControl(open, paddingRow: row, in: app)
+        tap(open)
+        waitFor(app.buttons["offline.wake.close"], "exists == true AND enabled == true AND hittable == true")
+    }
+
+    private func closeWakeObservations(in app: XCUIApplication) {
+        tap(app.buttons["offline.wake.close"])
+        waitFor(app.buttons["offline.wake.close"], "exists == false")
+    }
+
+    private func assertOriginalSleepStart(sleepRowID: String, display: String, note: String, in app: XCUIApplication) {
+        let row = app.otherElements[sleepRowID]
+        let edit = row.buttons["offline.sleep.edit.start"]
+        revealHistoryControl(edit, paddingRow: row, in: app)
+        tap(edit)
+        waitFor(app.datePickers["offline.sleep.time"].buttons.element(boundBy: 0), "value == %@", display)
+        waitFor(healthField("offline.sleep.note", in: app), "value == %@", note)
+        XCTAssertFalse(app.datePickers["offline.sleep.end"].exists)
+        tap(app.buttons["offline.sleep.close"])
+        waitFor(healthField("offline.sleep.note", in: app), "exists == false")
+    }
+
+    private func assertReopenedSleep(sleepRowID: String, note: String, in app: XCUIApplication) {
+        let row = app.otherElements[sleepRowID]
+        waitFor(row, "exists == true")
+        waitFor(row.staticTexts["offline.record.kind"], "label == %@", "睡眠")
+        waitFor(row.staticTexts["offline.record.sleep.status"], "label == %@", "睡眠开放")
+        waitFor(row.staticTexts["offline.record.note"], "label == %@", note)
+        XCTAssertFalse(row.staticTexts["offline.record.sleep.wake"].exists)
+        XCTAssertFalse(row.staticTexts["offline.record.sleep.wake.note"].exists)
+        XCTAssertFalse(row.staticTexts["offline.record.sleep.end"].exists)
+        XCTAssertFalse(row.staticTexts["offline.record.sleep.duration"].exists)
+        XCTAssertFalse(row.buttons["offline.sleep.edit.completed"].exists)
+        XCTAssertEqual(app.staticTexts.matching(identifier: "offline.record.sleep.status").count, 1)
+        waitFor(app.buttons["offline.sleep.start"], "enabled == false")
+        waitFor(app.buttons["offline.sleep.wake"], "enabled == true")
+        assertNoWakeRestore(in: app)
+    }
+
+    private func assertNoWakeRestore(in app: XCUIApplication) {
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND identifier CONTAINS[c] %@",
+                                                        "offline.wake.", "restore")).count, 0)
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "恢复")).count, 0)
+    }
+
+    private func replaceWakeEditorField(_ identifier: String, oldValue: String, newValue: String, in app: XCUIApplication) {
+        let field = healthField(identifier, in: app)
+        waitFor(field, "value == %@", oldValue)
+        let scroll = app.scrollViews.containing(.any, identifier: "offline.wake.editor.note").firstMatch
+        waitFor(scroll, "exists == true")
+        let viewport = scroll.frame.intersection(app.frame)
+        let top = viewport.minY
+        let bottom = min(viewport.maxY, app.buttons["offline.wake.editor.confirm"].frame.minY,
+                         app.keyboards.firstMatch.exists ? app.keyboards.firstMatch.frame.minY : app.frame.maxY) - 8
+        let target = field.frame
+        if target.minY < top || target.maxY > bottom {
+            let padding = target.minX - viewport.minX
+            guard padding >= 8, bottom - top > target.height + 32 else {
+                XCTFail("Wake editor has no measured unobscured padding track for \(identifier)")
+                return
+            }
+            let up = target.maxY > bottom
+            let distance = up ? target.maxY - bottom + 8 : top - target.minY + 8
+            let startY = up ? bottom - 8 : top + 8
+            let endY = startY + (up ? -distance : distance)
+            let origin = scroll.coordinate(withNormalizedOffset: .zero)
+            origin.withOffset(CGVector(dx: padding / 2, dy: startY - scroll.frame.minY))
+                .press(forDuration: 0.1,
+                       thenDragTo: origin.withOffset(CGVector(dx: padding / 2, dy: endY - scroll.frame.minY)),
+                       withVelocity: .slow, thenHoldForDuration: 0.2)
+        }
+        let visible = NSPredicate { _, _ in
+            let currentBottom = min(scroll.frame.maxY, app.buttons["offline.wake.editor.confirm"].frame.minY,
+                                    app.keyboards.firstMatch.exists ? app.keyboards.firstMatch.frame.minY : app.frame.maxY)
+            return field.isHittable && field.frame.minY >= scroll.frame.minY && field.frame.maxY <= currentBottom
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: visible, object: field)], timeout: 15), .completed,
+                       "Wake input must be fully visible above the footer and keyboard")
+        // All replaced old values fit one line. Do not depend on localized
+        // Select All menus or change the Simulator's keyboard/app language.
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: identifier.hasSuffix(".note") ? 0.1 : 0.5)).tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: oldValue.count) + newValue)
+        waitFor(field, "value == %@", newValue)
+    }
+
+    private func attachWakeDiagnostics(_ name: String, in app: XCUIApplication) {
+        XCTContext.runActivity(named: "Wake observation: \(name)") { activity in
+            let tree = XCTAttachment(string: app.debugDescription)
+            tree.name = "\(name)-accessibility"
+            tree.lifetime = .keepAlways
+            activity.add(tree)
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = "\(name)-screen"
+            screenshot.lifetime = .keepAlways
+            activity.add(screenshot)
+        }
+    }
+}
+
 /// Shared UI operations only: no test methods to inherit or execute twice.
 @MainActor
 class OfflineAcceptanceSupport: XCTestCase {

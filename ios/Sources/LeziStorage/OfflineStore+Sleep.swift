@@ -102,12 +102,16 @@ extension OfflineStore {
         }
     }
 
-    public func updateWake(_ draft: OfflineWakeDraft, context: OfflineContext, expectedUpdatedAt: Int64) throws -> OfflineWakeObservation {
+    /// Both revisions come from the captured editor snapshot; neither root may
+    /// have changed before this independent observation is edited.
+    public func updateWake(_ draft: OfflineWakeDraft, context: OfflineContext, expectedUpdatedAt: Int64,
+                           expectedSleepUpdatedAt: Int64) throws -> OfflineWakeObservation {
         let now = clock()
         guard RecordTime.pointError(timestamp: draft.timestampMillis, now: now) == nil else { throw OfflineStoreError.invalidDraft }
         return try db.transaction {
             try requireSleepContext(context, baby: draft.babyClientUUID)
             let sleep = try requireSleep(draft.sleepClientUUID, baby: context.babyClientUUID)
+            guard sleep.updatedAt == expectedSleepUpdatedAt else { throw OfflineStoreError.staleEdit }
             let old = try requireEditableWake(draft.clientUUID, sleep: sleep.clientUUID, expectedUpdatedAt: expectedUpdatedAt)
             guard SleepProjection.validateWakeTimestamp(sleepStart: sleep.timestampMillis, wake: draft.timestampMillis) == nil else { throw OfflineStoreError.invalidDraft }
             try updateWakeRow(old.clientUUID, timestamp: draft.timestampMillis, note: draft.note,
@@ -119,11 +123,14 @@ extension OfflineStore {
 
     /// Withdrawal retains evidence and may deliberately reopen sleep. If selected,
     /// clearing the effective pointer and withdrawing the wake commit together.
-    public func withdrawWake(_ id: UUID, sleepClientUUID: UUID, context: OfflineContext, expectedUpdatedAt: Int64) throws -> OfflineWakeObservation {
+    /// Both the wake and parent sleep must still match their captured revisions.
+    public func withdrawWake(_ id: UUID, sleepClientUUID: UUID, context: OfflineContext, expectedUpdatedAt: Int64,
+                             expectedSleepUpdatedAt: Int64) throws -> OfflineWakeObservation {
         let now = clock()
         return try db.transaction {
             try requireSleepContext(context, baby: context.babyClientUUID)
             let sleep = try requireSleep(sleepClientUUID, baby: context.babyClientUUID)
+            guard sleep.updatedAt == expectedSleepUpdatedAt else { throw OfflineStoreError.staleEdit }
             let old = try requireEditableWake(id, sleep: sleep.clientUUID, expectedUpdatedAt: expectedUpdatedAt)
             let revision = try Self.nextRevision(after: old.updatedAt, now: now)
             try db.execute("UPDATE wake_observations SET withdrawn=1,updated_at=?,sync_dirty=1 WHERE uuid=?", [.int(revision), .text(id.uuidString)])

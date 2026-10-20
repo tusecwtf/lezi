@@ -10,6 +10,7 @@ public struct OfflinePeeView: View {
     @Environment(\.leziTheme) private var theme
     @StateObject private var model: OfflinePeeModel
     @StateObject private var sleep: OfflineSleepModel
+    @StateObject private var wakes: OfflineWakeObservationModel
     @StateObject private var catalog: OfflineCustomCatalogModel
     @State private var nickname = ""
     @State private var birthday = Date()
@@ -21,6 +22,7 @@ public struct OfflinePeeView: View {
     public init(store: OfflineStore) {
         _model = StateObject(wrappedValue: OfflinePeeModel(store: store))
         _sleep = StateObject(wrappedValue: OfflineSleepModel(store: store))
+        _wakes = StateObject(wrappedValue: OfflineWakeObservationModel(store: store))
         _catalog = StateObject(wrappedValue: OfflineCustomCatalogModel(store: store))
     }
 
@@ -31,6 +33,9 @@ public struct OfflinePeeView: View {
             if let message = model.message { LeziText(message).accessibilityIdentifier("offline.result") }
             babySelection
             if let message = sleep.message { LeziText(message).accessibilityIdentifier("offline.sleep.result") }
+            if wakes.details == nil, let message = wakes.message {
+                LeziText(message).accessibilityIdentifier("offline.wake.result")
+            }
             ScrollView {
                 VStack(alignment: .leading, spacing: theme.density.sectionGap) {
                         Button(creatingBaby ? "收起新建宝宝" : "新建宝宝") { creatingBaby.toggle() }
@@ -48,9 +53,11 @@ public struct OfflinePeeView: View {
             }
         }
         .padding(theme.pageInset)
-        .disabled(sleep.busy)
+        .disabled(sleep.busy || wakes.busy)
         .sheet(isPresented: Binding(get: { sheetRoute != nil }, set: { if !$0 { dismissSheet() } })) {
-            if sheetRoute == .sleep {
+            if sheetRoute == .wakeObservations {
+                OfflineWakeObservationView(model: wakes)
+            } else if sheetRoute == .sleep {
                 OfflineSleepEditor(model: sleep)
             } else if let editor = model.editor {
                 VStack(spacing: 0) {
@@ -89,14 +96,17 @@ public struct OfflinePeeView: View {
         }
         .task { model.refresh() }
         .onChange(of: sleep.completion) { _ in model.refresh() }
+        .onChange(of: wakes.completion) { _ in model.refresh() }
     }
     private var sheetRoute: OfflineSheetRoute? {
+        if wakes.details != nil { return .wakeObservations }
         if sleep.editor != nil { return .sleep }
         if model.editor != nil { return .ordinary }
         return catalog.isPresented ? .catalog : nil
     }
     private func dismissSheet() {
         switch sheetRoute {
+        case .wakeObservations: wakes.close()
         case .sleep: sleep.close()
         case .ordinary: model.closeEditor()
         case .catalog: catalog.close()
@@ -114,7 +124,7 @@ public struct OfflinePeeView: View {
             Button("记录醒来") { openSleep(waking: true) }
                 .accessibilityIdentifier("offline.sleep.wake")
                 .disabled(model.latestOpenSleepClientUUID == nil)
-        }.disabled(model.busy || model.selected == nil || sheetRoute != nil || sleep.busy)
+        }.disabled(model.busy || model.selected == nil || sheetRoute != nil || sleep.busy || wakes.busy)
     }
     private func openCompletedSleep() {
         guard sheetRoute == nil, !model.busy, let context = model.selected,
@@ -127,6 +137,12 @@ public struct OfflinePeeView: View {
               let baby = model.babies.first(where: { $0.clientUUID == context.babyClientUUID }) else { return }
         sleep.openEdit(sleep: projection, context: context, babyName: baby.nickname,
                        completed: completed, localActorUUID: actor)
+    }
+    private func openObservations(_ projection: OfflineSleep) {
+        guard sheetRoute == nil, !model.busy, let context = model.selected,
+              let actor = model.localActorUUID,
+              let baby = model.babies.first(where: { $0.clientUUID == context.babyClientUUID }) else { return }
+        wakes.open(sleep: projection, context: context, babyName: baby.nickname, localActorUUID: actor)
     }
     private func openSleep(waking: Bool) {
         guard sheetRoute == nil, !model.busy, let context = model.selected,
@@ -187,9 +203,9 @@ public struct OfflinePeeView: View {
                     }
                     if let projection = model.sleeps[record.clientUUID], OfflineSleepState.supports(projection),
                        let actor = model.localActorUUID {
-                        OfflineSleepRecordActions(sleep: projection, localActorUUID: actor) { completed in
+                        OfflineSleepRecordActions(sleep: projection, localActorUUID: actor, onEdit: { completed in
                             editSleep(projection, completed: completed)
-                        }.disabled(model.busy)
+                        }, onObservations: { openObservations(projection) }).disabled(model.busy)
                     } else if OfflinePeeState.canEdit(record) {
                         Button("编辑\(OfflineRecordKind(rawValue: record.rawType)?.label ?? "记录")") { model.openEditor(record: record, milkStep: storedMilkStep) }
                             .disabled(model.busy)

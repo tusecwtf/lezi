@@ -27,10 +27,10 @@ concurrency:
 jobs:
   contracts:
     runs-on: macos-15
-    # Full Simulator interaction coverage now includes twelve independent record flows.
-    # Seven serial flows previously took 24.2 min; allow twelve plus build/boot variance.
+    # Full Simulator interaction coverage now includes thirteen independent record flows.
+    # Twelve serial flows took 46.8 min; allow thirteen plus build/boot variance.
     # The two-clone run stalled its second runner startup; avoid local fan-out.
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v5
       - name: Record exact source and Apple toolchain
@@ -120,7 +120,7 @@ jobs:
           # Explicit CLI override keeps the full scheme on one Simulator despite
           # the scheme parallelizable flag. No test filters, skips, or retries.
           # This post-test image is only smoke evidence; use per-case xcresult
-          # outcomes to verify all twelve acceptance flows executed exactly once.
+          # outcomes to verify all thirteen acceptance flows executed exactly once.
           xcrun simctl launch --terminate-running-process "$SIMULATOR_UDID" com.lezi.babylog.ios.dev
           sleep 2
           xcrun simctl io "$SIMULATOR_UDID" screenshot "$RUNNER_TEMP/lezi-ios-evidence/base-simulator-smoke-after-tests.png"
@@ -140,6 +140,6 @@ jobs:
           {
             echo 'Portable tests, iOS SDK libraries, unsigned development build, first launch and bounded offline UI acceptance.'
             echo 'The app supports bounded offline baby and record flows, not full LEZI feature or synchronization parity.'
-            echo 'UI acceptance covers twelve synthetic record flows including validation, editing, deletion isolation and relaunch persistence; inspect each xcresult outcome.'
+            echo 'UI acceptance covers thirteen synthetic record flows including validation, editing, deletion isolation and relaunch persistence; inspect each xcresult outcome.'
             echo 'No mixed-client server proof, signing, real-family operation or physical-device acceptance is implied.'
           } >> "$GITHUB_STEP_SUMMARY"
