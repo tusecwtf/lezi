@@ -276,19 +276,24 @@ The full Linux suite passed 333 tests (81 storage, 129 portable presentation,
 IR for the profile view's optional-String actor-method binding thunk. No Apple
 package tests or Simulator stages ran. The four profile binding setters now use
 explicit closures with unchanged values, optional nil handling and model calls.
-On `dfbfd657`, Apple [39414027426](https://github.com/tusecwtf/lezi/actions/runs/39414027426)
+On `6d635db2`, Apple [39422202959](https://github.com/tusecwtf/lezi/actions/runs/39422202959)
 passed all 377 package tests, Simulator SDK compilation, the unsigned app build
 and clean smoke launch. The unfiltered Simulator suite executed all fifteen
-cases once: the preceding fourteen passed, but the new profile case failed at
-its initial birthday read, before edits. Retained native accessibility evidence
-shows the date-only button's exact Gregorian date in its **value**, with label
-“日期选择器”; the test incorrectly parsed the label. The pending test-only repair
-uses the exact date value for initial read, readback and opening the calendar,
-with a single-date uniqueness check. No profile tail acceptance is claimed yet.
-Android [39414027442](https://github.com/tusecwtf/lezi/actions/runs/39414027442)
+cases once: the new profile case passed its complete cancellation, validation,
+four-field edit, relaunch, optional-clearing and identity-isolation flow. Retained
+screenshots and accessibility trees confirm the four saved values and subsequent
+clearing after relaunch. The native date-only picker repair uses its exact date
+**value**, not its generic “日期选择器” label.
+
+The suite is not green: completed-sleep failed at its existing history viewport
+assertion. Retained geometry shows a 23.67-point drag moved content only 6 points,
+leaving the edit button clipped by 1.67 points. The pending test-helper repair
+uses bounded, remeasured padding-track scrolls with minimum gesture travel;
+strict full-viewport and hittability assertions remain unchanged. All fifteen
+test bodies and app code are unchanged by this helper repair. All fifteen cases
+remain required on the repaired head, with no filtering, skipping or test retry.
+Android [39422203090](https://github.com/tusecwtf/lezi/actions/runs/39422203090)
 passed 5,910 tests across 816 XML reports, with zero failures/errors/skips.
-All fifteen Simulator cases remain required on the repaired head. The prior
-fourteen test bodies and shared helpers are unchanged.
 The complete serial workflow has a 90-minute budget because the prior fourteen
 UI flows alone took 59.4 minutes, excluding build/boot. No filter/skip/retry added.
 

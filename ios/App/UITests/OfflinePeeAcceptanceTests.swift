@@ -2404,9 +2404,10 @@ class OfflineAcceptanceSupport: XCTestCase {
         waitFor(element, "exists == true AND enabled == true")
         let scroll = app.scrollViews.containing(.button, identifier: "offline.records.reload").firstMatch
         waitFor(scroll, "exists == true")
-        let viewport = scroll.frame.intersection(app.frame)
-        let target = element.frame
-        if target.minY < viewport.minY || target.maxY > viewport.maxY {
+        for attempt in 0..<5 {
+            let viewport = scroll.frame.intersection(app.frame)
+            let target = element.frame
+            if target.minY >= viewport.minY && target.maxY <= viewport.maxY { break }
             // Both a lower row edit and the top-level new button can be
             // outside the retained scroll position. Derive the safe track from
             // actual row padding: the new button itself is flush with the edge.
@@ -2424,11 +2425,16 @@ class OfflineAcceptanceSupport: XCTestCase {
             }
             let up = target.maxY > viewport.maxY
             let needed = up ? target.maxY - viewport.maxY : viewport.minY - target.minY
-            let distance = min(needed + 16, viewport.height - 32)
+            // Native drag recognition consumes part of a short gesture. In
+            // run 39422202959, 23.67 points of travel moved content only 6,
+            // leaving the completed-sleep edit button clipped by 1.67 points.
+            // Cross that threshold, then remeasure instead of assuming travel
+            // equals scroll offset. Never relax the full-viewport assertion.
+            let distance = min(max(needed + 32, 64), viewport.height - 32)
             let x = viewport.minX + padding / 2
             let startY = up ? viewport.maxY - 16 : viewport.minY + 16
             let endY = startY + (up ? -distance : distance)
-            print("History reveal \(element.identifier): target=\(target), viewport=\(viewport), drag=(\(x), \(startY)) -> (\(x), \(endY))")
+            print("History reveal \(element.identifier) attempt \(attempt + 1): target=\(target), viewport=\(viewport), drag=(\(x), \(startY)) -> (\(x), \(endY))")
             let origin = scroll.coordinate(withNormalizedOffset: .zero)
             origin.withOffset(CGVector(dx: x - scroll.frame.minX, dy: startY - scroll.frame.minY))
                 .press(forDuration: 0.1,
