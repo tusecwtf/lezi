@@ -7,22 +7,54 @@ import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.domain.carelog.CareAggregation
 import com.lezi.babylog.domain.carelog.toProjectedSleepRecord
 import com.lezi.babylog.domain.toModel
+import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
 import kotlinx.coroutines.test.runTest
-import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 /**
  * recentCareSummary is a bounded read (today's window + newest-root fallback);
  * every scenario asserts byte equality against a full-history projection scan
  * fed through the same aggregation, so the bound can never change widget
- * output. Timestamps anchor to the real clock near today's boundaries.
+ * output. Fixtures place one real-clock sample in a local noon hour, keeping
+ * today's boundary scenarios valid at every UTC hour without skipping them.
+ * The clock is not frozen: open-sleep whole-minute equality still assumes
+ * the production query finishes within a minute of the fixture sample.
  */
 class CareLogWidgetSummaryBoundedTest {
 
-    private val zone = ZoneOffset.UTC
     private val hour = 3_600_000L
+
+    private data class SummaryTimeFixture(
+        val now: Long,
+        val zone: ZoneOffset,
+        val dayStart: Long,
+    )
+
+    private fun middayFixture(now: Long = System.currentTimeMillis()): SummaryTimeFixture {
+        val instant = Instant.ofEpochMilli(now)
+        // UTC hours 0..23 map to offsets +12..-11, all inside the legal +/-18.
+        val zone = ZoneOffset.ofHours(12 - instant.atOffset(ZoneOffset.UTC).hour)
+        val dayStart = instant.atOffset(zone).toLocalDate()
+            .atStartOfDay(zone).toInstant().toEpochMilli()
+        return SummaryTimeFixture(now, zone, dayStart)
+    }
+
+    @Test
+    fun middayFixtureKeepsEveryUtcHourInsideTheSameLocalNoonWindow() {
+        for (utcHour in 0..23) {
+            val now = LocalDate.of(2026, 12, 31).atTime(utcHour, 59, 59)
+                .toInstant(ZoneOffset.UTC).toEpochMilli() + 999
+            val fixture = middayFixture(now)
+
+            assertThat(fixture.now).isEqualTo(now)
+            assertThat(fixture.zone.totalSeconds).isAtLeast(-18 * 3_600)
+            assertThat(fixture.zone.totalSeconds).isAtMost(18 * 3_600)
+            assertThat(Instant.ofEpochMilli(now).atOffset(fixture.zone).hour).isEqualTo(12)
+            assertThat(now - fixture.dayStart).isEqualTo(13 * hour - 1)
+        }
+    }
 
     private fun projectedRecord(entity: ProjectedRecordEntity): Record =
         entity.sleepInterval?.let { entity.root.toProjectedSleepRecord(it) } ?: entity.root.toModel()
@@ -31,6 +63,7 @@ class CareLogWidgetSummaryBoundedTest {
         fakes: Fakes,
         babyId: Long,
         now: Long,
+        zone: ZoneOffset,
         hidden: Set<String> = emptySet(),
     ) = CareAggregation.widget(
         records = fakes.timelineWindow
@@ -38,16 +71,14 @@ class CareLogWidgetSummaryBoundedTest {
             .map(::projectedRecord)
             .filter { it.clientUuid !in hidden },
         babyName = "豆豆",
-        date = LocalDate.now(zone),
+        date = Instant.ofEpochMilli(now).atOffset(zone).toLocalDate(),
         zone = zone,
         now = now,
     )
 
     @Test
     fun boundedSummaryMatchesFullScanWithCrossMidnightSleepAndDeepHistory() = runTest {
-        val now = System.currentTimeMillis()
-        val dayStart = LocalDate.now(zone).atStartOfDay(zone).toInstant().toEpochMilli()
-        assumeTrue(now - dayStart > 2 * hour)
+        val (now, zone, dayStart) = middayFixture()
         val fakes = Fakes()
         val care = fakes.careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
@@ -82,7 +113,7 @@ class CareLogWidgetSummaryBoundedTest {
 
         val actual = care.recentCareSummary(babyId, zone)
 
-        assertThat(actual).isEqualTo(fullScanReference(fakes, babyId, now))
+        assertThat(actual).isEqualTo(fullScanReference(fakes, babyId, now, zone))
         // Cross-midnight sleep contributes only today's part of the interval.
         assertThat(actual.sleepMin).isEqualTo(((now - 5 * 60_000L - dayStart) / 60_000L).toInt())
         // Only today's feed counts; the newest fact is today's formula.
@@ -93,9 +124,7 @@ class CareLogWidgetSummaryBoundedTest {
 
     @Test
     fun preDayPointFactNewerThanRiderSleepWinsLatestLabel() = runTest {
-        val now = System.currentTimeMillis()
-        val dayStart = LocalDate.now(zone).atStartOfDay(zone).toInstant().toEpochMilli()
-        assumeTrue(now - dayStart > 2 * hour)
+        val (now, zone, dayStart) = middayFixture()
         val fakes = Fakes()
         val care = fakes.careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
@@ -116,7 +145,7 @@ class CareLogWidgetSummaryBoundedTest {
 
         val actual = care.recentCareSummary(babyId, zone)
 
-        assertThat(actual).isEqualTo(fullScanReference(fakes, babyId, now))
+        assertThat(actual).isEqualTo(fullScanReference(fakes, babyId, now, zone))
         assertThat(actual.lastLabel).contains("70ml")
         // The rider sleep still contributes today's two hours.
         assertThat(actual.sleepMin).isEqualTo(2 * 60)
@@ -124,8 +153,7 @@ class CareLogWidgetSummaryBoundedTest {
 
     @Test
     fun quietDayFallsBackToPreDayLatestRecord() = runTest {
-        val now = System.currentTimeMillis()
-        val dayStart = LocalDate.now(zone).atStartOfDay(zone).toInstant().toEpochMilli()
+        val (now, zone, dayStart) = middayFixture()
         val fakes = Fakes()
         val care = fakes.careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
@@ -143,7 +171,7 @@ class CareLogWidgetSummaryBoundedTest {
 
         val actual = care.recentCareSummary(babyId, zone)
 
-        assertThat(actual).isEqualTo(fullScanReference(fakes, babyId, now))
+        assertThat(actual).isEqualTo(fullScanReference(fakes, babyId, now, zone))
         assertThat(actual.sleepMin).isEqualTo(0)
         assertThat(actual.feedMl).isEqualTo(0)
         // The widget keeps showing the last fact even with nothing today.
@@ -152,8 +180,7 @@ class CareLogWidgetSummaryBoundedTest {
 
     @Test
     fun hiddenLatestFallsThroughToNextNewestPreDayRecord() = runTest {
-        val now = System.currentTimeMillis()
-        val dayStart = LocalDate.now(zone).atStartOfDay(zone).toInstant().toEpochMilli()
+        val (now, zone, dayStart) = middayFixture()
         val fakes = Fakes()
         val care = fakes.careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
@@ -191,15 +218,13 @@ class CareLogWidgetSummaryBoundedTest {
         )
         val actual = queries.recentCareSummary(babyId, zone, hidden)
 
-        assertThat(actual).isEqualTo(fullScanReference(fakes, babyId, now, hidden))
+        assertThat(actual).isEqualTo(fullScanReference(fakes, babyId, now, zone, hidden))
         assertThat(actual.lastLabel).contains("10ml")
     }
 
     @Test
     fun openSleepPeerArbitrationMatchesFullScan() = runTest {
-        val now = System.currentTimeMillis()
-        val dayStart = LocalDate.now(zone).atStartOfDay(zone).toInstant().toEpochMilli()
-        assumeTrue(now - dayStart > 2 * hour)
+        val (now, zone, dayStart) = middayFixture()
         val fakes = Fakes()
         val care = fakes.careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
@@ -239,7 +264,7 @@ class CareLogWidgetSummaryBoundedTest {
 
         val actual = care.recentCareSummary(babyId, zone)
 
-        assertThat(actual).isEqualTo(fullScanReference(fakes, babyId, now))
+        assertThat(actual).isEqualTo(fullScanReference(fakes, babyId, now, zone))
         assertThat(actual.feedMl).isEqualTo(50)
     }
 }

@@ -3,13 +3,13 @@ import com.lezi.babylog.core.model.DeviceLayoutSnapshot
 import java.time.LocalDate
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -25,57 +25,110 @@ import com.lezi.babylog.feature.log.photo.*
  * simulated composition drop still advances AwaitingOriginal → Available and
  * Restoring → Idle/RestoreFailed, and applies restored prefs on success.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class LayoutUndoWriteTrackerTest {
     @Test
-    fun originalWriteCompletionSurvivesSimulatedCompositionDropToAvailable() = runBlocking {
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val undo = LayoutUndoSessionStore(nowMs = { 1_000L }, offerDurationMs = 4_000L)
-        val edit = LayoutEditSessionStore()
-        val before = prefs("pee")
-        val after = prefs("")
-        openEditor(edit, before)
+    fun originalWriteCompletionSurvivesSimulatedCompositionDropToAvailable() = runTest {
+        val scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
+        try {
+            val undo = LayoutUndoSessionStore(nowMs = { 1_000L }, offerDurationMs = 4_000L)
+            val edit = LayoutEditSessionStore()
+            val before = prefs("pee")
+            val after = prefs("")
+            openEditor(edit, before)
 
-        val release = CompletableDeferred<Unit>()
-        val tracker = LayoutUndoWriteTracker(
-            scope = scope,
-            undoSessions = undo,
-            editSessions = edit,
-            submitSnapshot = { snapshot ->
-                val result = CompletableDeferred<Result<Unit>>()
-                scope.launch {
-                    release.await()
-                    result.complete(Result.success(Unit))
-                }
-                DeviceLayoutWriteReceipt(
-                    sequence = 1L,
-                    snapshot = snapshot,
-                    result = result,
-                )
-            },
-        )
+            val release = CompletableDeferred<Unit>()
+            val tracker = LayoutUndoWriteTracker(
+                scope = scope,
+                undoSessions = undo,
+                editSessions = edit,
+                submitSnapshot = { snapshot ->
+                    val result = CompletableDeferred<Result<Unit>>()
+                    scope.launch {
+                        release.await()
+                        result.complete(Result.success(Unit))
+                    }
+                    DeviceLayoutWriteReceipt(
+                        sequence = 1L,
+                        snapshot = snapshot,
+                        result = result,
+                    )
+                },
+            )
 
-        val write = tracker.applyLayoutEditIntent(
-            intent = LayoutEditIntent.ClearSlot(0),
-            knownKeys = setOf("pee", "sleep", "poop", "bath"),
-        )
-        requireNotNull(write)
-        assertTrue(undo.current.state is LayoutUndoState.AwaitingOriginal)
+            val write = tracker.applyLayoutEditIntent(
+                intent = LayoutEditIntent.ClearSlot(0),
+                knownKeys = setOf("pee", "sleep", "poop", "bath"),
+            )
+            requireNotNull(write)
+            assertTrue(undo.current.state is LayoutUndoState.AwaitingOriginal)
 
-        // "Composition dropped" — only the tracker scope remains.
-        release.complete(Unit)
-        awaitState(undo) { it is LayoutUndoState.Available }
+            // "Composition dropped" — only the tracker scope remains.
+            release.complete(Unit)
+            advanceUntilIdle()
+            assertTrue(undo.current.state is LayoutUndoState.Available)
 
-        val available = undo.current.state as LayoutUndoState.Available
-        assertEquals(after.toSnapshot(), available.candidate.after)
-        assertEquals(5_000L, undo.current.offerExpiresAtEpochMs)
-        assertEquals(after, edit.current?.prefs)
-        scope.cancel()
+            val available = undo.current.state as LayoutUndoState.Available
+            assertEquals(after.toSnapshot(), available.candidate.after)
+            assertEquals(5_000L, undo.current.offerExpiresAtEpochMs)
+            assertEquals(after, edit.current?.prefs)
+        } finally {
+            scope.cancel()
+        }
     }
 
     @Test
     fun undoWriteFailureSurvivesCompositionDropAsRestoreFailedWithoutApplyingBefore() =
-        runBlocking {
-            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        runTest {
+            val scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
+            try {
+                val undo = LayoutUndoSessionStore(nowMs = { 0L })
+                val edit = LayoutEditSessionStore()
+                val before = prefs("pee")
+                val after = prefs("")
+                openEditor(edit, after)
+                seedAvailable(undo, before.toSnapshot(), after.toSnapshot())
+
+                val release = CompletableDeferred<Unit>()
+                val tracker = LayoutUndoWriteTracker(
+                    scope = scope,
+                    undoSessions = undo,
+                    editSessions = edit,
+                    submitSnapshot = { snapshot ->
+                        val result = CompletableDeferred<Result<Unit>>()
+                        scope.launch {
+                            release.await()
+                            result.complete(Result.failure(IllegalStateException("persist failed")))
+                        }
+                        DeviceLayoutWriteReceipt(
+                            sequence = 1L,
+                            snapshot = snapshot,
+                            result = result,
+                        )
+                    },
+                )
+
+                undo.setExitFlushInProgress(true)
+                assertTrue(tracker.requestLayoutUndo(token = 1L))
+                assertTrue(undo.current.state is LayoutUndoState.Restoring)
+
+                // Simulated recreation mid-restore: composition gone, scope retained.
+                release.complete(Unit)
+                advanceUntilIdle()
+                assertTrue(undo.current.state is LayoutUndoState.RestoreFailed)
+
+                assertFalse(undo.current.exitFlushInProgress)
+                assertEquals(after, edit.current?.prefs)
+                assertEquals(1L, (undo.current.state as LayoutUndoState.RestoreFailed).candidate.token)
+            } finally {
+                scope.cancel()
+            }
+        }
+
+    @Test
+    fun undoWriteSuccessAppliesRestoredPrefsAndClearsExitBusy() = runTest {
+        val scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
+        try {
             val undo = LayoutUndoSessionStore(nowMs = { 0L })
             val edit = LayoutEditSessionStore()
             val before = prefs("pee")
@@ -92,7 +145,7 @@ class LayoutUndoWriteTrackerTest {
                     val result = CompletableDeferred<Result<Unit>>()
                     scope.launch {
                         release.await()
-                        result.complete(Result.failure(IllegalStateException("persist failed")))
+                        result.complete(Result.success(Unit))
                     }
                     DeviceLayoutWriteReceipt(
                         sequence = 1L,
@@ -103,59 +156,21 @@ class LayoutUndoWriteTrackerTest {
             )
 
             undo.setExitFlushInProgress(true)
+            undo.setExitAfterLayoutRetry(true)
             assertTrue(tracker.requestLayoutUndo(token = 1L))
-            assertTrue(undo.current.state is LayoutUndoState.Restoring)
-
-            // Simulated recreation mid-restore: composition gone, scope retained.
             release.complete(Unit)
-            awaitState(undo) { it is LayoutUndoState.RestoreFailed }
+            // Idle is published before the callback updates prefs and exit-busy state.
+            // Drain the shared scheduler so all completion side effects finish first.
+            advanceUntilIdle()
+            assertTrue(undo.current.state is LayoutUndoState.Idle)
 
+            assertEquals(before, edit.current?.prefs)
+            assertEquals("布局已撤销", undo.consumeAnnouncement())
             assertFalse(undo.current.exitFlushInProgress)
-            assertEquals(after, edit.current?.prefs)
-            assertEquals(1L, (undo.current.state as LayoutUndoState.RestoreFailed).candidate.token)
+            assertTrue(undo.current.exitAfterLayoutRetry)
+        } finally {
             scope.cancel()
         }
-
-    @Test
-    fun undoWriteSuccessAppliesRestoredPrefsAndClearsExitBusy() = runBlocking {
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val undo = LayoutUndoSessionStore(nowMs = { 0L })
-        val edit = LayoutEditSessionStore()
-        val before = prefs("pee")
-        val after = prefs("")
-        openEditor(edit, after)
-        seedAvailable(undo, before.toSnapshot(), after.toSnapshot())
-
-        val release = CompletableDeferred<Unit>()
-        val tracker = LayoutUndoWriteTracker(
-            scope = scope,
-            undoSessions = undo,
-            editSessions = edit,
-            submitSnapshot = { snapshot ->
-                val result = CompletableDeferred<Result<Unit>>()
-                scope.launch {
-                    release.await()
-                    result.complete(Result.success(Unit))
-                }
-                DeviceLayoutWriteReceipt(
-                    sequence = 1L,
-                    snapshot = snapshot,
-                    result = result,
-                )
-            },
-        )
-
-        undo.setExitFlushInProgress(true)
-        undo.setExitAfterLayoutRetry(true)
-        assertTrue(tracker.requestLayoutUndo(token = 1L))
-        release.complete(Unit)
-        awaitState(undo) { it is LayoutUndoState.Idle }
-
-        assertEquals(before, edit.current?.prefs)
-        assertEquals("布局已撤销", undo.consumeAnnouncement())
-        assertFalse(undo.current.exitFlushInProgress)
-        assertTrue(undo.current.exitAfterLayoutRetry)
-        scope.cancel()
     }
 
     @Test
@@ -179,17 +194,6 @@ class LayoutUndoWriteTrackerTest {
         seedAvailable(undo, prefs("pee").toSnapshot(), prefs("").toSnapshot())
         now = 12_000L
         assertEquals(2_000L, tracker.remainingOfferMs())
-    }
-
-    private suspend fun awaitState(
-        undo: LayoutUndoSessionStore,
-        predicate: (LayoutUndoState) -> Boolean,
-    ) {
-        withTimeout(5_000L) {
-            while (!predicate(undo.current.state)) {
-                delay(10L)
-            }
-        }
     }
 
     private fun openEditor(edit: LayoutEditSessionStore, prefs: DeviceLayoutPrefs) {
