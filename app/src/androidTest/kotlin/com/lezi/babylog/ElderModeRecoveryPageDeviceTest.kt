@@ -10,18 +10,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.height
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.google.common.truth.Truth.assertWithMessage
 import com.lezi.babylog.core.common.LocalDataUpgradeBlockReason
 import com.lezi.babylog.core.common.LocalDataUpgradeState
 import com.lezi.babylog.designsystem.LeziDeviceViewports
 import com.lezi.babylog.designsystem.LeziTheme
-import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -32,8 +31,9 @@ class ElderModeRecoveryPageDeviceTest {
     val compose = createComposeRule()
 
     @Test
-    fun elderRecoveryPageFits720pTo4k() {
+    fun elderCredentialRecoveryActionsAreScrollReachableAndCancellableAcrossViewports() {
         var viewport by mutableStateOf(LeziDeviceViewports.styled().first())
+        var clearCount = 0
         compose.setContent {
             val current = viewport
             CompositionLocalProvider(LocalDensity provides current.density) {
@@ -46,12 +46,12 @@ class ElderModeRecoveryPageDeviceTest {
                     ) {
                         LocalDataUpgradeScreen(
                             state = LocalDataUpgradeState.Blocked(
-                                reason = LocalDataUpgradeBlockReason.InconsistentData,
-                                detail = "checksum",
+                                reason = LocalDataUpgradeBlockReason.CredentialsUnavailable,
+                                detail = "java.io.IOException: disk full at /data/user/0/com.lezi.babylog",
                             ),
                             onRetry = {},
                             onShareDiagnostics = {},
-                            onClearApplicationData = {},
+                            onClearApplicationData = { clearCount += 1 },
                         )
                     }
                 }
@@ -61,10 +61,22 @@ class ElderModeRecoveryPageDeviceTest {
         LeziDeviceViewports.styled().forEach { next ->
             compose.runOnIdle { viewport = next }
             compose.waitForIdle()
-            val page = compose.onNodeWithTag("elder_recovery_page").getUnclippedBoundsInRoot()
-            assertTrue("${next.name} recovery collapsed: $page", page.height >= 48.dp)
-            compose.onNodeWithText("本地数据状态不一致").assertExists()
-            compose.onNodeWithText("重试安全检查").assertExists()
+
+            // The long device-switch body must scroll every action into a
+            // clickable position, from 720p elder-l1 up to 4K elder-l3.
+            compose.onNodeWithTag("local_data_recovery_clear")
+                .performScrollTo()
+                .performClick()
+            compose.onNodeWithTag("local_data_recovery_clear_continue").performClick()
+            compose.onNodeWithTag("local_data_recovery_clear_cancel").performClick()
+
+            // Cancelling either confirmation layer must never trigger the clear.
+            assertWithMessage(next.name).that(clearCount).isEqualTo(0)
         }
+
+        // The hostile verification detail never appears on any styled surface.
+        compose.onNodeWithText("disk full", substring = true).assertDoesNotExist()
+        assertWithMessage("clear must stay unreachable without double confirmation")
+            .that(clearCount).isEqualTo(0)
     }
 }

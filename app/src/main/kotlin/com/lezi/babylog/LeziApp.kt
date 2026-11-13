@@ -39,7 +39,15 @@ class LeziApp : Application(), DefaultLifecycleObserver, Configuration.Provider 
     private val persistentStartupStarted = AtomicBoolean(false)
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
-            if (foregroundState.isForeground()) syncPort.get().notifyNetworkRecovered()
+            // The callback thread must stay non-blocking, and SyncPort must never
+            // be constructed before the local-data gate verified persistence.
+            applicationScope.launch(Dispatchers.IO) {
+                notifyNetworkRecoveryWhenReady(
+                    gate = localDataGate,
+                    isForeground = foregroundState::isForeground,
+                    notify = { syncPort.get().notifyNetworkRecovered() },
+                )
+            }
         }
     }
     private var networkCallbackRegistered = false
@@ -119,4 +127,21 @@ class LeziApp : Application(), DefaultLifecycleObserver, Configuration.Provider 
         }
         foregroundState.setForeground(false)
     }
+}
+
+/**
+ * Notifies sync of network recovery only after the local-data gate verified
+ * persistence, and only while the process is still foregrounded: unverified
+ * data must never reach the sync stack, and a recovery that lands while the
+ * app is backgrounded loses its foreground-sync justification.
+ */
+internal suspend fun notifyNetworkRecoveryWhenReady(
+    gate: DefaultLocalDataGate,
+    isForeground: () -> Boolean,
+    notify: () -> Unit,
+) {
+    if (!isForeground()) return
+    if (!gate.ensureReady()) return
+    if (!isForeground()) return
+    notify()
 }

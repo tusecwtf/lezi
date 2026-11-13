@@ -1,9 +1,11 @@
 package com.lezi.babylog
 
 import android.content.Context
-import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.google.common.truth.Truth.assertThat
@@ -99,25 +101,53 @@ class LocalDataUpgradeDeviceTest {
     }
 
     @Test
-    fun blockedStateShowsStableRecoverySurface() {
+    fun credentialBlockedRecoveryGuardsClearBehindDoubleConfirmation() {
+        var retryCount = 0
+        var diagnosticsCount = 0
+        var clearCount = 0
         composeRule.setContent {
             LeziTheme {
                 LocalDataUpgradeScreen(
                     state = LocalDataUpgradeState.Blocked(
-                        reason = LocalDataUpgradeBlockReason.UnsupportedLegacy,
-                        detail = "contract=0,room=17",
+                        reason = LocalDataUpgradeBlockReason.CredentialsUnavailable,
+                        detail = "java.io.IOException: disk full at /data/user/0/com.lezi.babylog",
                     ),
-                    onRetry = {},
-                    onShareDiagnostics = {},
-                    onClearApplicationData = {},
+                    onRetry = { retryCount += 1 },
+                    onShareDiagnostics = { diagnosticsCount += 1 },
+                    onClearApplicationData = { clearCount += 1 },
                 )
             }
         }
 
-        composeRule.onNodeWithText("此本地数据版本过旧").assertIsDisplayed()
-        composeRule.onNodeWithText("重试安全检查").assertIsDisplayed()
-        composeRule.onNodeWithText("导出诊断").assertIsDisplayed()
-        composeRule.onNodeWithText("清除本机数据").assertIsDisplayed()
+        // The family-visible surface never echoes the raw verification failure.
+        composeRule.onNodeWithText("disk full", substring = true).assertDoesNotExist()
+
+        composeRule.onNodeWithTag("local_data_recovery_retry").performScrollTo().performClick()
+        composeRule.onNodeWithTag("local_data_recovery_export").performScrollTo().performClick()
+        composeRule.runOnIdle {
+            assertThat(retryCount).isEqualTo(1)
+            assertThat(diagnosticsCount).isEqualTo(1)
+            assertThat(clearCount).isEqualTo(0)
+        }
+
+        // First-layer entry then cancel never clears.
+        composeRule.onNodeWithTag("local_data_recovery_clear").performScrollTo().performClick()
+        composeRule.onNodeWithTag("local_data_recovery_clear_continue").performClick()
+        composeRule.onNodeWithTag("local_data_recovery_clear_cancel").performClick()
+        composeRule.runOnIdle { assertThat(clearCount).isEqualTo(0) }
+
+        // Reaching the final layer and cancelling still never clears.
+        composeRule.onNodeWithTag("local_data_recovery_clear").performScrollTo().performClick()
+        composeRule.onNodeWithTag("local_data_recovery_clear_continue").performClick()
+        composeRule.onNodeWithTag("local_data_recovery_clear_final").assertExists()
+        composeRule.onNodeWithTag("local_data_recovery_clear_cancel").performClick()
+        composeRule.runOnIdle { assertThat(clearCount).isEqualTo(0) }
+
+        // Only the completed double confirmation fires the clear callback once.
+        composeRule.onNodeWithTag("local_data_recovery_clear").performScrollTo().performClick()
+        composeRule.onNodeWithTag("local_data_recovery_clear_continue").performClick()
+        composeRule.onNodeWithTag("local_data_recovery_clear_final").performClick()
+        composeRule.runOnIdle { assertThat(clearCount).isEqualTo(1) }
     }
 
     private fun databaseWithVersion(version: Int): File {

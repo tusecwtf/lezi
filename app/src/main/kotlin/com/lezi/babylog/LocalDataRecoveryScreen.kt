@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -19,6 +21,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import com.lezi.babylog.core.common.LocalDataUpgradeBlockReason
 import com.lezi.babylog.core.common.LocalDataUpgradeState
 import com.lezi.babylog.designsystem.LeziAlertDialog
@@ -86,6 +89,24 @@ internal fun localDataRecoveryCopy(reason: LocalDataUpgradeBlockReason): LocalDa
                 body = explanation.body,
             )
         }
+        LocalDataUpgradeBlockReason.CredentialsUnavailable -> LocalDataRecoveryCopy(
+            title = "无法读取这台手机的家庭登录凭证",
+            body = "换机工具可能复制了登录文件，却无法带走与原手机绑定的加密密钥；" +
+                "本机密钥失效、凭据文件损坏或读取异常，也可能造成这个问题。" +
+                "乐记已暂停打开家庭数据，不会自动删除此手机上的记录、照片或登录凭证。\n\n" +
+                "如果你正在换新手机：\n" +
+                "1. 保留旧手机及其中的乐记。先不要卸载、清除数据或退出旧设备；" +
+                "在旧手机连接原家庭服务器，确认最近记录、照片和待同步内容都已同步。\n" +
+                "2. 新手机需要作为一台新设备重新加入原家庭，不能依赖换机工具复制登录状态。" +
+                "普通成员请联系家庭管理员批准或提供授权二维码；" +
+                "管理员使用原家庭的管理员登录方式，不要新建另一个家庭。\n" +
+                "3. 如果这台新手机已因换机迁移停在此页，只有确认它没有唯一的未同步内容、" +
+                "原家庭服务器上已有完整数据后，才可清除本机数据，再重新登录或申请加入原家庭。" +
+                "清除只影响此手机，不会删除家庭服务器或旧手机上的内容。\n\n" +
+                "旧手机无法使用、只在离线模式记录、家庭服务器暂时不可达，或不能确认数据完整时，" +
+                "请先导出诊断并保留现状，不要清除。导出诊断只是故障信息，不是记录或照片备份。" +
+                "重试安全检查不会找回原手机的加密密钥。",
+        )
     }
 
 @Composable
@@ -103,60 +124,78 @@ internal fun LocalDataUpgradeScreen(
         is LocalDataUpgradeState.Ready -> "本地数据已就绪"
         is LocalDataUpgradeState.Blocked -> null
     }
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(LeziSpacing.Xxl),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        // Loading ↔ blocked crossfade rides the Base tier (motion-polish ticket 03).
-        Crossfade(
-            targetState = blocked == null,
-            animationSpec = tween(durationMillis = leziMotionMillis(LeziMotion.Base)),
-            label = "localDataUpgradeState",
-        ) { inProgress ->
-            if (inProgress) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    CircularProgressIndicator()
+    // Loading ↔ blocked crossfade rides the Base tier (motion-polish ticket 03).
+    Crossfade(
+        targetState = blocked == null,
+        animationSpec = tween(durationMillis = leziMotionMillis(LeziMotion.Base)),
+        label = "localDataUpgradeState",
+        modifier = Modifier.fillMaxSize(),
+    ) { inProgress ->
+        if (inProgress) {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                CircularProgressIndicator()
+                Text(
+                    text = progressText.orEmpty(),
+                    modifier = Modifier.padding(top = LeziSpacing.Lg),
+                    style = LeziTypography.Body,
+                )
+            }
+        } else if (blocked != null) {
+            val copy = localDataRecoveryCopy(blocked.reason)
+            // The device-switch guide is long: flow top-down inside a single
+            // vertical scroller so every paragraph and action stays reachable
+            // from 720p elder layouts up to 4K.
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("local_data_recovery_scroll")
+                    .verticalScroll(rememberScrollState())
+                    .padding(LeziSpacing.Xxl),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    text = copy.title,
+                    style = LeziThemeExt.typography.Title,
+                    modifier = Modifier.testTag("local_data_recovery_title"),
+                )
+                Text(
+                    text = copy.body,
+                    modifier = Modifier
+                        .padding(top = LeziSpacing.Md)
+                        .testTag("local_data_recovery_body"),
+                    style = LeziTypography.Body,
+                )
+                localDataRecoverySecondaryDetail(blocked.reason, blocked.detail)?.let { detail ->
                     Text(
-                        text = progressText.orEmpty(),
-                        modifier = Modifier.padding(top = LeziSpacing.Lg),
-                        style = LeziTypography.Body,
+                        text = detail,
+                        modifier = Modifier.padding(top = LeziSpacing.Sm),
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-            } else if (blocked != null) {
-                val copy = localDataRecoveryCopy(blocked.reason)
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(text = copy.title, style = LeziThemeExt.typography.Title)
-                    Text(
-                        text = copy.body,
-                        modifier = Modifier.padding(top = LeziSpacing.Md),
-                        style = LeziTypography.Body,
-                    )
-                    localDataRecoverySecondaryDetail(blocked.reason, blocked.detail)?.let { detail ->
-                        Text(
-                            text = detail,
-                            modifier = Modifier.padding(top = LeziSpacing.Sm),
-                            style = LeziTypography.Meta,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    LeziPrimaryButton(
-                        label = "重试安全检查",
-                        onClick = onRetry,
-                        modifier = Modifier.padding(top = LeziSpacing.Xl),
-                    )
-                    LeziSecondaryButton(
-                        label = "导出诊断",
-                        onClick = onShareDiagnostics,
-                        modifier = Modifier.padding(top = LeziSpacing.Xs),
-                    )
-                    ClearApplicationDataButton(
-                        label = copy.resetLabel,
-                        onConfirmed = onClearApplicationData,
-                    )
-                }
+                LeziPrimaryButton(
+                    label = "重试安全检查",
+                    onClick = onRetry,
+                    modifier = Modifier
+                        .padding(top = LeziSpacing.Xl)
+                        .testTag("local_data_recovery_retry"),
+                )
+                LeziSecondaryButton(
+                    label = "导出诊断",
+                    onClick = onShareDiagnostics,
+                    modifier = Modifier
+                        .padding(top = LeziSpacing.Xs)
+                        .testTag("local_data_recovery_export"),
+                )
+                ClearApplicationDataButton(
+                    label = copy.resetLabel,
+                    reason = blocked.reason,
+                    onConfirmed = onClearApplicationData,
+                )
             }
         }
     }
@@ -165,13 +204,18 @@ internal fun LocalDataUpgradeScreen(
 @Composable
 private fun ClearApplicationDataButton(
     label: String,
+    reason: LocalDataUpgradeBlockReason,
     onConfirmed: () -> Unit,
 ) {
-    var confirmationStage by remember { mutableIntStateOf(0) }
+    // A different failure reason must never inherit another reason's
+    // confirmation progress.
+    var confirmationStage by remember(reason) { mutableIntStateOf(0) }
     LeziTextButton(
         label = label,
         onClick = { confirmationStage = 1 },
-        modifier = Modifier.padding(top = LeziSpacing.Xs),
+        modifier = Modifier
+            .padding(top = LeziSpacing.Xs)
+            .testTag("local_data_recovery_clear"),
         tone = LeziTextButtonTone.Destructive,
     )
     if (confirmationStage > 0) {
@@ -182,7 +226,12 @@ private fun ClearApplicationDataButton(
             text = {
                 Text(
                     if (finalConfirmation) {
-                        "此操作将永久删除本机记录、设置和登录凭证，且不能撤销。"
+                        "此操作将永久删除本机记录、照片、设置和登录凭证，且不能撤销。" +
+                            "不会删除家庭服务器或旧手机上的内容。"
+                    } else if (reason == LocalDataUpgradeBlockReason.CredentialsUnavailable) {
+                        "清除会永久删除此手机上的记录、照片、设置和登录凭证。" +
+                            "尚未同步到家庭服务器的内容可能无法找回。导出诊断不是数据备份。" +
+                            "只有确认服务器已有完整数据、此手机没有唯一内容后，才继续。"
                     } else {
                         "只有在你已经确认不再需要旧数据时才继续。下一步仍会再次确认。"
                     },
@@ -194,6 +243,13 @@ private fun ClearApplicationDataButton(
                     onClick = {
                         if (finalConfirmation) onConfirmed() else confirmationStage = 2
                     },
+                    modifier = Modifier.testTag(
+                        if (finalConfirmation) {
+                            "local_data_recovery_clear_final"
+                        } else {
+                            "local_data_recovery_clear_continue"
+                        },
+                    ),
                     tone = if (finalConfirmation) {
                         LeziTextButtonTone.Destructive
                     } else {
@@ -202,7 +258,11 @@ private fun ClearApplicationDataButton(
                 )
             },
             dismissButton = {
-                LeziTextButton(label = "取消", onClick = { confirmationStage = 0 })
+                LeziTextButton(
+                    label = "取消",
+                    onClick = { confirmationStage = 0 },
+                    modifier = Modifier.testTag("local_data_recovery_clear_cancel"),
+                )
             },
         )
     }

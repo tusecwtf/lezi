@@ -58,6 +58,7 @@ enum class LocalDataUpgradeBlockReason {
     MigrationFailed,
     VerificationFailed,
     TimedOut,
+    CredentialsUnavailable,
 }
 
 class LocalDataUpgradePlanner(

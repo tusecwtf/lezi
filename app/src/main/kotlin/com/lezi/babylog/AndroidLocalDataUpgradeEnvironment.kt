@@ -19,6 +19,7 @@ import java.util.Properties
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.CancellationException
 
 @Singleton
 internal class AndroidLocalDataUpgradeEnvironment internal constructor(
@@ -158,7 +159,22 @@ internal class AndroidLocalDataUpgradeEnvironment internal constructor(
         }
         settings.get().data.first()
         val securePreferences = storage.securePreferences
-        if (securePreferences.exists()) credentials.get().verifyReadable()
+        if (securePreferences.exists()) {
+            try {
+                credentials.get().verifyReadable()
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (failure: Exception) {
+                // Device-transfer copies the ciphertext prefs file but never the
+                // Keystore master key, so decryption fails on the new phone.
+                // Block with a fixed family-safe detail; the file itself stays.
+                throw LocalDataUpgradeFailure(
+                    LocalDataUpgradeBlockReason.CredentialsUnavailable,
+                    "家庭登录凭证无法读取",
+                    failure,
+                )
+            }
+        }
         val widgetPreferences = storage.widgetPreferences
         if (widgetPreferences.exists()) {
             context.getSharedPreferences(storage.widgetPreferencesName, Context.MODE_PRIVATE).all
